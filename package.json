@@ -8,8 +8,6 @@
     "build": "astro build && pagefind --site dist --output-subdir _pagefind",
     "preview": "astro preview",
     "astro": "astro",
-    "convert": "node scripts/convert-notes.mjs",
-    "convert:dsa": "python3 scripts/convert-dsa.py",
     "lint:notes": "node scripts/lint-notes.mjs"
   },
   "dependencies": {
