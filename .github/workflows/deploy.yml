@@ -1,8 +1,7 @@
 name: Deploy CrackThePrep to GitHub Pages
 
 # Builds the Astro site (base path /crack-the-prep) and publishes ./dist.
-# Pages is enabled automatically by configure-pages below; no manual
-# Settings → Pages step is needed.
+# One-time setup: Settings → Pages → Source = "GitHub Actions".
 
 on:
   push:
@@ -30,8 +29,6 @@ jobs:
           cache: npm
 
       - uses: actions/configure-pages@v5
-        with:
-          enablement: true
 
       - name: Build
         run: |
