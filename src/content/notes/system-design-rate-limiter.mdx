@@ -1,0 +1,112 @@
+---
+title: "System Design — Rate Limiter"
+track: "system-design"
+kind: "notes"
+order: 10
+slug: "rate-limiter"
+updated: 2026-09-11
+description: "Designing a rate limiter from requirements through GCRA and sliding-window-counter, distributed enforcement with Redis, and what happens when Redis dies."
+---
+
+import Callout from '../../components/Callout.astro';
+import Mermaid from '../../components/Mermaid.astro';
+
+Part of the [system design](/prep/system-design) series. See the [framework](/prep/system-design) and [building blocks](/prep/system-design/building-blocks) first if you haven't.
+
+## 1. Requirements
+
+**Functional**
+- Limit how many requests a client (user, API key, or IP) can make in a time window.
+- Apply different rules per endpoint/tier (e.g. `POST /login`: 5/min, `GET /search`: 100/min).
+- Tell the client it was throttled, ideally with when it can retry.
+
+**Non-functional**
+- Low added latency (single-digit ms) — it sits in front of every request.
+- Accurate enough, not perfectly exact — over-blocking a legitimate burst by a few requests is fine; a limiter that stalls the whole API is not.
+- Must work across many app servers behind a load balancer (a per-process counter is useless the moment you scale horizontally).
+- Must not become the outage — if the limiter's own dependency dies, the API should degrade, not disappear.
+
+## 2. Where it lives
+
+<Mermaid caption="Placement options" code={`flowchart LR
+  C[Client] --> GW["API Gateway / Edge<br/>(Cloudflare, Kong, Envoy)"]
+  GW --> LB[Load Balancer]
+  LB --> S1[App Server]
+  LB --> S2[App Server]
+  S1 --> RD[(Shared counter store<br/>Redis)]
+  S2 --> RD
+`} />
+
+- **Edge / gateway** — stops abusive traffic before it costs you anything (bandwidth, app CPU). This is where Cloudflare enforces its network-wide limits.
+- **Middleware in the app** — needed for business-logic-aware limits (per-user plan, per-API-key tier) that the edge doesn't know about.
+- Most production systems run **both**: a coarse edge limiter for DoS/abuse, a finer app-level limiter for business rules.
+
+## 3. Algorithms
+
+| Algorithm | Memory | Accuracy | Burst behavior | Used by |
+|---|---|---|---|---|
+| Fixed window | O(1) | Weak — up to 2x burst at window edge | Allows a burst at the boundary | Simple internal APIs |
+| Sliding log | O(requests) | Exact | None | Low-volume, high-precision needs |
+| Sliding window counter | O(1) | ~99.99% accurate in practice | Smooths the boundary burst | **Cloudflare** (default at their scale) |
+| Token bucket | O(1) | Exact, allows configurable bursts | Bursty by design (spend saved tokens) | **Stripe** (client-side limiter) |
+| GCRA (leaky-bucket variant) | O(1), one timestamp per key | Exact | Smooth, no burst | **Stripe**, **Vimeo**, Doorman-style systems |
+
+<Callout type="tip">
+Fixed window is the one to name and immediately reject in an interview: at 99 requests in the last second of window 1 and 99 in the first second of window 2, a client did 198 requests in one real second against a "100/sec" limit. Go straight to sliding window counter or GCRA and say why.
+</Callout>
+
+**GCRA in one paragraph**: instead of counting requests, track a single per-key timestamp — the "theoretical arrival time" (TAT) of the next request if traffic were perfectly smooth. Each request compares now to TAT: if `now >= TAT - burst_allowance`, allow it and push TAT forward by the cost of one request; otherwise reject. One integer per key, one comparison, no buckets to reset. This is why it's the production choice at companies that care about both accuracy and memory — Stripe and Vimeo both run GCRA-family limiters.
+
+## 4. Distributed enforcement
+
+A single Redis (or Redis Cluster) instance as shared state is the standard production pattern:
+
+- `INCR` + `EXPIRE`, or a **Lua script** that does check-and-increment atomically in one round trip — this is the part people get wrong: a naive GET-then-SET from the app has a race condition under concurrent requests from the same key. The Lua script runs entirely inside Redis, so it's atomic without a distributed lock.
+- Sub-5ms latency at the scale most systems need.
+- For GCRA specifically, the Redis script only needs to read/write one TAT value per key — this is what `redis-gcra`-style libraries do.
+
+<Mermaid caption="Request path with a Redis-backed limiter" code={`sequenceDiagram
+  participant Client
+  participant App as App Server
+  participant Redis
+  Client->>App: Request (key = user:123)
+  App->>Redis: EVAL rate_limit.lua(key, limit, window)
+  Redis-->>App: allow / deny + retry_after
+  alt allowed
+    App-->>Client: 200 + X-RateLimit-Remaining
+  else denied
+    App-->>Client: 429 + Retry-After
+  end
+`} />
+
+Return the [IETF `RateLimit-*` headers](https://www.ietf.org/archive/id/draft-ietf-httpapi-ratelimit-headers) (`RateLimit-Limit`, `RateLimit-Remaining`, `RateLimit-Reset`) plus `Retry-After` on a 429 — this is what Stripe, GitHub, and most public APIs standardized on, so clients can back off correctly instead of hammering you again immediately.
+
+## 5. What happens when Redis goes down
+
+This is the question interviewers love, because most candidates haven't thought about it.
+
+- **Fail closed** (reject everything if Redis is unreachable): you just turned your own rate limiter into a self-inflicted outage.
+- **Fail open** (allow everything if Redis is unreachable): safe for availability, but the moment Redis died *because of load*, you just removed the one thing protecting the DB from that load — right when it's needed most.
+- **What real systems do**: catch the Redis error at every layer so a limiter bug or outage never 5xx's the actual request — default to fail-open, but pair it with a **local, in-process fallback limiter** (a simple in-memory token bucket per app server) so there's still *some* ceiling during the outage, just a coarser, per-instance one instead of a precise global one.
+- **Google's Doorman** takes a more elegant approach for its use case: each instance enforces the **last-known** drop ratio pushed by a central controller, and keeps enforcing that stale ratio if the controller is unreachable — never fully open, never fully closed, degrading gracefully instead of binary-flipping.
+
+<Callout type="warn">
+The general pattern this generalizes to: for anything sitting in the critical path as a *protective* layer (rate limiter, feature flag store, auth cache), a dependency outage should degrade the precision of the protection, not remove the protection or block all traffic. Say this explicitly if asked "what if your cache/limiter/flag-store dies" for any system.
+</Callout>
+
+## 6. Scaling further
+
+- **Redis becomes the bottleneck** → shard by key (`hash(user_id) mod N` across a Redis Cluster) so no single node holds every key.
+- **Cross-region traffic** → don't ship every request to one global Redis; run a limiter per region with a coarser global budget synced asynchronously (this is close to what Doorman does — local enforcement, async coordination).
+- **Multi-tenant, wildly different limits per plan** → keep the algorithm generic, store `(limit, window)` per key's tier in a small config cache (or embed it in the JWT) so you're not doing a config lookup on every request.
+
+## Interview follow-ups
+
+- *"Fixed window vs sliding window — walk me through the boundary problem."* — Use the 99+99 example above with concrete numbers.
+- *"Where would you put this — client, gateway, or app server? Why not just one?"* — Edge for cheap abuse rejection, app layer for business-aware limits; most real systems run both.
+- *"Redis just went down. What happens to your API?"* — Fail-open + local in-memory fallback; explain the trade-off, don't just pick one.
+- *"How do you avoid a race condition when two requests for the same key hit different app servers at the same instant?"* — Atomicity has to live in the shared store (Lua script / `INCR`), not in app code.
+- *"10x traffic overnight. What's the first thing that breaks?"* — The shared Redis instance's connection count and CPU before the algorithm itself; shard it.
+- *"How would a client know it got rate-limited and when to retry, without guessing?"* — `RateLimit-*` headers + `Retry-After`.
+
+Sources: [Design a Distributed Rate Limiter — Hello Interview](https://www.hellointerview.com/learn/system-design/problem-breakdowns/distributed-rate-limiter) · [Rate Limiting, Cells, and GCRA — brandur.org](https://brandur.org/rate-limiting) · [Scaling your API with rate limiters — Stripe](https://stripe.com/blog/rate-limiters) · [Doorman design doc — YouTube/Google](https://github.com/youtube/doorman/blob/master/doc/design.md) · [Fail-Open vs Fail-Closed Middleware](https://nerdleveltech.com/fail-open-vs-fail-closed-hono-middleware-redis-tutorial)

@@ -1,0 +1,102 @@
+---
+title: "System Design — Web Crawler"
+track: "system-design"
+kind: "notes"
+order: 17
+slug: "web-crawler"
+updated: 2026-09-11
+description: "Designing a distributed web crawler — the URL frontier, politeness and dedupe, DNS and fetch scaling, and what happens when a crawl worker or the frontier's storage dies."
+---
+
+import Callout from '../../components/Callout.astro';
+import Mermaid from '../../components/Mermaid.astro';
+
+Part of the [system design](/prep/system-design) series. See the [framework](/prep/system-design) and [building blocks](/prep/system-design/building-blocks) first if you haven't.
+
+## 1. Requirements
+
+**Functional**
+- Given a set of seed URLs, discover and fetch pages, extract new links, and keep expanding the crawl frontier.
+- Respect `robots.txt` and per-site crawl-rate rules ("politeness") — this is not optional, it's how you stay allowed to crawl at all.
+- Avoid re-fetching the same URL repeatedly (dedupe) while still allowing scheduled re-crawls of pages that change.
+- Store fetched content somewhere downstream (indexer, data pipeline) can consume it.
+
+**Non-functional**
+- Scale to billions of URLs and thousands of pages per second in aggregate, across millions of distinct domains.
+- Be a **good citizen**: never overwhelm a single origin server, regardless of how large the overall crawl is — this constraint shapes almost every design decision more than raw throughput does.
+- Fault tolerant — a crawl running for days/weeks must survive individual worker crashes without losing frontier state or duplicating enormous amounts of work.
+- Extensible to different content types (HTML, PDFs, JS-rendered pages) without a rewrite.
+
+## 2. High-level architecture
+
+<Mermaid caption="Frontier-centric crawl loop" code={`flowchart TD
+  SEED[Seed URLs] --> FRONTIER[(URL Frontier<br/>priority + politeness queues)]
+  FRONTIER --> SCHED[Scheduler]
+  SCHED -->|respects per-host rate| W1[Fetch worker]
+  SCHED -->|respects per-host rate| W2[Fetch worker]
+  W1 --> DNS[DNS resolver cache]
+  W1 --> FETCH[HTTP fetch]
+  FETCH --> ROBOTS{robots.txt<br/>allowed?}
+  ROBOTS -- no --> DROP[Drop]
+  ROBOTS -- yes --> STORE[(Content store)]
+  FETCH --> PARSE[Link extractor]
+  PARSE --> DEDUPE{Seen URL<br/>fingerprint?}
+  DEDUPE -- yes --> DROP
+  DEDUPE -- no --> FRONTIER
+`} />
+
+The whole system is organized around one central structure — the **URL frontier** — because almost every hard requirement (politeness, priority, freshness, fairness across domains) is really a scheduling problem solved by how you structure that queue, not by the fetch workers themselves, which are comparatively simple stateless HTTP clients.
+
+## 3. The URL frontier
+
+| Concern | Mechanism | Trade-off |
+|---|---|---|
+| Politeness (don't hammer one host) | Per-host sub-queues; a host's next URL isn't dequeued until a minimum delay since its last fetch has passed | More bookkeeping (one queue/timer per host) vs. a single global queue |
+| Priority (crawl important pages more) | Multiple priority tiers (e.g. by estimated PageRank/freshness need); higher tiers sampled more often | Starvation risk for low-priority tiers if not rate-guaranteed |
+| Fairness across domains | Round-robin across host queues rather than FIFO across the raw URL stream | A single domain with millions of URLs can't monopolize workers |
+| Freshness (re-crawl changed pages) | Re-enqueue a URL after a TTL proportional to its observed change frequency | Pages that change often cost more crawl budget — has to be budgeted for, not unlimited |
+
+<Callout type="tip">
+The classic naive design — one big FIFO queue of URLs to crawl — fails almost immediately in practice: a single large domain dumps millions of same-host URLs into the queue at once, and a purely FIFO worker pool ends up hammering that one host while starving every other domain. Say the two-level structure (front queues for priority, back queues keyed per-host for politeness, mediated by a per-host timer) explicitly — it's the standard answer this problem is built around.
+</Callout>
+
+## 4. Deep dive — dedupe and politeness at scale
+
+**Dedupe.** At billions of URLs, storing every raw URL string for exact-match dedupe is expensive and slow. The standard approach: normalize the URL (resolve relative paths, strip tracking params, lowercase the host), hash it, and check membership in a **Bloom filter** for a fast, memory-cheap "definitely not seen" / "maybe seen" pre-check, backed by an authoritative key-value store for the small fraction of "maybe" hits that need a real lookup. A Bloom filter trades a small, tunable false-positive rate (occasionally skip a URL you haven't actually seen) for roughly an order of magnitude less memory than an exact set at this scale — an acceptable trade-off since missing a rare URL doesn't threaten correctness the way re-crawling a host too fast does.
+
+**Content-level dedupe** is a separate, harder problem: two different URLs can serve near-identical content (session-id query params, mirrors, syndicated articles). A content fingerprint (SimHash or MinHash over shingled text) lets you detect and collapse near-duplicates after fetch, which raw URL dedupe can't catch.
+
+**Politeness** is enforced both morally (respecting `robots.txt` `Disallow` rules and `Crawl-delay` hints) and mechanically (a per-host rate limiter — the same token-bucket/GCRA pattern as the [rate limiter deep dive](/prep/system-design/rate-limiter), just running host-side instead of client-side, capping concurrent connections and requests/sec per host regardless of how many workers are hot to crawl it). `robots.txt` itself is fetched and cached per host with its own TTL, since fetching it fresh on every single page request would double your request volume against every site you crawl.
+
+## 5. What real systems do today
+
+Google's own documentation on crawl budget is explicit that server responsiveness directly throttles crawl rate: if a site's time-to-first-byte rises or it starts returning `429`s, Googlebot immediately reduces its parallel connections to that host — an automatic, adaptive form of the politeness mechanism above, driven by observed origin health rather than a fixed static rate. Discovery is primarily link-following (pages more than a few clicks from a known entry point risk not being reached every cycle), which is why frontier prioritization by link depth and internal-link count matters as much as raw crawl throughput.
+
+Modern commercial distributed-crawling write-ups (2025-era engineering posts from crawling infrastructure vendors) describe splitting the pipeline into independently-scaled layers — crawling, queuing/frontier, content transformation, and delivery — specifically so that a slow downstream stage (e.g., JS rendering for client-rendered pages) doesn't backpressure the fetch layer. JS-rendering at crawl scale is treated as an expensive, separately-pooled resource (headless Chromium instances) rather than something every fetch worker does inline, because rendering a page is one to two orders of magnitude more expensive than a raw HTTP fetch — Google's own pipeline reflects this by queuing pages for a separate rendering pass that can lag the initial crawl by days.
+
+## 6. Scaling & failure
+
+| Bottleneck | Fix | New cost |
+|---|---|---|
+| Frontier becomes a single point of contention | Shard the frontier by host hash across multiple frontier nodes, each owning politeness state for its hosts | Cross-shard coordination needed only for global priority rebalancing, not per-fetch |
+| DNS resolution latency dominates fetch time | A dedicated, cached DNS resolver layer shared by all workers, since the same hosts get resolved repeatedly | Stale DNS entries risk hitting a decommissioned IP; cap the cache TTL |
+| Bloom filter memory grows with crawl size | Partition the Bloom filter by URL hash across nodes, same as any other large in-memory structure | More nodes to keep in sync on scale-up |
+| Rendering (headless browser) pool saturated | Route only JS-heavy pages there via a cheap static-vs-dynamic content classifier; keep it a separately-scaled pool from raw fetchers | Static-vs-dynamic misclassification either wastes rendering budget or misses content |
+
+**What happens when the frontier's storage dies.** The frontier is the one genuinely stateful, hard-to-lose piece of this system — losing it mid-crawl doesn't lose already-fetched content, but it loses the in-flight scheduling state (what's queued, what's mid-politeness-delay). Production designs checkpoint frontier state durably and frequently (a write-ahead log or periodic snapshot to durable storage) specifically so a frontier-node crash resumes from the last checkpoint and re-derives the rest from already-crawled-URL records, rather than restarting the crawl from seeds. Because dedupe records (the Bloom filter / KV store of seen URLs) are separate and durable, a frontier restart at worst re-discovers some URLs it would have queued anyway — it does not risk an unbounded re-crawl storm, since the dedupe layer still blocks true re-fetches of already-completed URLs.
+
+<Callout type="warn">
+A crawl worker crashing mid-fetch is cheap and expected — its URL just gets re-leased after a timeout, the same lease-based recovery pattern as a distributed task queue. Losing the frontier's persistent state is the expensive failure, because it's the one component that isn't trivially re-derivable from the content store. Design for that asymmetry explicitly if asked about failure modes.
+</Callout>
+
+## Interview follow-ups
+
+- *"Why not just use one big FIFO queue of URLs?"* — It fails politeness immediately: a single large domain's URLs flood the queue and starve every other host. Explain the front-queue (priority) / back-queue (per-host politeness) structure.
+- *"How do you avoid crawling the same URL twice?"* — Normalize + hash + Bloom filter pre-check backed by an authoritative store; explain the false-positive trade-off and why it's acceptable here.
+- *"How do you avoid two different URLs' near-duplicate content wasting storage/index space?"* — That's a separate problem from URL dedupe: content fingerprinting (SimHash/MinHash) after fetch.
+- *"How does the crawler decide what to crawl first?"* — Priority tiers by estimated importance/freshness need, sampled with fairness guarantees so low-priority tiers aren't starved.
+- *"A host starts returning 429s or slows down — what does the crawler do?"* — Adaptive politeness: reduce that host's crawl rate automatically based on observed responsiveness, the same principle Googlebot documents publicly.
+- *"How do you handle JavaScript-rendered pages without slowing down the whole crawl?"* — Route them to a separately-scaled headless-rendering pool rather than rendering inline in every fetch worker; classify static vs. dynamic cheaply first.
+- *"The frontier node holding your queue state crashes. What do you lose?"* — In-flight scheduling state, recovered via checkpointing; already-crawled and already-seen-URL records survive independently, so you don't risk a full re-crawl.
+
+Sources: [Crawl Budget Management — Google for Developers](https://developers.google.com/crawling/docs/crawl-budget) · [Distributed Web Crawling Made Easy: System and Architecture — ZenRows](https://www.zenrows.com/blog/distributed-web-crawling) · [Building a Distributed Crawling Engine — Crawlbase Blog](https://crawlbase.com/blog/building-a-distributed-crawling-engine/) · [Guide to Distributed Web Crawling: Scale Your Scraping — Bright Data](https://brightdata.com/blog/web-data/distributed-web-crawling) · [Design and Implementation of a High-Performance Distributed Web Crawler — NYU](https://cse.engineering.nyu.edu/tr/tr-cis-2001-03.pdf)

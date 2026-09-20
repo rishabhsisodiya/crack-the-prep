@@ -1,0 +1,107 @@
+---
+title: "System Design — Payment System"
+track: "system-design"
+kind: "notes"
+order: 36
+slug: "payment-system"
+updated: 2026-09-11
+description: "Designing a payment system around idempotency keys, a double-entry ledger, and a state machine for charges, plus what happens when the processor or the database dies."
+---
+
+import Callout from '../../components/Callout.astro';
+import Mermaid from '../../components/Mermaid.astro';
+
+Part of the [system design](/prep/system-design) series. See the [framework](/prep/system-design) and [building blocks](/prep/system-design/building-blocks) first if you haven't.
+
+## 1. Requirements
+
+**Functional**
+- Accept a charge request from a merchant/client (amount, currency, payment method, idempotency key).
+- Route the charge to a payment service provider (PSP) — Stripe/Adyen/a card network/a bank rail.
+- Track the payment through a state machine (created → authorized → captured → settled, or failed/refunded) and expose status.
+- Record every money movement in an auditable, immutable ledger.
+- Handle refunds, partial captures, and disputes/chargebacks.
+- Reconcile what the ledger says against what the PSP/bank actually settled.
+
+**Non-functional**
+- **Money correctness beats throughput.** A payment system that's fast but occasionally double-charges or loses a cent is worse than one that's slower and always correct.
+- No duplicate charges under retries — the client, the network, and the PSP can all retry.
+- Auditable: every balance must be reconstructable from an immutable event log, not trusted as a mutable stored number.
+- Available enough that a PSP or a downstream dependency being slow doesn't take down checkout — degrade gracefully, don't hang.
+
+## 2. Where it sits / high-level architecture
+
+<Mermaid caption="Request path from client to settled ledger entry" code={`flowchart LR
+  C[Client / Merchant] -->|POST /charges + Idempotency-Key| API[Payment API]
+  API --> IK[(Idempotency store)]
+  API --> SM[Payment state machine]
+  SM --> OB[(Outbox: payment_intent + ledger event, one txn)]
+  OB --> Relay[Outbox relay]
+  Relay --> PSP[PSP adapter e.g. Stripe/Adyen]
+  PSP --> Bank[Card network / bank rail]
+  PSP -.webhook: succeeded/failed.-> WH[Webhook handler]
+  WH --> SM
+  SM --> Ledger[(Double-entry ledger DB)]
+  Recon[Reconciliation job] --> Ledger
+  Recon --> PSP
+`} />
+
+- The **idempotency store** guards the API boundary — the same key returns the same recorded result, never re-executes the charge.
+- The **outbox pattern** ties the state transition and the ledger write to one local transaction, so "committed the intent but never emitted the ledger event" can't happen.
+- The **PSP adapter** isolates provider-specific quirks (Stripe vs Adyen vs a direct bank rail) behind one interface, so provider failover or multi-PSP routing doesn't leak into the state machine or ledger.
+- **Webhooks are the source of truth for final status** — the synchronous API response is provisional; card authorization, in particular, can resolve asynchronously.
+
+## 3. Core design: idempotency and the ledger
+
+| Concern | Approach | Trade-off |
+|---|---|---|
+| Duplicate charge on retry | Client-supplied idempotency key, stored with the first response for ~24h; identical key + payload replays the stored result instead of re-executing | Client must generate/reuse the key correctly per logical operation, not per HTTP attempt |
+| Balance storage | Never store a mutable `balance` column as truth — derive it as `SUM(ledger_entries)` for that account, or maintain a periodically-reconciled cached balance alongside the immutable log | Summing on every read is expensive at scale — cache the balance but always be able to recompute and compare it |
+| Every money movement | Double-entry: each transaction writes ≥2 ledger rows (a debit and a matching credit) whose sum is always zero | Doubles row count vs. a naive single-row transaction table, but makes "where did the money go" always answerable and self-checking |
+| Payment lifecycle | Explicit state machine (`created → authorized → captured → settled` / `failed` / `refunded` / `disputed`) with an allowed-transitions table | Illegal transitions rejected outright rather than silently overwriting status |
+
+<Callout type="tip">
+Say "double-entry ledger, immutable, balance is a derived SUM not a column" early — this is the single sentence that signals you understand money-correctness systems are a different category from a typical CRUD service. It also directly answers "how do you audit this" before it's asked.
+</Callout>
+
+<Callout type="warn">
+Idempotency keys must be scoped to the *logical* operation, not the HTTP request. A client retrying a timed-out request should reuse the same key; a genuinely new charge (even for the identical amount, seconds later) needs a new one — conflating the two either causes duplicate charges or silently drops legitimate repeat purchases.
+</Callout>
+
+## 4. Deep dive
+
+**Idempotency end-to-end.** The client generates a UUID per logical operation and sends it as an `Idempotency-Key` header. The API, on first sight of a key, executes the charge and stores the **request fingerprint plus the full response** (success or failure, including a 500) keyed by that id. Any later request with the same key — even one that raced in concurrently — returns the stored result rather than re-executing. Two subtleties matter: (1) a request that's *still in flight* when a retry arrives must not race — hold a short-lived lock or a `processing` sentinel row so the retry waits for the original rather than double-executing; (2) the key must be paired with a hash of the request body, so a key reused with different parameters is rejected as a client bug rather than silently returning the wrong stored response. Stripe's public design keeps a 24-hour window for this, long enough to cover realistic retry storms and client outages without accumulating keys forever.
+
+**Exactly-once processing over an at-least-once world.** There's no true exactly-once delivery across a network — PSP webhooks retry, message queues redeliver, clients retry. The system achieves *effectively-once* by making every consumer idempotent: dedupe webhook events by the PSP's event id before applying them to the state machine, and make ledger writes themselves idempotent (a `(payment_id, event_type)` unique constraint rejects a duplicate ledger entry at the database level as a last line of defense, not just at the application layer).
+
+## 5. What real systems do today
+
+- **Stripe's idempotency implementation** stores the resulting status code and body of the first request for a given key and replays it for any repeat within a 24-hour window — including replaying a 500, so a client that got an error and retries doesn't accidentally succeed twice or get an inconsistent view of what happened.
+- Engineering write-ups describing Stripe-style architectures converge on the same shape: an **API layer with idempotency keys**, a **payment state machine** with an explicit allowed-transitions table, a **double-entry ledger that is never edited in place** (every correction is a new offsetting entry, never an `UPDATE`), a **PSP adapter layer**, a **transactional outbox** feeding an async relay, **webhooks** for the PSP's asynchronous outcome, and **nightly reconciliation jobs** that diff the ledger against the PSP's settlement reports.
+- **Reconciliation is treated as a first-class, always-on job, not a fallback** — because webhooks *can* be lost (network partition, an unavailable endpoint during a deploy), a scheduled job that polls the PSP for the status of any payment stuck in a non-terminal state past an SLA is standard practice, not an edge case.
+- Postgres (or another strongly consistent relational store) remains the default choice for the core ledger table itself even in 2026 write-ups — the transactional guarantees around a single ledger write (atomicity of the debit+credit pair) matter more than horizontal write scale for most payment volumes; sharding, when needed, is applied at the account/merchant level, not by breaking apart a single double-entry transaction.
+
+## 6. Scaling & failure
+
+| Bottleneck | Fix | New cost |
+|---|---|---|
+| Ledger table write contention at high volume | Shard by account/merchant id; keep each double-entry write local to one shard where possible | Cross-shard transfers (rare but real — e.g. platform fee sweeps) need a saga/two-phase pattern instead of one local transaction |
+| Idempotency-key store growth | TTL keys after 24–48h; move to a cheap fast KV store (Redis/DynamoDB) rather than the primary ledger DB | Keys expiring too early re-opens a duplicate-charge window on very slow client retries — size the TTL to realistic retry behavior |
+| Synchronous PSP call blocking checkout | Return `pending` immediately after creating the intent, confirm via webhook rather than holding the HTTP connection open for the full authorization round trip | Client UX must handle a pending/polling state, not just success/failure |
+| Reconciliation job scanning growing history | Only reconcile a rolling window of "not yet settled" and "recently settled" rows, keyed by an index on status + updated_at | Very old disputes/chargebacks need a separate, less frequent sweep |
+
+**What happens when the PSP (Stripe/Adyen/bank rail) is unreachable or slow.** Never let a synchronous PSP call block the checkout thread indefinitely — set an aggressive timeout, mark the payment `processing` (not failed) if the call times out, and rely on the **webhook or the reconciliation job** to resolve the true outcome later, because a PSP can process a charge even if its HTTP response to you was lost. Retrying a charge creation blindly after a timeout risks a duplicate charge unless it's retried with the *same idempotency key* — that's precisely what the key is for. If a PSP fails outright (outage), route to a secondary PSP if one is integrated (multi-PSP is common for large payment platforms specifically for this reason), or fail the payment cleanly with a clear, retryable client-facing error rather than leaving it in limbo.
+
+**What happens when the ledger database dies.** This is the one dependency that cannot be allowed to "fail open" — a lost or partially-applied ledger write is a real accounting discrepancy, not a UX degradation. The outbox pattern means the *decision to charge* and the *ledger event* commit in the same local transaction, so a DB crash after that commit but before the outbox relay publishes just delays the downstream ledger update (the relay retries against the still-committed outbox row) rather than losing it. A DB crash mid-transaction rolls back entirely — nothing is half-applied, because the debit and credit are one atomic write. Recovery is standard relational DB failover (replica promotion); the reconciliation job is the safety net that would eventually catch any residual gap against the PSP's own records.
+
+## Interview follow-ups
+
+- *"How do you prevent a double charge if the client's network drops right after they hit 'pay'?"* — Idempotency key generated client-side before the first attempt, reused on retry; server replays the stored result of the first execution rather than re-charging.
+- *"Why double-entry instead of just a `balance` column on the account?"* — A mutable balance is a single point of silent corruption with no audit trail; double-entry makes every movement traceable and self-balancing (sum of all entries is always zero), and balance becomes a derived, re-verifiable value.
+- *"Webhook says 'succeeded' but you already timed out and marked it 'failed' — now what?"* — The state machine's transition table should allow `processing`/`failed-pending-confirmation` → `succeeded` on a later authoritative webhook, not just forward-only happy-path transitions; the terminal state comes from the PSP, not from your own timeout.
+- *"How do you handle a payment stuck in 'processing' for an hour?"* — Reconciliation job polls the PSP directly for its actual status past an SLA threshold rather than waiting indefinitely on a possibly-lost webhook.
+- *"What's the actual database transaction boundary for a charge?"* — The local write of `payment_intent` state + ledger event row happens in one transaction (outbox pattern); the external PSP call and webhook are outside that boundary and handled asynchronously with their own idempotency.
+- *"How would you support a second PSP for failover?"* — A PSP-adapter interface abstracts provider specifics; route new charges to a secondary PSP on primary outage, but never retry an *already-attempted* charge against a different PSP with a new idempotency key — that's a real risk of a duplicate charge across two providers.
+- *"10x payment volume overnight — what breaks first?"* — Ledger write contention on hot merchant/account shards, and the idempotency-key store's throughput; shard the ledger by account and move the key store off the primary DB.
+
+Sources: [Designing robust and predictable APIs with idempotency — Stripe](https://stripe.com/blog/idempotency) · [Idempotent requests — Stripe API Reference](https://docs.stripe.com/api/idempotent_requests) · [Implementing Stripe-like Idempotency Keys in Postgres — brandur.org](https://brandur.org/idempotency-keys) · [Payment System Design: Ledger, Idempotency, and Settlement — Ajit Singh](https://singhajit.com/payment-system-design/) · [Stripe System Design — Better Engineering](https://betterengineers.substack.com/p/how-to-design-a-payment-service) · [Design a Payment System — System Design Sandbox](https://www.systemdesignsandbox.com/learn/design-payment-system)

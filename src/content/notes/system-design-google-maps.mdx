@@ -1,0 +1,93 @@
+---
+title: "System Design — Google Maps"
+track: "system-design"
+kind: "notes"
+order: 26
+slug: "google-maps"
+updated: 2026-09-11
+description: "Designing a maps and navigation platform — tile serving, road-graph routing with contraction hierarchies, live traffic, and ETA at continental scale."
+---
+
+import Callout from '../../components/Callout.astro';
+import Mermaid from '../../components/Mermaid.astro';
+
+Part of the [system design](/prep/system-design) series. See the [framework](/prep/system-design) and [building blocks](/prep/system-design/building-blocks) first if you haven't.
+
+## 1. Requirements
+
+**Functional**
+- Render map tiles at many zoom levels for any location on Earth.
+- Given source and destination, compute a route with turn-by-turn directions and an ETA.
+- Reflect live traffic conditions in both the displayed map and the computed route/ETA.
+- Support different travel modes (driving, walking, transit, cycling), each with different cost functions.
+
+**Non-functional**
+- Tile serving is read-dominated and extremely high volume — cite roughly 1.7M requests/sec at peak in system-design estimates — and must be near-instant (CDN-cacheable, static-ish content).
+- Routing must return in well under a second even though the underlying graph (world road network) has hundreds of millions of edges — naive Dijkstra over that graph is far too slow.
+- Traffic data is highly perishable (useful for minutes, not hours) and must be ingested continuously from live vehicle positions.
+- Global scale, must degrade gracefully per-region rather than fail globally.
+
+## 2. High-level architecture
+
+<Mermaid caption="Two mostly-independent subsystems: tile serving and routing" code={`flowchart LR
+  Client --> CDN[CDN / Tile Cache]
+  CDN -->|miss| TileSvc[Tile Rendering Service]
+  TileSvc --> GeoDB[(Indexed Map Data<br/>roads, POIs, imagery)]
+
+  Client -->|src, dst| RouteAPI[Routing API]
+  RouteAPI --> RoutingEngine[Routing Engine<br/>Contraction Hierarchies / A*]
+  RoutingEngine --> Graph[(Road Graph<br/>precomputed shortcuts)]
+  Traffic[Live Traffic Ingestion] -->|edge weight updates| Graph
+  Traffic --> TileSvc
+`} />
+
+The two halves barely share infrastructure at request time: **tile serving** is a classic CDN-cacheable read path (pre-rendered or rendered-on-demand map imagery), while **routing** is a specialized graph-query engine over a precomputed road network. They share the same underlying geo data at ingestion time, but at query time they're separate services with very different scaling profiles.
+
+## 3. Routing algorithm trade-offs
+
+| Approach | Query time on a continental graph | Preprocessing cost | Handles live traffic? | Used by |
+|---|---|---|---|---|
+| Plain Dijkstra | Too slow (seconds+) — explores huge fractions of the graph | None | Trivially (just update edge weights) | Never in production at this scale |
+| A* with a good heuristic (e.g. straight-line distance) | Faster than Dijkstra but still explores too much at continental scale | None | Yes | Small/regional routing, not global |
+| Contraction Hierarchies (CH) | Sub-millisecond — this is the entire point | High — must "contract" (precompute shortcuts for) the whole graph offline | Poorly — a changed edge weight can invalidate precomputed shortcuts, so live traffic needs a workaround | **OSRM**'s default engine |
+| Hierarchical tiles with a costing model evaluated at query time (Valhalla-style) | Fast, slightly slower than pure CH | Lower than full CH — tiles are built once, cost model applied at query time | Better — traffic can be folded into the per-edge cost evaluated live, without invalidating precomputed shortcuts | **Valhalla** |
+
+<Callout type="tip">
+The trade-off to name explicitly: Contraction Hierarchies buys you sub-millisecond queries by doing enormous offline precomputation, but that precomputation bakes in a static notion of edge cost — so live traffic (an edge just got 5x slower) doesn't cleanly fit CH's model. Production systems either re-run contraction periodically (accepting staleness) or, like Valhalla, keep costing dynamic at query time and pay a small latency cost for that flexibility. Say this trade-off if asked "how does live traffic interact with your routing algorithm."
+</Callout>
+
+## 4. Deep dive: contraction hierarchies and live traffic
+
+**Contraction Hierarchies, intuitively**: offline, repeatedly pick the "least important" remaining node in the graph (roughly: a node where going around it isn't much longer than going through it — think a random residential intersection, not a highway interchange) and remove it, adding a "shortcut" edge between its neighbors that preserves shortest-path distances. Do this for every node, ordered from least to most important. At query time, a bidirectional search that only ever moves to "more important" nodes converges extremely fast, because it can skip over huge swaths of unimportant local roads and jump via shortcuts through the important backbone (highways, arterials) — this is why OSRM, using CH by default, achieves sub-millisecond routing on continental-scale graphs, per engine comparisons like Mapsi's 2025 writeup.
+
+**Reconciling that with live traffic**: since CH's shortcuts are computed assuming fixed edge weights, a naive re-contraction on every traffic update is far too expensive to do live. Production systems handle this by separating the **structural** graph query (which nodes/edges form a plausible route) from the **cost** evaluation (how long each edge currently takes) — compute a candidate route (or route corridor) using the precomputed structure, then apply current traffic-adjusted weights to that specific candidate path to get an accurate ETA, only falling back to a full re-route if traffic makes the original path meaningfully suboptimal. Valhalla's tile-and-costing-model architecture takes this further by keeping the cost function dynamic at query time from the start, per its documented design.
+
+**Traffic ingestion**: aggregate anonymized speed samples from phones actively navigating (and from other mobile signal where available) into per-road-segment average speeds, refreshed on the order of minutes; feed these as edge-weight updates into the routing layer and as a rendered "traffic tile" overlay layer on the map itself (a separate tile type from the base map imagery, composited client-side).
+
+## 5. What real systems do today
+
+**OSRM** made a hard architectural bet toward query-time speed: heavy offline preprocessing (`osrm-extract` then `osrm-contract`) into either a Contraction Hierarchy or Multi-Level Dijkstra structure, then memory-maps the resulting binary graph directly so the routing daemon barely touches disk at query time — the trade is setup/preprocessing complexity and slower reaction to graph or traffic changes, in exchange for sub-millisecond routing.
+
+**Valhalla** (used by Mapbox and others) instead partitions the world into a hierarchical tile set — local, arterial, and highway levels — and evaluates a pluggable costing model (separate cost functions for driving, walking, cycling, trucking, multimodal) against edge attributes at query time rather than baking a single cost function into offline preprocessing, per current engine comparisons (Mapsi, Pi Stack, 2025-2026). This makes it noticeably more flexible for traffic-aware and mode-aware routing at some latency cost versus pure CH.
+
+Google Maps-specific breakdowns (Codelit, Sujeet Jaiswal's write-up) describe the production shape as independently scaled services — Map Tile Service, Routing Service, Traffic Service, Place Search, ETA Service, Offline Maps — with cited peak estimates around 1.7M requests/sec for tiles versus roughly 70K/sec for routing, underscoring why tile serving is architected as a CDN-first caching problem while routing is architected as a specialized low-latency graph-query problem — very different scaling levers for what looks like "one product" from the outside.
+
+## 6. Scaling & failure
+
+- **Tile service overloaded in a popular region** (e.g. a major event drawing map traffic) → this is what CDN edge caching exists for; tiles are near-static content keyed by (zoom, x, y), so cache hit rates should be extremely high and origin load should barely move — if it doesn't, that's a caching-key bug, not a capacity problem.
+- **Routing engine's precomputed graph goes stale as roads change** (new construction, closures) → periodic re-contraction (e.g. nightly) plus a fast "exception layer" of manual overrides (closures, temporary restrictions) applied on top of the stale precomputed structure without waiting for the next full rebuild.
+- **Global expansion into a new region with sparse map data** → decouple regional data completeness from the shared platform; a new region can launch with degraded routing (less precomputation, more live A*) while data quality catches up, rather than blocking on full CH precomputation for a region with little traffic yet.
+
+**What happens when the traffic ingestion pipeline dies**: routing and tiles both keep working — they simply fall back to the last-known static/pre-traffic edge weights (or a time-of-day historical average model as a next-best fallback), so ETAs get less accurate but never wrong in a way that breaks navigation. This is the same "degrade precision, not the whole feature" pattern seen in [rate limiters](/prep/system-design/rate-limiter) when their store dies — a dependency that improves accuracy should never be a single point of failure for the base functionality.
+
+## Interview follow-ups
+
+- *"Why can't you just run Dijkstra on the full road graph for every route request?"* — At continental scale (hundreds of millions of edges) plain Dijkstra explores far too much of the graph per query; production systems precompute structure (CH) or hierarchical tiles specifically to avoid this at query time.
+- *"How do contraction hierarchies actually make queries fast?"* — Offline, unimportant nodes get contracted out with shortcut edges preserving shortest-path distances; at query time a bidirectional search only traverses toward more-important nodes, skipping huge sections of local roads via precomputed shortcuts.
+- *"Live traffic just changed the fastest route. How does that interact with a precomputed contraction hierarchy?"* — CH's shortcuts assume static weights, so systems either apply traffic-adjusted costs on top of a structurally-computed candidate route rather than re-contracting live, or use a tile-based cost-at-query-time model (Valhalla) that's inherently more traffic-friendly.
+- *"Why are map tiles and routing architected as separate services instead of one?"* — Completely different scaling profiles: tiles are a read-heavy, cacheable, near-static content-serving problem (CDN-first); routing is a low-latency specialized graph-query problem that can't be solved by caching alone since source/destination pairs are near-infinite.
+- *"A road just closed unexpectedly. How fast does that reach routing?"* — Via a fast exception/override layer applied on top of the (possibly stale) precomputed graph structure, not by waiting for the next full re-contraction cycle.
+- *"Your traffic ingestion service is down. What happens to ETAs?"* — Falls back to historical time-of-day average speeds or last-known weights — less accurate, never broken; routing and tile serving both continue to function.
+- *"How would you support both driving and walking directions without duplicating the whole routing stack?"* — Pluggable per-mode costing model applied against the same underlying road/path graph — this is explicitly Valhalla's design — rather than separate graphs or engines per mode.
+
+Sources: [Google Maps System Design — Codelit.io](https://codelit.io/blog/google-maps-system-design) · [Design Google Maps — Sujeet Jaiswal](https://sujeet.pro/articles/design-google-maps) · [Open Source Routing Machine — OpenStreetMap Wiki](https://wiki.openstreetmap.org/wiki/Open_Source_Routing_Machine) · [OSRM vs Valhalla vs GraphHopper: choosing a routing engine in 2025 — Mapsi](https://mapsi.dev/developers/routing-engine-comparison) · [GraphHopper vs OSRM vs Valhalla: Self-Hosted Routing Engines Compared 2026 — Pi Stack](https://www.pistack.xyz/posts/2026-04-25-graphhopper-vs-osrm-vs-valhalla-self-hosted-routing-engines-guide-2026/)

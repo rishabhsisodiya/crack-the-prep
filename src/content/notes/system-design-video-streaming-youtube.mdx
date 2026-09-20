@@ -1,0 +1,102 @@
+---
+title: "System Design — Video Streaming (YouTube)"
+track: "system-design"
+kind: "notes"
+order: 22
+slug: "video-streaming-youtube"
+updated: 2026-09-11
+description: "Designing a YouTube-style video platform from async transcoding through adaptive bitrate streaming, per-title encoding, CDN economics, and what happens when the CDN or origin dies."
+---
+
+import Callout from '../../components/Callout.astro';
+import Mermaid from '../../components/Mermaid.astro';
+
+Part of the [system design](/prep/system-design) series. See the [framework](/prep/system-design) and [building blocks](/prep/system-design/building-blocks) first if you haven't.
+
+## 1. Requirements
+
+**Functional**
+- Creators upload video; the platform transcodes it into multiple resolutions/bitrates for playback.
+- Viewers stream video that adapts to their network conditions without manual quality selection.
+- Support seeking, resuming, and multiple audio/subtitle tracks.
+- Basic metadata: views, likes, comments — not the hard part of this problem.
+
+**Non-functional**
+- Time-to-first-frame target around 2 seconds — this is the number that drives the CDN edge-caching requirement.
+- Playback must adapt smoothly to changing network conditions (a user walking from wifi to LTE) without a hard stall.
+- Upload/transcode path is write-heavy, async, and latency-tolerant; playback path is read-heavy, synchronous, and latency-critical — these are two different systems with different scaling rules, and saying so up front is the right opening move.
+- Storage and **egress bandwidth**, not compute, dominate cost at this scale — this reframes several design decisions below.
+
+## 2. Where it sits / high-level architecture
+
+<Mermaid caption="Upload/transcode pipeline is fully decoupled from the playback path" code={`flowchart TD
+  UP[Creator uploads] --> RAW[(Raw video\\nblob storage)]
+  RAW --> Q[[Transcode job queue]]
+  Q --> WORKERS[Transcoding fleet\\nautoscaled batch workers]
+  WORKERS -->|per resolution/bitrate\\nladder + thumbnails| SEG[(Segmented output:\\nHLS/DASH chunks)]
+  SEG --> ORIGIN[(Origin store)]
+  ORIGIN --> CDN[CDN edge caches\\nglobally distributed]
+
+  V[Viewer] -->|manifest request| CDN
+  CDN -- edge hit --> V
+  CDN -- edge miss --> ORIGIN
+  V -->|adaptive bitrate\\nswitching per chunk| CDN
+`} />
+
+- **Upload path**: raw file lands in blob storage, a transcode job is enqueued, and the response to the creator returns immediately ("processing") — never block the upload request on encoding.
+- **Transcoding fleet** is a horizontally autoscaled batch system, entirely off the request path. It produces a rendition ladder (multiple resolution/bitrate combinations) plus thumbnails, chunked into segments for adaptive streaming.
+- **Playback path** never touches the transcoding fleet or origin for a popular video — the CDN edge serves nearly everything; origin is the fallback for cold/rare content.
+
+## 3. Core trade-offs
+
+| Decision | Options | What real systems pick and why |
+|---|---|---|
+| Streaming protocol | HLS vs DASH vs plain progressive download | HLS and DASH both chunk video into small segments described by a manifest, letting the player switch bitrate between chunks; progressive download can't adapt mid-playback, so it's not viable at this scale |
+| Bitrate ladder | Fixed ladder (same resolutions/bitrates for every video) vs per-title | Netflix pioneered **per-title encoding** — an ML model analyzes each title's content complexity and generates a custom ladder, since animation compresses far better than high-motion action footage at the same perceptual quality; a fixed ladder wastes bitrate on simple content and under-serves complex content |
+| Transcode timing | Synchronous (block upload until done) vs async | Always async — transcoding a long video can take minutes; the upload response must return immediately with a "processing" status |
+| Storage tier | Single hot tier forever vs tiered by access pattern | Old/rarely-watched video moves to cheaper cold storage; the CDN's hot cache naturally reflects current popularity, so cold origin storage can be slower and cheaper |
+| CDN strategy | Third-party CDN vs owned edge network | At YouTube/Netflix scale, egress bandwidth is the dominant cost line item, which is the direct justification for **owning** edge infrastructure (Netflix's Open Connect) rather than paying per-GB indefinitely to a third party |
+
+<Callout type="tip">
+Lead with "storage and egress bandwidth dominate cost here, not compute" — it's the single sentence that explains why per-title encoding, CDN ownership, and cold-tiering all exist. Interviewers steer toward this if you don't volunteer it.
+</Callout>
+
+## 4. Deep dive — transcoding pipeline and adaptive bitrate streaming
+
+**Transcoding at scale.** Upload triggers a job on a queue; an autoscaled fleet of workers (commodity cores or dedicated encoding ASICs at YouTube's scale) picks it up. At YouTube's actual scale, industry estimates put throughput at roughly 58 rendition-hours of video encoded per second sustained — which only works because encoding is decoupled from the request path and horizontally scaled independently, the same "batch fleet, not synchronous" pattern as notification sending or feed fan-out elsewhere in this series. Output is chunked (2-10 second segments is typical) into HLS/DASH-compatible files, plus a manifest describing the available renditions.
+
+**Per-title / per-shot encoding.** Rather than encoding every upload into the same fixed ladder (e.g. 240p/500kbps, 480p/1Mbps, 720p/2.5Mbps, 1080p/5Mbps...), an analysis pass measures each title's content complexity (motion, detail, scene changes) and picks a custom ladder, sometimes varying even shot-by-shot within one video. Netflix measures the result with **VMAF** (a perceptual quality metric) rather than trusting bitrate as a quality proxy directly. A single title can be encoded into on the order of ~120 distinct output streams once you multiply resolutions × bitrates × audio tracks × subtitle tracks — which is exactly why transcoding must be a horizontally-scaled batch system, not something done inline.
+
+**Adaptive bitrate streaming (the client side).** The player doesn't pick a fixed quality; it downloads the manifest, starts with a conservative bitrate for fast startup, then continuously measures actual download throughput and buffer health, switching up or down between chunk boundaries. This is what makes "walking from wifi to LTE" degrade gracefully to a lower resolution rather than stalling — the switch happens seamlessly at a segment boundary, invisible to the viewer if buffer health is managed well.
+
+## 5. What real systems do today
+
+- **Netflix's Open Connect** is a purpose-built, owned CDN rather than a third-party one: a two-tier design with Storage Appliances at internet exchange points holding nearly the full catalog, and Edge Appliances embedded directly inside ISP networks caching regionally popular content close to viewers — a direct response to egress bandwidth being the dominant cost at their scale.
+- **Netflix per-title encoding**, described in their own engineering writing, replaced a single fixed bitrate ladder applied to every title with a per-title (and later per-shot) analysis that builds a custom encode ladder, using VMAF to validate perceptual quality rather than assuming bitrate correlates linearly with quality.
+- **YouTube's transcoding scale** is commonly estimated at tens of thousands of encoding cores/custom ASICs running continuously, processing on the order of 58 rendition-hours of source video per second across the platform — the number worth citing to make "this is a batch system operating at industrial scale, not a per-request operation" concrete.
+- The **2-second time-to-first-frame** target cited across engineering write-ups is what directly drives the CDN edge-caching requirement — manifest and the first few segments need to be at the edge, close to the viewer, before playback can start.
+
+## 6. Scaling & failure
+
+- **Bottleneck: transcoding queue backs up during an upload spike (viral event, live-to-VOD conversion surge)** → autoscale the worker fleet horizontally; since transcoding is fully async and off the request path, a backlog delays *availability* of a new video, not the upload experience itself.
+- **Bottleneck: origin store gets hammered by playback traffic for a video that just went viral** → this shouldn't happen if the CDN is doing its job; a sudden spike is exactly what CDN edge caching exists to absorb, with cache warming for known-upcoming popular content (premieres) as an extra layer.
+- **Bottleneck: egress bandwidth cost grows linearly with viewership** → this is the actual dominant cost driver at scale, which is why owned edge infrastructure (Open Connect) and aggressive per-title bitrate optimization both exist — a 10% reduction in average bitrate across a catalog this large is a meaningful cost line, not a rounding error.
+- **Bottleneck: storage for every uploaded video, most of which get watched rarely after the first weeks** → tier cold, rarely-accessed video to cheaper storage classes; the CDN cache naturally reflects current demand, so cold origin storage doesn't need to be fast.
+
+**What happens when the CDN dies (a region or the whole edge network)**: playback requests fall back to origin, which is provisioned to absorb some fallback load but not the CDN's aggregate traffic — so a CDN outage degrades to elevated latency and possibly origin overload rather than instant total outage, provided the origin has its own scaling headroom and playback clients retry against alternate CDN nodes/regions. This is the reason multi-CDN or multi-edge-region strategies exist for platforms that can't tolerate a single edge network's failure — Netflix's Open Connect appliances are themselves distributed across many ISPs specifically so no single node's failure takes down playback for a meaningful fraction of viewers.
+
+<Callout type="warn">
+"What happens when the origin store dies" is a different, worse question than "what happens when the CDN dies" — if origin is unavailable, the CDN keeps serving already-cached content fine (most traffic), but any cache miss (cold/rare video, or a CDN node that was just rebuilt) fails. Say this distinction explicitly: CDN failure degrades gracefully because of redundant edges; origin failure is a harder dependency because it's the one place chunks ultimately come from.
+</Callout>
+
+## Interview follow-ups
+
+- *"Why does the upload path return immediately instead of waiting for transcoding to finish?"* — Transcoding a video into a full rendition ladder can take minutes; blocking the upload request on it would make uploads time out and doesn't need to be synchronous since nobody is watching a video the instant it finishes uploading.
+- *"What's per-title encoding and why does it matter?"* — Instead of one fixed bitrate ladder for every video, analyze each title's complexity and generate a custom ladder; animation needs far less bitrate than action footage at equal perceptual quality (measured via VMAF), and doing this across a catalog this large is a real, cited cost saving.
+- *"Walk me through what happens on a network change mid-playback (wifi to LTE)."* — The player continuously measures throughput/buffer health and switches to a lower-bitrate rendition at the next segment boundary; HLS/DASH's chunk-based design is exactly what makes this possible without restarting playback.
+- *"Why does YouTube/Netflix run their own CDN instead of just using a third-party one?"* — At this scale, egress bandwidth is the dominant cost, and owning edge infrastructure embedded inside ISPs (Open Connect) both cuts that cost and shortens the physical path to viewers, improving the 2-second time-to-first-frame target directly.
+- *"CDN region goes down. What happens to viewers there?"* — Falls back to origin (elevated latency, and origin must have headroom for this) or to another CDN region; redundant, geographically distributed edges are exactly what prevents one region's failure from being a full outage.
+- *"How would you estimate the storage and transcoding cost of one uploaded video?"* — Multiply resolutions × bitrates × audio/subtitle tracks (YouTube-scale platforms commonly produce on the order of ~100+ output streams per source video), and note that transcoding is a one-time cost while storage and egress recur for the video's lifetime — egress dominates for popular content.
+- *"Why is a wide-column/blob-plus-CDN design used instead of storing video bytes in a relational database?"* — Video files are large, immutable blobs with no relational structure or joins needed; a database is for metadata (title, owner, view count), while the bytes belong in blob storage fronted by a CDN, which is purpose-built for large-object, read-heavy, globally-distributed delivery.
+
+Sources: [Netflix Tech Stack Explained: CDN (Open Connect), and Microservices — VdoCipher](https://www.vdocipher.com/blog/netflix-tech-stack-and-architecture/) · [Design Youtube Streaming | Video Transcoding — Medium](https://medium.com/@eugene-s/design-youtube-streaming-video-transcoding-b45aa8447851) · [YouTube System Design: FAANG Interview Guide — intervu.dev](https://intervu.dev/blog/youtube-system-design/) · [Adaptive Bitrate Streaming: How It Works for Developers — Mux](https://www.mux.com/articles/adaptive-bitrate-streaming-how-it-works-and-how-to-get-it-right) · [How Netflix Streams to 300M Users: Open Connect, Adaptive Bitrate & Microservices — bnxt.ai](https://www.bnxt.ai/blog/inside-netflixs-streaming-engine-how-it-delivers-millions-of-concurrent-streams-worldwide)

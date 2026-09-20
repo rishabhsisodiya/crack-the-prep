@@ -1,0 +1,100 @@
+---
+title: "System Design — Search Autocomplete"
+track: "system-design"
+kind: "notes"
+order: 21
+slug: "search-autocomplete"
+updated: 2026-09-11
+description: "Designing a typeahead/autocomplete system from trie-with-top-K through offline aggregation of query logs, Redis vs Elasticsearch, and what happens when the trie service dies."
+---
+
+import Callout from '../../components/Callout.astro';
+import Mermaid from '../../components/Mermaid.astro';
+
+Part of the [system design](/prep/system-design) series. See the [framework](/prep/system-design) and [building blocks](/prep/system-design/building-blocks) first if you haven't.
+
+## 1. Requirements
+
+**Functional**
+- As a user types a prefix, return the top K (typically 5-10) most likely completions.
+- Suggestions should be ranked by popularity/relevance, not just alphabetically.
+- Support personalization (recent searches, trending-for-you) as a stretch goal — base case is global popularity.
+- Fresh enough — a suddenly-trending query should appear in suggestions within hours, not weeks.
+
+**Non-functional**
+- Latency budget is the whole design constraint: typing cadence is roughly 150-200ms between keystrokes, so p99 needs to be well under 100ms or the dropdown visibly lags behind typing.
+- Massive read QPS relative to writes — every keystroke of every user is a read; writes (query log ingestion, popularity updates) are comparatively rare and can be batched.
+- Doesn't need strong consistency — a suggestion list that's a few hours stale is completely fine.
+- Must handle a long tail of prefixes gracefully (return few or zero results, never error, never block typing).
+
+## 2. Where it sits / high-level architecture
+
+<Mermaid caption="Read path is memory-speed; the ranking pipeline is entirely offline" code={`flowchart TD
+  C[Client] -->|debounced keystroke| CDN[CDN / edge cache\\nfor top global prefixes]
+  CDN -- miss --> QPS[Query processing service]
+  QPS --> CACHE[(Redis: hot prefix cache)]
+  CACHE -- miss --> TRIE[Sharded in-memory\\ntrie service]
+  TRIE --> QPS --> C
+
+  QL[[Query logs stream]] --> AGG[Offline aggregation job\\nhourly/daily]
+  AGG --> BUILD[Trie builder]
+  BUILD -->|swap new trie version| TRIE
+`} />
+
+- The **read path never touches a database or does ranking at request time** — it is a pure lookup. That's the core design idea: push all the expensive work (popularity aggregation, ranking) offline, and make the online path a cheap memory read.
+- The **write/build path** is a batch pipeline: query logs stream in, get aggregated into prefix → top-K-completions counts, and periodically rebuild (or incrementally update) the trie, which is then hot-swapped into the serving fleet.
+
+## 3. Data structure and ranking trade-offs
+
+| Approach | Lookup cost | Ranking freshness | Notes |
+|---|---|---|---|
+| Trie with precomputed top-K per node | O(prefix length), memory-speed | As fresh as the last offline rebuild | The canonical answer — a keystroke walks to the prefix node and returns its cached sorted list, no ranking work at request time |
+| Naive trie + rank at query time | O(prefix length) + O(k log k) sort over all matches | Real-time if counts are live | Falls apart once a prefix node has millions of descendants — sorting at request time under a 100ms budget doesn't scale |
+| Elasticsearch completion suggester / FST | Sub-millisecond per shard, horizontally scalable | Near-real-time index updates | Managed-infra alternative to hand-rolling a trie service; FST (finite state transducer) stored per index segment, scales out by adding nodes |
+| Redis sorted sets (`ZRANGEBYLEX`) | Sub-millisecond | Batch-updated, same as trie | Good when the team already runs Redis at scale and doesn't want a bespoke trie service; lexicographic range queries substitute for prefix walk |
+
+<Callout type="tip">
+State the precompute-the-ranking-offline idea early and explicitly — it's the one insight that makes this whole system tractable. Without it, candidates spend the interview trying to make an online sort fast instead of realizing the sort shouldn't happen online at all.
+</Callout>
+
+## 4. Deep dive — building and refreshing the trie at scale
+
+**Structure.** Each trie node representing a prefix stores its precomputed top-K completions (query string + score) sorted descending, computed offline. A lookup for `"syst"` walks 4 nodes down from the root and returns the list sitting at that node — no traversal of the subtree at request time.
+
+**Building it.** Query logs (every search a user actually executes, not every keystroke) stream into an aggregation job — commonly framed as an hourly or daily batch job that counts query frequency, possibly decayed by recency (so a term trending this week outranks one that was popular last year but has since died off). The aggregation output is a flat `prefix → top-K` table, from which a trie builder constructs the in-memory structure.
+
+**Serving it.** The trie is too large for one machine at global scale, so it's **sharded** — typically by first character(s) of the prefix, so a request for anything starting with "s" always routes to the same shard set. Each shard is replicated across multiple nodes for both availability and read throughput. New trie versions are built off to the side and **hot-swapped** in (atomic pointer swap to the new version) so a rebuild never causes a serving gap or partial/inconsistent reads mid-build.
+
+**Freshness vs cost trade-off.** Full rebuild hourly/daily is simple and correct but means a genuinely new trending query (breaking news, a viral event) doesn't show up in suggestions until the next rebuild. The fix real systems use is a **two-tier structure**: the bulk trie refreshed on the normal batch cadence, plus a small, fast-updating "trending now" overlay (a much smaller structure, updated every few minutes from a streaming aggregation) that's merged into results at query time for a shortlist of hot prefixes only — cheap because it only needs to cover a small trending set, not the whole vocabulary.
+
+## 5. What real systems do today
+
+- The canonical production pattern described across 2025-2026 engineering write-ups is exactly the one above: **client-side debouncing** (don't fire a request on every keystroke, wait ~100-150ms of no typing) feeding a **CDN/edge cache** for the small set of globally hot prefixes, falling through to a **sharded in-memory trie service**, backed by a **separate batch-plus-streaming pipeline** that rebuilds from query logs — this shape shows up repeatedly because it directly reflects the "precompute offline, serve from memory" constraint above.
+- **Elasticsearch's completion suggester** is the widely-used managed-infrastructure alternative to hand-rolling a trie service: it stores a finite state transducer (FST) per index segment, which means suggestion capacity scales horizontally simply by adding nodes, and it comes with fuzzy-matching (typo tolerance) essentially for free — a real trade-off against a hand-rolled trie's raw speed.
+- **Redis-based implementations** (sorted sets with lexicographic range queries, `ZRANGEBYLEX`) are a common pragmatic choice at companies that already run Redis at scale for other purposes (caching, rate limiting) and don't want to operate a second bespoke service just for autocomplete.
+- The consistently cited latency target across production write-ups is p99 in the tens-of-milliseconds, justified directly by typing cadence (~150ms between keystrokes) — the UX contract, not an arbitrary SLA, is what sets the latency budget here.
+
+## 6. Scaling & failure
+
+- **Bottleneck: one trie instance can't hold the full vocabulary in memory** → shard by prefix (first 1-2 characters, or a hash bucket of the first few characters) across many nodes; each shard replicated for read throughput and availability.
+- **Bottleneck: rebuild traffic competes with serving traffic on the same fleet** → build new trie versions on separate infrastructure, hot-swap the pointer once built, so builds never degrade read latency.
+- **Bottleneck: a single term suddenly goes viral (breaking news) and the hourly rebuild hasn't caught it** → the trending-now overlay above, refreshed on a much shorter cycle than the full trie, specifically to cover this gap.
+- **Bottleneck: request volume for the most popular prefixes (single-letter or two-letter prefixes hit by nearly everyone) is enormous** → cache those specific hot prefixes at the CDN/edge layer, since they're a tiny, stable, extremely cacheable key set.
+
+**What happens when the trie service dies**: because the trie is a pure derived/cached structure (rebuildable from query logs at any time, never the source of truth for anything), losing a shard or the whole service degrades the *feature*, not the *product* — the search box should fail to showing no suggestions (or falling back to a much smaller static/edge-cached popular-terms list) rather than blocking the user from typing their query and hitting search normally. Because shards are replicated, a single-node loss is invisible; a full regional outage falls back to routing to another region's replica set, or, worst case, autocomplete quietly disables itself while plain search keeps working.
+
+<Callout type="warn">
+The general shape to name: autocomplete is a latency/convenience feature layered on top of the real product (search), not the product itself. Design it so its failure mode is "suggestions disappear" — never "search breaks." That framing is the same "degrade the feature, not the whole request" idea from the rate limiter and feed Redis failure modes elsewhere in this series.
+</Callout>
+
+## Interview follow-ups
+
+- *"How do you keep p99 under 100ms when a prefix could have millions of matches?"* — Never rank at request time; the trie node already holds a precomputed, sorted top-K, so a lookup is O(prefix length), not O(matches).
+- *"How fresh are the suggestions, and how would you make a suddenly-trending query show up fast?"* — Base trie rebuilt hourly/daily from query logs; add a small, frequently-refreshed "trending now" overlay merged in at query time to cover the gap.
+- *"How do you shard a trie that doesn't fit on one machine?"* — By prefix (first character(s)), so requests route deterministically to the shard owning that prefix space; replicate each shard for availability and read throughput.
+- *"Trie vs Elasticsearch completion suggester — how do you choose?"* — Trie wins on raw latency and is worth building when this is a core, heavily-optimized feature; Elasticsearch wins when the team wants managed infra, needs fuzzy/typo-tolerant matching, and can accept its curve of overhead versus a hand-rolled service.
+- *"What happens to the site if the autocomplete service goes down entirely?"* — Suggestions disappear (empty dropdown or a small static fallback list); the search box and actual search results must keep working — autocomplete failing should never block the core action.
+- *"Why debounce on the client instead of sending a request per keystroke?"* — Typing "system" fires 6 requests without debouncing, almost all of them wasted since the user is still mid-word; a 100-150ms debounce cuts request volume dramatically with no perceptible UX cost.
+- *"How would you personalize suggestions (recent searches, per-user trending) without blowing the latency budget?"* — Keep the global trie as the base result set, and merge in a small per-user list (recent searches, cached client-side or in a fast per-user cache) at request time — the personalization layer stays tiny and cheap, the expensive global ranking stays offline.
+
+Sources: [Designing Search Autocomplete: Trie Data Structures at Scale — DEV Community](https://dev.to/matt_frank_usa/designing-search-autocomplete-trie-data-structures-at-scale-5f4k) · [Design Search Autocomplete: Prefix Matching at Scale — Sujeet Jaiswal](https://sujeet.pro/articles/design-search-autocomplete) · [Search Autocomplete System Design: FAANG Interview Guide — intervu.dev](https://intervu.dev/blog/search-autocomplete-system-design/) · [How to Use Redis for Search Suggest and Autocomplete — OneUptime](https://oneuptime.com/blog/post/2026-03-31-redis-search-suggest-autocomplete/view) · [Application Scaling with Elasticsearch @ StockTwits — Elastic Blog](https://www.elastic.co/blog/application-scaling-with-elasticsearch-at-stocktwits)

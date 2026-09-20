@@ -1,0 +1,58 @@
+---
+import type { MarkdownHeading } from 'astro';
+interface Props { headings: MarkdownHeading[]; minDepth?: number; maxDepth?: number }
+const { headings, minDepth = 2, maxDepth = 3 } = Astro.props;
+const items = headings.filter((h) => h.depth >= minDepth && h.depth <= maxDepth);
+---
+
+{items.length > 0 && (
+  <nav class="toc" aria-label="On this page">
+    <p class="toc-label">On this page</p>
+    <ul>
+      {items.map((h) => (
+        <li class={`d${h.depth}`}><a href={`#${h.slug}`}>{h.text}</a></li>
+      ))}
+    </ul>
+  </nav>
+)}
+
+<style>
+  .toc { max-height: calc(100vh - 8rem); overflow-y: auto; }
+  .toc ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.1rem; }
+  .toc a {
+    display: block;
+    padding: 0.22rem 0 0.22rem 0.75rem;
+    border-left: 2px solid var(--navy-line);
+    font-size: 0.78rem;
+    color: var(--muted);
+    line-height: 1.35;
+  }
+  .toc a:hover { color: var(--white); border-left-color: var(--navy-line-2); }
+  .toc a.active { color: var(--cyan); border-left-color: var(--cyan); }
+  .toc .d3 a { padding-left: 1.5rem; font-size: 0.74rem; }
+</style>
+
+<script>
+  const links = [...document.querySelectorAll<HTMLAnchorElement>('.toc a')];
+  const map = new Map(
+    links.map((a) => [a.getAttribute('href')!.slice(1), a]),
+  );
+  const targets = [...map.keys()]
+    .map((id) => document.getElementById(id))
+    .filter((el): el is HTMLElement => !!el);
+
+  if ('IntersectionObserver' in window && targets.length) {
+    const io = new IntersectionObserver(
+      (entries) => {
+        for (const e of entries) {
+          if (e.isIntersecting) {
+            links.forEach((l) => l.classList.remove('active'));
+            map.get(e.target.id)?.classList.add('active');
+          }
+        }
+      },
+      { rootMargin: '-10% 0px -75% 0px' },
+    );
+    targets.forEach((t) => io.observe(t));
+  }
+</script>

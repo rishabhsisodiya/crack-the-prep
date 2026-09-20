@@ -1,0 +1,93 @@
+---
+title: "System Design — Google Drive"
+track: "system-design"
+kind: "notes"
+order: 23
+slug: "google-drive"
+updated: 2026-09-11
+description: "Designing a cloud file storage and sync service — chunking, content-addressed dedup, delta sync, metadata vs blob storage, and conflict resolution across devices."
+---
+
+import Callout from '../../components/Callout.astro';
+import Mermaid from '../../components/Mermaid.astro';
+
+Part of the [system design](/prep/system-design) series. See the [framework](/prep/system-design) and [building blocks](/prep/system-design/building-blocks) first if you haven't.
+
+## 1. Requirements
+
+**Functional**
+- Upload, download, and organize files/folders; share with other users at file or folder granularity.
+- Sync automatically across a user's devices — edit on laptop, see the change on phone within seconds.
+- Keep version history and support offline edits that reconcile when connectivity returns.
+
+**Non-functional**
+- Durability first — losing a user's file is much worse than an hour of downtime (target 11 nines, matching S3-class guarantees).
+- Bandwidth-efficient sync — a 1-byte edit to a 2GB file shouldn't re-upload 2GB.
+- Handle huge fan-out: a single popular shared file can be read by millions of viewers; a single account can have millions of small files.
+- Strong metadata consistency (folder structure, permissions) even if blob storage is eventually consistent underneath.
+
+## 2. High-level architecture
+
+<Mermaid caption="Client, metadata, and block storage separated" code={`flowchart LR
+  C1[Client Laptop] -->|chunk + hash| API[API / Sync Service]
+  C2[Client Phone] -->|chunk + hash| API
+  API --> MD[(Metadata DB<br/>files, versions, permissions)]
+  API --> BLK[Block/Chunk Service]
+  BLK --> OBJ[(Object Storage<br/>content-addressed blocks)]
+  API --> NOTIF[Notification Service]
+  NOTIF -->|push: something changed| C1
+  NOTIF -->|push: something changed| C2
+`} />
+
+The core architectural move: **split metadata from blob content**. Metadata (file name, folder tree, permissions, which chunk-hashes make up a file, version pointers) lives in a strongly consistent database sized in the tens-to-hundreds of TB. The actual bytes live in a content-addressed block store sized in exabytes. This mirrors what Dropbox calls Magic Pocket for the blob layer and a separate metadata service in front of it.
+
+## 3. Chunking and dedup trade-offs
+
+| Approach | Dedup quality | CPU cost | Notes |
+|---|---|---|---|
+| Whole-file hashing | Only catches identical files | Low | Useless for "one paragraph changed in a 500-page doc" |
+| Fixed-size chunking (e.g. 4MB blocks) | Good, simple | Low | What Dropbox's Magic Pocket uses in production — immutable, content-addressed 4MB blocks |
+| Content-defined chunking (rolling hash, e.g. Rabin fingerprint) | Best — survives byte insertions/deletions, not just edits at chunk boundaries | Higher (rolling hash over the whole file) | Needed when edits shift byte offsets (e.g. inserting a line at the top of a text file) |
+
+<Callout type="tip">
+The classic trap: fixed-size chunking breaks badly if someone inserts a single byte at the start of a file — every chunk boundary shifts, so every chunk hash changes even though 99.9% of the content is identical. Content-defined chunking (rolling hash, chunk boundary determined by content pattern not fixed offset) survives insertions/deletions because boundaries "resync" after the edit. Say this explicitly if asked why dedup rates matter.
+</Callout>
+
+Each chunk gets a SHA-256 hash. The client's sync algorithm: chunk the file locally, send only the list of hashes to the server, server responds with which hashes it doesn't already have, client uploads only those chunks. This is the **delta sync** pattern — SystemCraft-style breakdowns cite this cutting Dropbox-style bandwidth by 60%+ for typical edit patterns, because most edits touch a small fraction of a file's chunks.
+
+## 4. Deep dive: sync and conflict resolution
+
+**Detecting changes on the client**: a local file-watcher (inotify on Linux, FSEvents on macOS, ReadDirectoryChangesW on Windows) detects local edits without polling the filesystem. For the server → client direction, a long-lived connection (WebSocket or long-poll) or a lightweight push notification tells other devices "something changed for you, go fetch the new metadata" — the notification carries no file content, just a cue to sync.
+
+**Conflict resolution**: two devices edit the same file while offline, then both come back online.
+- Keep a monotonically increasing version number (or vector clock) per file.
+- On sync, if the client's base version doesn't match the server's current version, it's a conflict — apply **last-writer-wins with a conflicted copy**: save the server's version as the true one, and write the client's conflicting edit as `filename (conflicted copy from Device, date).ext` rather than silently discarding it. This is what Dropbox does in practice — never destroy a user's edit, even a losing one.
+- For folder moves/renames, treat metadata operations (rename, move, delete) as their own small ops with their own version numbers, separate from content versions, so a rename doesn't force a full re-upload.
+
+## 5. What real systems do today
+
+**Dropbox's Magic Pocket** (their in-house blob store, replacing S3 around 2016) stores data as immutable, content-addressed 4MB blocks. Recently written blocks are replicated across multiple machines in at least two of three US zones for durability, then aggregated and erasure-coded (rather than kept as full replicas) once they're cold, which is dramatically cheaper than 3x replication at exabyte scale. A single Magic Pocket "cell" holds roughly 50PB across Object Storage Devices — machines with 1PB+ of disk each. Dropbox later extended this with SMR (shingled magnetic recording) drives to push density further per rack.
+
+Most cloud-storage system-design breakdowns converge on the same shape Dropbox and Google Drive both use: separate metadata service (strongly consistent, e.g. a sharded relational store or spanner-like system) from a block/object store (eventually consistent, massively replicated, content-addressed for free dedup — two users uploading the same movie file only store it once).
+
+## 6. Scaling & failure
+
+- **Metadata DB becomes the bottleneck** as file/folder count grows into billions of rows → shard by user ID (most queries are "list this user's files"), keep a separate cross-shard index only for sharing/search.
+- **Hot shared files** (a file shared with a large team or made public) → front the object store with a CDN; object storage read paths scale horizontally far more easily than write paths.
+- **Small-file overhead** — millions of tiny files each needing chunk/hash bookkeeping wastes metadata rows → batch small files into larger physical blocks under the hood (this is part of why Magic Pocket's 4MB block size exists — it amortizes per-block metadata cost, and content addressing lets a 10KB file share a block region without re-chunking).
+
+**What happens when the metadata DB dies**: uploads and downloads of already-known content can, in principle, still move through the block store, but nothing can resolve "which chunks make up file X" or check permissions — so in practice the whole sync experience halts. The fix is the standard one: multi-region replicas of the metadata store with a fast failover, and the client falls back to serving already-locally-cached files from disk (read-only, no new syncs) rather than erroring out — the user sees stale-but-present files instead of a blank app.
+
+**What happens when object storage is degraded** (not down, but slow/high-latency in one zone): the metadata layer still works, so the UI stays responsive for browsing/renaming/sharing, but new uploads/downloads queue and retry with backoff rather than fail hard — the client shows a "syncing" spinner instead of an error, because a chunk that fails once will very likely succeed against the redundant zone on retry.
+
+## Interview follow-ups
+
+- *"How do you avoid re-uploading a whole file when the user changes one line?"* — Content-defined chunking + delta sync: chunk locally, send hashes, upload only chunks the server doesn't already have.
+- *"Two devices edited the same file offline. What happens when both reconnect?"* — Version/vector-clock mismatch detected on sync; last-writer-wins on the canonical copy, but the losing edit is preserved as a conflicted copy, never silently dropped.
+- *"Why separate metadata storage from blob storage instead of one database?"* — Wildly different consistency and scale requirements: metadata needs strong consistency at moderate scale (folder tree correctness matters), blobs need extreme scale and durability but can tolerate eventual consistency.
+- *"How does content-addressing give you deduplication for free?"* — Two users uploading byte-identical content produce the same hash, so the block store just increments a reference count instead of storing a second copy.
+- *"Metadata DB just went down across a region. What's the user experience?"* — Already-synced files stay available read-only from local cache; new syncs pause with a visible "offline" state until failover completes, rather than erroring.
+- *"How do you push a 100,000-person team a permission change without hammering the metadata DB?"* — Push a lightweight invalidation event via the notification service, let each client pull the updated ACL lazily on next access rather than fan-out writing to every session immediately.
+- *"Why 4MB chunks and not, say, 64KB?"* — Trade-off between dedup granularity (smaller = better dedup) and per-chunk metadata/network overhead (smaller = more hash round-trips and more rows per file); 4MB is the point Dropbox found balances both at their scale.
+
+Sources: [Scaling to exabytes and beyond — Dropbox Tech](https://dropbox.tech/infrastructure/magic-pocket-infrastructure) · [Inside the Magic Pocket — Dropbox Tech](https://dropbox.tech/infrastructure/inside-the-magic-pocket) · [Extending Magic Pocket Innovation with SMR drives — Dropbox Tech](https://dropbox.tech/infrastructure/extending-magic-pocket-innovation-with-the-first-petabyte-scale-smr-drive-deployment) · [File Storage System Design (Dropbox / Google Drive) — Intervu.dev](https://intervu.dev/blog/file-storage-dropbox-google-drive-system-design/) · [Design Dropbox / Google Drive — SystemCraft](https://systemcraft.in/hld/Dropbox/)

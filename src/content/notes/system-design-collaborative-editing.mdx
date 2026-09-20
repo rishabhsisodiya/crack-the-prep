@@ -1,0 +1,100 @@
+---
+title: "System Design — Collaborative Document Editing"
+track: "system-design"
+kind: "notes"
+order: 28
+slug: "collaborative-editing"
+updated: 2026-09-11
+description: "Designing real-time collaborative editing like Docs or Figma — OT vs CRDT trade-offs, why Figma got away with 'last write wins on a tree', and the tombstone-growth problem CRDTs create."
+---
+
+import Callout from '../../components/Callout.astro';
+import Mermaid from '../../components/Mermaid.astro';
+
+Part of the [system design](/prep/system-design) series. See the [framework](/prep/system-design) and [building blocks](/prep/system-design/building-blocks) first if you haven't.
+
+## 1. Requirements
+
+**Functional**
+- Multiple users edit the same document/canvas concurrently; every user sees every other user's changes converge to the same final state.
+- Low-latency local echo — a user's own keystrokes/drags must feel instant, never waiting on a round trip.
+- Presence (who's viewing/editing, cursor positions) and offline editing that syncs and merges on reconnect.
+- Version history / undo that behaves sanely even with concurrent edits from others interleaved.
+
+**Non-functional**
+- Convergence: every client that has seen the same set of operations must end up in the same state, regardless of the order operations arrived in.
+- Low added latency for local edits (sub-frame for a canvas tool like Figma, near-instant for text).
+- Scale to a document with a large edit history (Figma documents accumulate tens of millions of operations over their lifetime) without unbounded memory/file-size growth.
+- Network partition tolerance — a client that drops offline for a while must be able to rejoin and merge cleanly.
+
+## 2. Where it sits / high-level architecture
+
+<Mermaid caption="Central server relays and orders; clients hold local + pending state" code={`flowchart TD
+  A[Client A local doc<br/>+ pending ops] -->|WebSocket: op/update| SRV[Sync server]
+  B[Client B local doc<br/>+ pending ops] -->|WebSocket: op/update| SRV
+  SRV -->|assign order / transform / merge| SRV
+  SRV -->|broadcast accepted op| A
+  SRV -->|broadcast accepted op| B
+  SRV -->|periodic snapshot| DB[(Document store)]
+  SRV -->|append-only op log| LOG[(Operation log)]
+`} />
+
+- A **central server per document** (or per document-shard) is the pragmatic real-world choice — full peer-to-peer sync (what academic CRDT literature targets) adds huge complexity that most products don't need, because every edit already flows through your servers anyway.
+- Clients keep a **local copy of the document plus a queue of unacknowledged local operations**, so typing/dragging never waits on the network — this is what makes it feel instant.
+- The server is the **arbiter of order**: it either transforms incoming operations against what's already been applied (OT) or simply merges commutative updates (CRDT), then broadcasts the accepted result to every connected client.
+
+## 3. OT vs CRDT trade-offs
+
+| Approach | Core idea | Server role | Strength | Weakness |
+|---|---|---|---|---|
+| Operational Transformation (OT) | Transform an incoming operation against concurrent operations so it applies correctly regardless of arrival order | Must hold full transform logic; often a single ordering authority per document | Mature, battle-tested for linear text (Google Docs) | Transform functions are notoriously hard to get correct for every operation pair; doesn't generalize well to trees/graphs (canvas objects, nested blocks) |
+| CRDT (Conflict-free Replicated Data Type) | Design the data structure so concurrent updates commute — merging is just "apply both, deterministic tie-break" | Can be much thinner — just relay/merge, doesn't need transform logic | Generalizes better to structured data (trees), works offline-first without a central authority in the academic form | Full CRDTs carry metadata (tombstones, unique IDs per element) that grows the document; needs compaction |
+| Figma's simplified CRDT | Model the document as a tree of objects; last-write-wins per property, with a server that guarantees tree validity | Central server still required — but only to arbitrate the tree structure, not full decentralized consensus | Much simpler than a textbook CRDT because Figma didn't need the decentralized guarantees — every edit already flows through one server | Deletions leave tombstones that can balloon file size if uncompacted |
+
+<Callout type="tip">
+The move that impresses in an interview: recognize that "CRDT" in the academic sense (built for fully decentralized, peer-to-peer systems with no central authority) is *more* machinery than most products need. Figma explicitly chose the simplified path — since every edit already flows through one server, they didn't need the vector-clock/decentralized-conflict machinery of a textbook CRDT, just per-property last-write-wins on a tree, with the server enforcing structural validity (no cycles, no orphaned children).
+</Callout>
+
+<Callout type="warn">
+Don't default to "just use a CRDT library" without naming the cost: Figma found documents accumulating 10+ million tombstones from deleted shapes at ~32 bytes each, ballooning some files into the gigabytes. Any CRDT-based design needs an explicit compaction/garbage-collection story, not an afterthought.
+</Callout>
+
+## 4. Deep dive — the two hardest parts
+
+**a) Local-first responsiveness with server-arbitrated order (OT specifically).** The client applies its own edit optimistically and immediately, before the server has acknowledged it. When the server's broadcast of *other* clients' concurrent edits arrives, the client must transform its own still-pending local operations against them so the final state is consistent — this is the client-side half of OT, and it's the part most implementations get subtly wrong (e.g. two simultaneous inserts at the same cursor position need a deterministic tie-break, usually by client/user id, or the two clients diverge). Google Docs' OT implementation is the canonical example: operations are indices into the text plus content, and the transform function has to handle every pairing (insert-insert, insert-delete, delete-delete) correctly, including the offset math when a concurrent op has already shifted the document.
+
+**b) Tombstone and history growth (CRDT specifically).** A CRDT needs to remember that an element *used to exist* to correctly resolve a concurrent "someone edited this while someone else deleted it" case — hence tombstones instead of true deletion. Left unmanaged, these accumulate forever. Figma's fix: once a document crosses roughly 1 million tombstones, the server materializes a new CRDT snapshot with history older than 7 days discarded, which they report cuts file size by around 90%. The general pattern — periodic snapshot + bounded history window, with the snapshot becoming the new baseline — is the standard answer to "how do you keep a CRDT-backed document from growing forever," and it generalizes past Figma to any CRDT-backed system (offline-first mobile apps, distributed databases using CRDTs for replica convergence).
+
+## 5. What real systems do today
+
+- **Google Docs** uses Operational Transformation — this is the well-known, publicly documented choice, and it's why Docs' collaboration model is deeply tied to text as a linear sequence of characters rather than an arbitrary tree.
+- **Figma** switched to (a simplified) CRDT approach specifically because it isn't a text editor — the document is a tree of design objects (frames, shapes, nested groups), which OT handles poorly but a tree-shaped last-write-wins CRDT handles naturally. Every edit still routes through a single server per file, which is what let them skip the decentralized-consensus machinery of a textbook CRDT.
+- **Notion** persists its block-based document model in PostgreSQL (reported at 96 servers, 5 logical shards each as of a few years ago), partitioned by workspace, with a WebSocket-based `MessageStore` layer for real-time propagation and a `/saveTransactions` endpoint that validates and merges concurrent edits server-side — a hybrid that leans more on server-side transaction validation than a pure CRDT merge.
+- **Linear** built its own sync engine around an in-memory object graph (MobX) with an event/transaction queue pushing changes to the backend; notably, Linear historically avoided full CRDTs and only adopted them narrowly (e.g. for rich-text issue descriptions), preferring simpler last-write-wins semantics for most fields — a real-world data point that CRDTs are not a default you reach for everywhere, just where genuine concurrent-text-merge matters.
+- The broader industry framing echoed across 2025-2026 engineering write-ups: OT and CRDTs solve the same convergence problem from different ends — OT bets on a smart, centrally-arbitrated transform; CRDTs bet on a data structure that makes conflicts structurally impossible, at the cost of metadata overhead you must actively manage.
+
+## 6. Scaling & failure
+
+| Bottleneck | Fix | New cost |
+|---|---|---|
+| One document = one hot server process handling all its edits, and a very active document (a large team on one Figma file) saturates it | Keep documents independently shardable — no cross-document coordination needed, so shard by document id across many server processes | Cross-document operations (e.g. copy-paste between two files) become an explicit, separately-handled case rather than "just another op" |
+| Unbounded op log / tombstone growth | Periodic snapshot + compaction, discard history past a retention window (Figma: ~7 days) | Very old undo history becomes unavailable past the retention window — acceptable trade for file size |
+| Presence/cursor broadcast at high edit frequency (e.g. many cursors on one Figma file) | Throttle presence updates separately from document ops (lower frequency, best-effort, don't persist) | Presence can lag slightly; nobody notices sub-second cursor lag the way they'd notice a lost edit |
+| WebSocket fan-out to many viewers of one popular/public document | Dedicated pub/sub broadcast layer per document rather than the ops server doing fan-out itself | Extra hop, but keeps the document's authoritative merge logic isolated from pure-read viewer scaling |
+
+**What happens when the sync server for a document dies**
+- Every connected client already holds a full local copy of the document plus its own unacknowledged pending operations — nothing is lost client-side. On reconnect (to a newly assigned server instance, since these are typically stateless-server/stateful-storage designs backed by a durable op log or periodic snapshot), each client resyncs: pulls the latest accepted state, replays or re-transforms/re-merges its pending local ops against it.
+- The durable op log (or, for CRDTs, the latest snapshot plus recent ops) in persistent storage is the real source of truth the server rehydrates from — the in-memory server process is just an arbitration cache, similar in spirit to the geo-index-is-disposable pattern in dispatch systems.
+- The failure mode to explicitly avoid: silently dropping a user's pending local edits on reconnect. The correct behavior is always merge-and-replay, never discard, even if that means briefly showing a "reconnecting, syncing changes…" state.
+
+## Interview follow-ups
+
+- *"OT or CRDT — which would you pick for a text editor vs a design tool, and why?"* — OT for linear text (Google Docs' proven path); CRDT-on-a-tree for structured/graph documents (Figma) because OT's transform functions don't generalize cleanly to trees.
+- *"Why didn't Figma need a 'real' academic CRDT?"* — Because every edit already flows through one central server per file — they didn't need the decentralized-consensus machinery a peer-to-peer CRDT needs, just per-property last-write-wins plus server-enforced tree validity.
+- *"How do you stop a CRDT-based document from growing forever?"* — Tombstones accumulate on every delete; periodic snapshot + bounded history retention (Figma's ~1M-tombstone trigger, 7-day window, ~90% size reduction) is the standard fix.
+- *"Two users type at the exact same cursor position at the same time — what happens?"* — Needs a deterministic tie-break (commonly by user/client id) so every client converges to the same final order; this is exactly the part of OT transform functions that's easy to get subtly wrong.
+- *"A client goes offline mid-edit and reconnects 10 minutes later. What happens to their changes?"* — Client held pending ops locally; on reconnect it re-syncs against the latest server state and replays/merges its pending ops — never silently discards them.
+- *"The sync server for a busy document crashes. What's the blast radius?"* — Clients keep local state and reconnect to a new instance backed by the durable op log/snapshot; nothing lost, brief "reconnecting" UX at worst.
+- *"How would you scale to a document with thousands of simultaneous viewers (a public Figma file, a viral Doc)?"* — Separate the read-only broadcast/fan-out layer from the small set of actual editors doing merge-worthy ops; most viewers only need pub/sub delivery, not participation in the merge algorithm.
+
+Sources: [How Figma's Multiplayer Technology Works — Figma Blog](https://www.figma.com/blog/how-figmas-multiplayer-technology-works/) · [How Figma Built Multiplayer Editing on Simplified CRDTs — Hello Interview](https://www.hellointerview.com/learn/system-design/in-the-wild/figma-multiplayer) · [CRDTs vs. Operational Transformation: How Google Docs Handles Collaborative Editing](https://systemdr.systemdrd.com/p/crdts-vs-operational-transformation) · [How Notion Was Built: Block Model, Architecture, and Sync Pipeline — HowWorks](https://howworks.ai/blog/how-notion-was-built) · [Linear's sync engine architecture — Yuya Fujimoto](https://www.fujimon.com/blog/linear-sync-engine)

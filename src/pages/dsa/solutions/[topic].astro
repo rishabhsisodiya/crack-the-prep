@@ -1,0 +1,179 @@
+---
+import { Code } from 'astro-expressive-code/components';
+import PrepLayout from '../../../layouts/PrepLayout.astro';
+import { solutions } from '../../../data/dsa-solutions.mjs';
+import { u, kebab } from '../../../consts';
+
+// distinct topics, first-seen order
+const topics = [];
+for (const s of solutions) if (!topics.includes(s.topic)) topics.push(s.topic);
+
+export function getStaticPaths() {
+  const seen = [];
+  for (const s of solutions) if (!seen.includes(s.topic)) seen.push(s.topic);
+  return seen.map((t, i) => ({
+    params: { topic: t.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '') },
+    props: { topic: t, prevTopic: seen[i - 1] ?? null, nextTopic: seen[i + 1] ?? null },
+  }));
+}
+
+const { topic, prevTopic, nextTopic } = Astro.props;
+const items = solutions.filter((s) => s.topic === topic);
+const approaches = items.reduce((n, s) => n + s.approaches.length, 0);
+
+const prev = prevTopic
+  ? { href: u(`/dsa/solutions/${kebab(prevTopic)}`), label: prevTopic }
+  : { href: u('/dsa/solutions'), label: 'All topics' };
+const next = nextTopic ? { href: u(`/dsa/solutions/${kebab(nextTopic)}`), label: nextTopic } : undefined;
+---
+
+<PrepLayout
+  track="dsa"
+  title={`${topic} — DSA Solutions`}
+  description={`Worked solutions for ${items.length} ${topic} problems — idea, complexity and code for every approach.`}
+  prev={prev}
+  next={next}
+>
+  <div class="prose">
+    <nav class="crumbs">
+      <a href={u('/dsa/solutions')}>Solutions</a> <span aria-hidden="true">/</span> {topic}
+    </nav>
+    <h1>{topic}</h1>
+    <p class="lede">{items.length} problems · {approaches} approaches</p>
+    <p class="xlink">
+      <a href={u('/dsa')}>← Checklist</a> · <a href={u('/dsa/solutions')}>All topics →</a>
+    </p>
+  </div>
+
+  <div class="controls">
+    <button type="button" data-all="open">Reveal all</button>
+    <button type="button" data-all="close">Hide all</button>
+  </div>
+
+  <div class="sol-list">
+    {items.map((s) => (
+      <details class="sol" id={kebab(s.problem)}>
+        <summary>
+          <span class="q">{s.problem}</span>
+          {s.difficulty && <span class={`diff diff--${s.difficulty.toLowerCase()}`}>{s.difficulty}</span>}
+          <span class="n">{s.approaches.length} {s.approaches.length === 1 ? 'approach' : 'approaches'}</span>
+        </summary>
+        <div class="body">
+          {s.also && s.also.length > 0 && (
+            <p class="also">Also asked as: {s.also.join(' · ')}</p>
+          )}
+          {s.approaches.map((a, i) => (
+            <div class="approach">
+              <h3>{i + 1}. {a.name}</h3>
+              <p class="cx">
+                <span><b>Time</b> {a.time}</span>
+                <span><b>Space</b> {a.space}</span>
+              </p>
+              <p class="idea">{a.idea}</p>
+              <Code code={a.code} lang="js" />
+              {a.note && <p class="note">{a.note}</p>}
+            </div>
+          ))}
+        </div>
+      </details>
+    ))}
+  </div>
+</PrepLayout>
+
+<style>
+  .crumbs { font-family: var(--font-mono); font-size: 0.72rem; color: var(--muted); display: flex; gap: 0.5rem; }
+  .lede { font-family: var(--font-mono); font-size: 0.8rem; color: var(--muted); margin: 0.3rem 0 0.6rem; }
+  .xlink { font-family: var(--font-mono); font-size: 0.8rem; }
+
+  .controls { display: flex; gap: 0.6rem; margin: 1.2rem 0 1.4rem; }
+  .controls button {
+    font-family: var(--font-mono);
+    font-size: 0.68rem;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    padding: 0.35rem 0.7rem;
+    background: var(--navy-card);
+    border: 1px solid var(--navy-line-2);
+    color: var(--muted);
+    border-radius: 4px;
+    cursor: pointer;
+  }
+  .controls button:hover { color: var(--cyan); border-color: var(--cyan); }
+
+  .sol {
+    border: 1px solid var(--navy-line);
+    border-radius: 8px;
+    background: var(--navy-card);
+    margin: 0.7rem 0;
+    overflow: hidden;
+    scroll-margin-top: 5rem;
+  }
+  .sol > summary {
+    list-style: none;
+    cursor: pointer;
+    padding: 0.9rem 1.1rem;
+    display: flex;
+    align-items: center;
+    gap: 0.7rem;
+    flex-wrap: wrap;
+  }
+  .sol > summary::-webkit-details-marker { display: none; }
+  .sol > summary::before { content: '›'; color: var(--cyan); font-family: var(--font-mono); transition: transform 0.15s; }
+  .sol[open] > summary::before { transform: rotate(90deg); }
+  .sol[open] > summary { border-bottom: 1px solid var(--navy-line); background: rgba(0, 180, 216, 0.05); }
+  .sol .q { font-weight: 600; color: var(--white); }
+  .sol .n { margin-left: auto; font-family: var(--font-mono); font-size: 0.68rem; color: var(--muted); }
+
+  .diff {
+    font-family: var(--font-mono);
+    font-size: 0.58rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    padding: 0.1rem 0.45rem;
+    border-radius: 999px;
+    border: 1px solid currentColor;
+  }
+  .diff--easy { color: var(--green); }
+  .diff--medium { color: var(--gold); }
+  .diff--hard { color: var(--danger); }
+
+  .body { padding: 0.6rem 1.1rem 1rem; }
+  .also { font-size: 0.8rem; color: var(--muted); margin: 0.4rem 0 1rem; }
+
+  .approach { margin: 1.4rem 0; }
+  .approach:first-of-type { margin-top: 0.6rem; }
+  .approach h3 { font-size: 1rem; color: var(--blue-light); margin: 0 0 0.4rem; }
+  .approach .cx {
+    display: flex;
+    gap: 1.2rem;
+    font-family: var(--font-mono);
+    font-size: 0.74rem;
+    color: var(--muted);
+    margin: 0 0 0.5rem;
+  }
+  .approach .cx b { color: var(--text); font-weight: 500; }
+  .approach .idea { font-size: 0.92rem; margin: 0 0 0.6rem; }
+  .approach .note {
+    font-size: 0.82rem;
+    color: var(--muted);
+    border-left: 2px solid var(--navy-line-2);
+    padding-left: 0.7rem;
+    margin: 0.6rem 0 0;
+  }
+</style>
+
+<script>
+  document.querySelectorAll('.controls button[data-all]').forEach((btn) =>
+    btn.addEventListener('click', () => {
+      const open = btn.getAttribute('data-all') === 'open';
+      document.querySelectorAll('details.sol').forEach((d) => ((d as HTMLDetailsElement).open = open));
+    }),
+  );
+  if (location.hash) {
+    const el = document.querySelector(location.hash);
+    if (el && el.tagName === 'DETAILS') {
+      (el as HTMLDetailsElement).open = true;
+      el.scrollIntoView();
+    }
+  }
+</script>

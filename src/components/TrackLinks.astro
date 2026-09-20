@@ -1,0 +1,48 @@
+---
+import { TRACKS, u } from '../consts';
+
+interface Props { track: string }
+const { track } = Astro.props;
+const path = Astro.url.pathname.replace(/\/$/, '');
+---
+
+<ul class="track-links">
+  {TRACKS.map((t) => {
+    const onTrack = t.slug === track;
+    const onQuestions = onTrack && path.endsWith('/questions');
+    const activeSection = onTrack
+      ? t.sections?.find((sec) => path === u(`/${t.slug}/${sec.path}`).replace(/\/$/, '') || path.startsWith(u(`/${t.slug}/${sec.path}/`)))
+      : undefined;
+    return (
+      <li>
+        <a href={u(`/${t.slug}`)} aria-current={onTrack && !onQuestions && !activeSection ? 'page' : undefined}>
+          {t.title}
+        </a>
+        {t.hasQuestions && (
+          <a class="sub" href={u(`/${t.slug}/questions`)} aria-current={onQuestions ? 'page' : undefined}>
+            Interview questions
+          </a>
+        )}
+        {t.sections?.map((sec) => (
+          <a class="sub" href={u(`/${t.slug}/${sec.path}`)} aria-current={activeSection === sec ? 'page' : undefined}>
+            {sec.label}
+          </a>
+        ))}
+      </li>
+    );
+  })}
+</ul>
+
+<style>
+  .track-links { list-style: none; display: flex; flex-direction: column; gap: 0.15rem; }
+  .track-links a {
+    display: block;
+    padding: 0.3rem 0 0.3rem 0.9rem;
+    border-left: 2px solid var(--navy-line);
+    font-size: 0.85rem;
+    color: var(--muted);
+  }
+  .track-links a:hover { color: var(--white); }
+  .track-links a[aria-current='page'] { color: var(--cyan); border-left-color: var(--cyan); }
+  .track-links a.sub { padding-left: 1.7rem; font-size: 0.78rem; }
+</style>

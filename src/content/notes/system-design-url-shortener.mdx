@@ -1,0 +1,108 @@
+---
+title: "System Design — URL Shortener"
+track: "system-design"
+kind: "notes"
+order: 15
+slug: "url-shortener"
+updated: 2026-09-11
+description: "Designing a URL shortener from requirements through code-generation strategies, key-value data modeling, redirect-path caching, and what happens when the counter service dies."
+---
+
+import Callout from '../../components/Callout.astro';
+import Mermaid from '../../components/Mermaid.astro';
+
+Part of the [system design](/prep/system-design) series. See the [framework](/prep/system-design) and [building blocks](/prep/system-design/building-blocks) first if you haven't.
+
+## 1. Requirements
+
+**Functional**
+- Accept a long URL and return a short code (`POST /urls`); support an optional custom alias and an optional expiry.
+- Redirect `GET /:code` to the original long URL.
+- Track basic click analytics (count, and ideally referrer/geo/time) without slowing down the redirect.
+
+**Non-functional**
+- Redirects must be very low latency (sub-50ms) — this is the path users actually feel, and it's on the critical path of every click coming from every other app that embeds your links.
+- Read-heavy by a huge margin: creation is a one-time write, a popular link gets read thousands of times. A 100:1 to 1000:1 read:write ratio is typical.
+- Codes must be unique and, in practice, hard to guess in sequence (you don't want `aZ4k+1` to be someone else's private link).
+- Durable — a dead link breaks every place it was ever shared, which for a business (marketing campaigns, print material, SMS) is a real cost, not just an inconvenience.
+
+## 2. High-level architecture
+
+<Mermaid caption="Write and read paths are asymmetric — this is the whole design" code={`flowchart LR
+  W[Client: create] --> LB1[Load Balancer]
+  LB1 --> WS[Write service]
+  WS --> IDG[ID generator<br/>range-allocated counters]
+  WS --> DB[(Key-value store<br/>code -> long_url)]
+  R[Client: click code] --> LB2[Load Balancer]
+  LB2 --> RS[Redirect service]
+  RS --> CACHE[(Redis cache)]
+  CACHE -- miss --> DB
+  RS -.async click event.-> STREAM[[Kafka / Kinesis]]
+  STREAM --> AGG[Analytics aggregator]
+`} />
+
+Write and read paths deserve to be *separate services* even before you separate them physically: the write path cares about correctness and uniqueness, the read path cares about latency and cache hit rate, and they should be able to scale independently. At the scale most interviewers expect (100M new links/month, ~40 writes/sec, but 4,000+ redirects/sec at a 100:1 ratio), the read service is the one you spend your scaling budget on.
+
+## 3. Generating the code
+
+| Strategy | How | Collision handling | Trade-off |
+|---|---|---|---|
+| Counter + base62 | Global auto-increment id, base62-encoded | None needed — monotonic | Shortest codes, but the counter is a shared dependency; sequential ids leak volume and are guessable |
+| Pre-allocated ranges | A central service hands each app server a range of 1,000–10,000 ids to burn through locally | None — ranges never overlap | Removes the per-request round trip to a central counter; a server that crashes mid-range just wastes the unused tail (cheap) |
+| Random base62 (7 chars) | `crypto`-random 7 chars, 62⁷ ≈ 3.5 trillion codes | Check-and-retry on collision (rare at this space size) | No shared-counter dependency at all; a small, decreasing chance of a wasted DB round trip on collision |
+| Hash (SHA-256 truncated) | base62 of the first ~43 bits of `SHA256(long_url)` | Needs a collision list per URL, since truncated hashes do collide | Same URL always maps to the same code (dedupes accidental re-shortens) — but that's also a privacy leak if two different users shorten the same URL and one can predict the other's code |
+
+<Callout type="tip">
+The interview trap here is treating "unique ID" as a solved sub-problem and jumping straight to Snowflake IDs. Say explicitly why you're *not* using a pure random UUID (too long once base62-encoded, ~22 chars vs. 7) and why counter-based generation needs range pre-allocation, not a single global counter hit on every request.
+</Callout>
+
+**Range-allocated counters in practice.** A small coordination service (or a row per app-server lease in a relational table with `SELECT ... FOR UPDATE`) hands out `(start, end)` ranges. Each app server increments a local in-memory counter within its leased range and only talks to the coordinator again when it exhausts the range. This turns "one Redis/DB round trip per URL created" into "one round trip per 1,000–10,000 URLs created" — the same amortization trick distributed ID generators like Snowflake and Twitter's original ticket-server use, just simpler because you don't need global time-ordering, only uniqueness.
+
+## 4. Data model
+
+`urls(code PK, long_url, created_at, expires_at, owner_id, custom_alias BOOLEAN)`. A key-value store (DynamoDB, Cassandra, or even a sharded MySQL keyed by `code`) fits well: every access pattern is a single-key point lookup, there are no joins, and the volume (billions of rows over a few years of retention) is exactly what these stores are built for.
+
+Click analytics do **not** belong in the same store or the same write path. Emit a lightweight event (`code`, `timestamp`, `referrer`, `ip`-derived geo) to a stream (Kafka/Kinesis) from the redirect service and aggregate it asynchronously. Writing an analytics row synchronously on every redirect would put a database write on the critical path of the fastest, hottest endpoint in the system — exactly backwards.
+
+## 5. Deep dive — the redirect path
+
+`GET /:code` is the whole product from a user's perspective, so it gets the most design attention:
+
+1. Check Redis first (`code -> long_url`), which should absorb the overwhelming majority of traffic — link click distributions are heavily power-law (a small fraction of links account for most clicks), so cache hit rates in production systems on this pattern are typically well above 95%.
+2. On a miss, read the key-value store and backfill the cache with a long TTL (hours to days — long URLs essentially never change once created).
+3. Choose `301` (permanent redirect, cached by the browser/CDN itself, so a repeat visitor may never even hit your server again) vs. `302` (temporary, forces every click through your server) deliberately: `301` is cheaper at scale, `302` is required if you need every single click counted server-side for analytics. Many production shorteners use `302` specifically to not lose click data to browser caching.
+
+<Callout type="warn">
+A subtlety worth naming out loud: if you serve `301`s, your click-count analytics undercounts repeat visits from the same browser, because the browser stops calling you. If analytics accuracy matters to the product (ad campaigns billed by click), that alone can force the `302` decision even though it's the slower-scaling choice.
+</Callout>
+
+## 6. What real systems do today
+
+Public write-ups from companies operating link shorteners at scale converge on the same shape described above — separate, independently-scaled read and write paths, key-value storage keyed by the short code, and aggressive edge/CDN caching of the redirect itself. TinyURL- and Bitly-scale systems report needing to support on the order of tens of thousands of redirects per second at peak with the actual database rarely touched, because CDN and application-cache layers absorb almost all read traffic — the redirect is one of the most cacheable operations in any system since a given code's target essentially never changes after creation. The consistent theme across recent (2025) system-design write-ups on this problem is a 100:1-plus read:write ratio driving every downstream decision: cache-first reads, asynchronous analytics, and treating the database as a durable backstop rather than the primary serving path.
+
+Distributed unique-ID generation at this scale generally follows the Twitter Snowflake pattern (timestamp + machine id + sequence number packed into a 64-bit int) when global time-ordering of ids is also useful (e.g., for debugging or range-based operations); pure counter-range allocation is preferred when time-ordering isn't needed and shorter codes matter more.
+
+## 7. Scaling & failure
+
+| Bottleneck | Fix | New cost |
+|---|---|---|
+| Redirect service under read load | Cache-aside Redis in front of the KV store; push cacheable (`301`) redirects to a CDN edge | Slightly stale reads if a link is ever mutated (rare) |
+| KV store hot-partitioned on popular codes | Shard by a hash of the code, not the code itself, so sequential/counter-based codes don't cluster on one shard | Loses any accidental locality benefit of sequential codes |
+| Central ID counter under write load | Range-pre-allocation (see §3) so most creates never touch the coordinator | A crashed server wastes its unused range tail — cheap and bounded |
+| Analytics writes competing with redirect latency | Move to an async stream + separate aggregator, never write analytics synchronously in the redirect handler | Analytics counts lag by seconds, which is fine for a dashboard |
+
+**What happens when the ID-generation service dies.** Because ranges are pre-leased in blocks of thousands, an app server that already holds a lease keeps minting valid codes with zero dependency on the coordinator being up — this is the main reason to range-allocate rather than hit a shared counter per request. Only a server that has *just* exhausted its range and needs a new one is blocked, and only until the coordinator recovers; that's a small, gracefully-degrading blast radius compared to every single create request failing. Some systems sidestep this entirely by falling back to random-code generation with collision-check-and-retry during a counter outage, trading slightly longer codes for zero create-path dependency on the ID service.
+
+**What happens when Redis (the redirect cache) dies.** Reads fall through to the key-value store directly. If the KV store is provisioned to survive a full cold-cache stampede (or you rate-limit cache rebuild with request coalescing so 10,000 concurrent misses for the same hot code don't become 10,000 DB reads), this degrades latency, not correctness — the same fail-open philosophy as the rate limiter's Redis dependency.
+
+## Interview follow-ups
+
+- *"Why not just use a UUID as the short code?"* — Base62-encode it and it's ~22 characters, defeating the purpose of a *short* link; a counter or 7-char random code is an order of magnitude shorter.
+- *"How do you avoid two app servers generating the same code at the same time?"* — Range-allocated counters (each server owns a leased block) or a collision-check-and-retry for random codes; never a bare shared counter incremented by application code without atomicity.
+- *"Should the redirect be a 301 or a 302?"* — Trade-off between browser/CDN caching (301, cheaper at scale) and guaranteed server-side click tracking (302); state which the product needs.
+- *"Custom aliases — how does that change the design?"* — They bypass the ID generator entirely and go straight to a uniqueness check against the KV store on the alias itself; the rest of the pipeline (cache, redirect, analytics) is unchanged.
+- *"How would you support link expiry?"* — Store `expires_at`; check it on the read path before serving the cached redirect, and run a background sweeper to evict expired entries from cache and (optionally) tombstone them in the store.
+- *"10x growth overnight — what breaks first?"* — The cache hit rate assumption if traffic shifts to more evenly-distributed (less power-law) codes; watch the DB read rate as the leading indicator, not just raw request count.
+- *"How do you stop this being used for phishing/malware distribution?"* — Rate-limit creation per user/IP and screen submitted URLs against a safe-browsing list at creation time and periodically thereafter, since a URL can turn malicious after the short link is already distributed.
+
+Sources: [Building a Scalable URL Shortener: A Complete System Design Guide — Medium](https://ayoushchourasia.medium.com/building-a-scalable-url-shortener-a-complete-system-design-guide-59c173c09eb9) · [Designing a URL Shortener — Franco Fernando](https://newsletter.francofernando.com/p/designing-a-url-shortener) · [Design URL Shortener — AlgoMaster.io](https://algomaster.io/learn/system-design-interviews/design-url-shortener) · [System Design Interview: Scalable Unique ID Generator (Twitter Snowflake) — Medium](https://medium.com/double-pointer/system-design-interview-scalable-unique-id-generator-twitter-snowflake-or-a-similar-service-18af22d74343)

@@ -1,0 +1,1865 @@
+[
+  {
+    "topic": "Array",
+    "problems": [
+      {
+        "name": "Reverse the array",
+        "important": false
+      },
+      {
+        "name": "Find the maximum and minimum element in an array",
+        "important": false
+      },
+      {
+        "name": "Find the \"Kth\" max and min element of an array",
+        "important": false
+      },
+      {
+        "name": "Given an array which consists of only 0, 1 and 2. Sort the array without using any sorting algo",
+        "important": false
+      },
+      {
+        "name": "Move all the negative elements to one side of the array",
+        "important": false
+      },
+      {
+        "name": "Find the Union and Intersection of the two sorted arrays",
+        "important": false
+      },
+      {
+        "name": "Write a program to cyclically rotate an array by one",
+        "important": false
+      },
+      {
+        "name": "find Largest sum contiguous Subarray",
+        "important": true
+      },
+      {
+        "name": "Minimise the maximum difference between heights",
+        "important": true
+      },
+      {
+        "name": "Minimum no. of Jumps to reach end of an array",
+        "important": false
+      },
+      {
+        "name": "find duplicate in an array of N+1 Integers",
+        "important": false
+      },
+      {
+        "name": "Merge 2 sorted arrays without using Extra space",
+        "important": false
+      },
+      {
+        "name": "Kadane's Algo",
+        "important": true
+      },
+      {
+        "name": "Merge Intervals",
+        "important": false
+      },
+      {
+        "name": "Next Permutation",
+        "important": false
+      },
+      {
+        "name": "Count Inversion",
+        "important": false
+      },
+      {
+        "name": "Best time to buy and Sell stock",
+        "important": false
+      },
+      {
+        "name": "find all pairs on integer array whose sum is equal to given number",
+        "important": false
+      },
+      {
+        "name": "find common elements In 3 sorted arrays",
+        "important": false
+      },
+      {
+        "name": "Rearrange the array in alternating positive and negative items with O(1) extra space",
+        "important": false
+      },
+      {
+        "name": "Find if there is any subarray with sum equal to 0",
+        "important": false
+      },
+      {
+        "name": "Find factorial of a large number",
+        "important": false
+      },
+      {
+        "name": "find maximum product subarray",
+        "important": false
+      },
+      {
+        "name": "Find longest coinsecutive subsequence",
+        "important": false
+      },
+      {
+        "name": "Given an array of size n and a number k, fin all elements that appear more than \" n/k \" times",
+        "important": false
+      },
+      {
+        "name": "Maximum profit by buying and selling a share atmost twice",
+        "important": false
+      },
+      {
+        "name": "Find whether an array is a subset of another array",
+        "important": false
+      },
+      {
+        "name": "Find the triplet that sum to a given value",
+        "important": false
+      },
+      {
+        "name": "Trapping Rain water problem",
+        "important": false
+      },
+      {
+        "name": "Chocolate Distribution problem",
+        "important": false
+      },
+      {
+        "name": "Smallest Subarray with sum greater than a given value",
+        "important": false
+      },
+      {
+        "name": "Three way partitioning of an array around a given value",
+        "important": false
+      },
+      {
+        "name": "Minimum swaps required bring elements less equal K together",
+        "important": false
+      },
+      {
+        "name": "Minimum no. of operations required to make an array palindrome",
+        "important": false
+      },
+      {
+        "name": "Median of 2 sorted arrays of equal size",
+        "important": false
+      },
+      {
+        "name": "Median of 2 sorted arrays of different size",
+        "important": false
+      }
+    ]
+  },
+  {
+    "topic": "Matrix",
+    "problems": [
+      {
+        "name": "Spiral traversal on a Matrix",
+        "important": false
+      },
+      {
+        "name": "Search an element in a matriix",
+        "important": false
+      },
+      {
+        "name": "Find median in a row wise sorted matrix",
+        "important": false
+      },
+      {
+        "name": "Find row with maximum no. of 1's",
+        "important": false
+      },
+      {
+        "name": "Print elements in sorted order using row-column wise sorted matrix",
+        "important": false
+      },
+      {
+        "name": "Maximum size rectangle",
+        "important": false
+      },
+      {
+        "name": "Find a specific pair in matrix",
+        "important": false
+      },
+      {
+        "name": "Rotate matrix by 90 degrees",
+        "important": false
+      },
+      {
+        "name": "Kth smallest element in a row-cpumn wise sorted matrix",
+        "important": false
+      },
+      {
+        "name": "Common elements in all rows of a given matrix",
+        "important": false
+      }
+    ]
+  },
+  {
+    "topic": "String",
+    "problems": [
+      {
+        "name": "Reverse a String",
+        "important": false
+      },
+      {
+        "name": "Check whether a String is Palindrome or not",
+        "important": false
+      },
+      {
+        "name": "Find Duplicate characters in a string",
+        "important": false
+      },
+      {
+        "name": "Write a Code to check whether one string is a rotation of another",
+        "important": false
+      },
+      {
+        "name": "Write a Program to check whether a string is a valid shuffle of two strings or not",
+        "important": false
+      },
+      {
+        "name": "Count and Say problem",
+        "important": false
+      },
+      {
+        "name": "Write a program to find the longest Palindrome in a string",
+        "important": false
+      },
+      {
+        "name": "Find Longest Recurring Subsequence in String",
+        "important": false
+      },
+      {
+        "name": "Print all Subsequences of a string",
+        "important": false
+      },
+      {
+        "name": "Print all the permutations of the given string",
+        "important": false
+      },
+      {
+        "name": "Split the Binary string into two substring with equal 0’s and 1’s",
+        "important": false
+      },
+      {
+        "name": "Word Wrap Problem [VERY IMP]",
+        "important": true
+      },
+      {
+        "name": "EDIT Distance",
+        "important": true
+      },
+      {
+        "name": "Find next greater number with same set of digits",
+        "important": true
+      },
+      {
+        "name": "Balanced Parenthesis problem",
+        "important": true
+      },
+      {
+        "name": "Word break Problem",
+        "important": true
+      },
+      {
+        "name": "Rabin Karp Algo",
+        "important": false
+      },
+      {
+        "name": "KMP Algo",
+        "important": false
+      },
+      {
+        "name": "Convert a Sentence into its equivalent mobile numeric keypad sequence",
+        "important": false
+      },
+      {
+        "name": "Minimum number of bracket reversals needed to make an expression balanced",
+        "important": false
+      },
+      {
+        "name": "Count All Palindromic Subsequence in a given String",
+        "important": false
+      },
+      {
+        "name": "Count of number of given string in 2D character array",
+        "important": false
+      },
+      {
+        "name": "Search a Word in a 2D Grid of characters",
+        "important": false
+      },
+      {
+        "name": "Boyer Moore Algorithm for Pattern Searching",
+        "important": false
+      },
+      {
+        "name": "Converting Roman Numerals to Decimal",
+        "important": false
+      },
+      {
+        "name": "Longest Common Prefix",
+        "important": false
+      },
+      {
+        "name": "Number of flips to make binary string alternate",
+        "important": false
+      },
+      {
+        "name": "Find the first repeated word in string",
+        "important": false
+      },
+      {
+        "name": "Minimum number of swaps for bracket balancing",
+        "important": false
+      },
+      {
+        "name": "Find the longest common subsequence between two strings",
+        "important": false
+      },
+      {
+        "name": "Program to generate all possible valid IP addresses from given  string",
+        "important": false
+      },
+      {
+        "name": "Write a program tofind the smallest window that contains all characters of string itself",
+        "important": false
+      },
+      {
+        "name": "Rearrange characters in a string such that no two adjacent are same",
+        "important": false
+      },
+      {
+        "name": "Minimum characters to be added at front to make string palindrome",
+        "important": false
+      },
+      {
+        "name": "Given a sequence of words, print all anagrams together",
+        "important": false
+      },
+      {
+        "name": "Find the smallest window in a string containing all characters of another string",
+        "important": false
+      },
+      {
+        "name": "Recursively remove all adjacent duplicates",
+        "important": false
+      },
+      {
+        "name": "String matching where one string contains wildcard characters",
+        "important": false
+      },
+      {
+        "name": "Function to find Number of customers who could not get a computer",
+        "important": false
+      },
+      {
+        "name": "Transform One String to Another using Minimum Number of Given Operation",
+        "important": false
+      },
+      {
+        "name": "Check if two given strings are isomorphic to each other",
+        "important": false
+      },
+      {
+        "name": "Recursively print all sentences that can be formed from list of word lists",
+        "important": false
+      }
+    ]
+  },
+  {
+    "topic": "Searching & Sorting",
+    "problems": [
+      {
+        "name": "Find first and last positions of an element in a sorted array",
+        "important": false
+      },
+      {
+        "name": "Find a Fixed Point (Value equal to index) in a given array",
+        "important": false
+      },
+      {
+        "name": "Search in a rotated sorted array",
+        "important": false
+      },
+      {
+        "name": "square root of an integer",
+        "important": false
+      },
+      {
+        "name": "Maximum and minimum of an array using minimum number of comparisons",
+        "important": false
+      },
+      {
+        "name": "Optimum location of point to minimize total distance",
+        "important": false
+      },
+      {
+        "name": "Find the repeating and the missing",
+        "important": false
+      },
+      {
+        "name": "find majority element",
+        "important": false
+      },
+      {
+        "name": "Searching in an array where adjacent differ by at most k",
+        "important": false
+      },
+      {
+        "name": "find a pair with a given difference",
+        "important": false
+      },
+      {
+        "name": "find four elements that sum to a given value",
+        "important": false
+      },
+      {
+        "name": "maximum sum such that no 2 elements are adjacent",
+        "important": false
+      },
+      {
+        "name": "Count triplet with sum smaller than a given value",
+        "important": false
+      },
+      {
+        "name": "merge 2 sorted arrays",
+        "important": false
+      },
+      {
+        "name": "print all subarrays with 0 sum",
+        "important": false
+      },
+      {
+        "name": "Product array Puzzle",
+        "important": false
+      },
+      {
+        "name": "Sort array according to count of set bits",
+        "important": false
+      },
+      {
+        "name": "minimum no. of swaps required to sort the array",
+        "important": false
+      },
+      {
+        "name": "Bishu and Soldiers",
+        "important": false
+      },
+      {
+        "name": "Rasta and Kheshtak",
+        "important": false
+      },
+      {
+        "name": "Kth smallest number again",
+        "important": false
+      },
+      {
+        "name": "Find pivot element in a sorted array",
+        "important": false
+      },
+      {
+        "name": "K-th Element of Two Sorted Arrays",
+        "important": false
+      },
+      {
+        "name": "Aggressive cows",
+        "important": false
+      },
+      {
+        "name": "Book Allocation Problem",
+        "important": false
+      },
+      {
+        "name": "EKOSPOJ:",
+        "important": false
+      },
+      {
+        "name": "Job Scheduling Algo",
+        "important": false
+      },
+      {
+        "name": "Missing Number in AP",
+        "important": false
+      },
+      {
+        "name": "Smallest number with atleastn trailing zeroes infactorial",
+        "important": false
+      },
+      {
+        "name": "Painters Partition Problem:",
+        "important": false
+      },
+      {
+        "name": "ROTI-Prata SPOJ",
+        "important": false
+      },
+      {
+        "name": "DoubleHelix SPOJ",
+        "important": false
+      },
+      {
+        "name": "Subset Sums",
+        "important": false
+      },
+      {
+        "name": "Findthe inversion count",
+        "important": false
+      },
+      {
+        "name": "Implement Merge-sort in-place",
+        "important": false
+      },
+      {
+        "name": "Partitioning and Sorting Arrays with Many Repeated Entries",
+        "important": false
+      }
+    ]
+  },
+  {
+    "topic": "LinkedList",
+    "problems": [
+      {
+        "name": "Write a Program to reverse the Linked List. (Both Iterative and recursive)",
+        "important": false
+      },
+      {
+        "name": "Reverse a Linked List in group of Given Size",
+        "important": true
+      },
+      {
+        "name": "Write a program to Detect loop in a linked list",
+        "important": false
+      },
+      {
+        "name": "Write a program to Delete loop in a linked list",
+        "important": false
+      },
+      {
+        "name": "Find the starting point of the loop",
+        "important": false
+      },
+      {
+        "name": "Remove Duplicates in a sorted Linked List",
+        "important": false
+      },
+      {
+        "name": "Remove Duplicates in a Un-sorted Linked List",
+        "important": false
+      },
+      {
+        "name": "Write a Program to Move the last element to Front in a Linked List",
+        "important": false
+      },
+      {
+        "name": "Add “1” to a number represented as a Linked List",
+        "important": false
+      },
+      {
+        "name": "Add two numbers represented by linked lists",
+        "important": false
+      },
+      {
+        "name": "Intersection of two Sorted Linked List",
+        "important": false
+      },
+      {
+        "name": "Intersection Point of two Linked Lists",
+        "important": false
+      },
+      {
+        "name": "Merge Sort For Linked lists",
+        "important": true
+      },
+      {
+        "name": "Quicksort for Linked Lists",
+        "important": true
+      },
+      {
+        "name": "Find the middle Element of a linked list",
+        "important": false
+      },
+      {
+        "name": "Check if a linked list is a circular linked list",
+        "important": false
+      },
+      {
+        "name": "Split a Circular linked list into two halves",
+        "important": false
+      },
+      {
+        "name": "Write a Program to check whether the Singly Linked list is a palindrome or not",
+        "important": false
+      },
+      {
+        "name": "Deletion from a Circular Linked List",
+        "important": false
+      },
+      {
+        "name": "Reverse a Doubly Linked list",
+        "important": false
+      },
+      {
+        "name": "Find pairs with a given sum in a DLL",
+        "important": false
+      },
+      {
+        "name": "Count triplets in a sorted DLL whose sum is equal to given value “X”",
+        "important": false
+      },
+      {
+        "name": "Sort a “k”sorted Doubly Linked list",
+        "important": true
+      },
+      {
+        "name": "Rotate DoublyLinked list by N nodes",
+        "important": false
+      },
+      {
+        "name": "Rotate a Doubly Linked list in group of Given Size",
+        "important": true
+      },
+      {
+        "name": "Can we reverse a linked list in less than O(n) ?",
+        "important": false
+      },
+      {
+        "name": "Why Quicksort is preferred for. Arrays and Merge Sort for LinkedLists ?",
+        "important": false
+      },
+      {
+        "name": "Flatten a Linked List",
+        "important": false
+      },
+      {
+        "name": "Sort a LL of 0's, 1's and 2's",
+        "important": false
+      },
+      {
+        "name": "Clone a linked list with next and random pointer",
+        "important": false
+      },
+      {
+        "name": "Merge K sorted Linked list",
+        "important": false
+      },
+      {
+        "name": "Multiply 2 no. represented by LL",
+        "important": false
+      },
+      {
+        "name": "Delete nodes which have a greater value on right side",
+        "important": false
+      },
+      {
+        "name": "Segregate even and odd nodes in a Linked List",
+        "important": false
+      },
+      {
+        "name": "Program for n’th node from the end of a Linked List",
+        "important": false
+      },
+      {
+        "name": "Find the first non-repeating character from a stream of characters",
+        "important": false
+      }
+    ]
+  },
+  {
+    "topic": "Binary Trees",
+    "problems": [
+      {
+        "name": "level order traversal",
+        "important": false
+      },
+      {
+        "name": "Reverse Level Order traversal",
+        "important": false
+      },
+      {
+        "name": "Height of a tree",
+        "important": false
+      },
+      {
+        "name": "Diameter of a tree",
+        "important": false
+      },
+      {
+        "name": "Mirror of a tree",
+        "important": false
+      },
+      {
+        "name": "Inorder Traversal of a tree both using recursion and Iteration",
+        "important": false
+      },
+      {
+        "name": "Preorder Traversal of a tree both using recursion and Iteration",
+        "important": false
+      },
+      {
+        "name": "Postorder Traversal of a tree both using recursion and Iteration",
+        "important": false
+      },
+      {
+        "name": "Left View of a tree",
+        "important": false
+      },
+      {
+        "name": "Right View of Tree",
+        "important": false
+      },
+      {
+        "name": "Top View of a tree",
+        "important": false
+      },
+      {
+        "name": "Bottom View of a tree",
+        "important": false
+      },
+      {
+        "name": "Zig-Zag traversal of a binary tree",
+        "important": false
+      },
+      {
+        "name": "Check if a tree is balanced or not",
+        "important": false
+      },
+      {
+        "name": "Diagnol Traversal of a Binary tree",
+        "important": false
+      },
+      {
+        "name": "Boundary traversal of a Binary tree",
+        "important": false
+      },
+      {
+        "name": "Construct Binary Tree from String with Bracket Representation",
+        "important": false
+      },
+      {
+        "name": "Convert Binary tree into Doubly Linked List",
+        "important": false
+      },
+      {
+        "name": "Convert Binary tree into Sum tree",
+        "important": false
+      },
+      {
+        "name": "Construct Binary tree from Inorder and preorder traversal",
+        "important": false
+      },
+      {
+        "name": "Find minimum swaps required to convert a Binary tree into BST",
+        "important": false
+      },
+      {
+        "name": "Check if Binary tree is Sum tree or not",
+        "important": false
+      },
+      {
+        "name": "Check if all leaf nodes are at same level or not",
+        "important": false
+      },
+      {
+        "name": "Check if a Binary Tree contains duplicate subtrees of size 2 or more",
+        "important": true
+      },
+      {
+        "name": "Check if 2 trees are mirror or not",
+        "important": false
+      },
+      {
+        "name": "Sum of Nodes on the Longest path from root to leaf node",
+        "important": false
+      },
+      {
+        "name": "Check if given graph is tree or not",
+        "important": true
+      },
+      {
+        "name": "Find Largest subtree sum in a tree",
+        "important": false
+      },
+      {
+        "name": "Maximum Sum of nodes in Binary tree such that no two are adjacent",
+        "important": false
+      },
+      {
+        "name": "Print all \"K\" Sum paths in a Binary tree",
+        "important": false
+      },
+      {
+        "name": "Find LCA in a Binary tree",
+        "important": false
+      },
+      {
+        "name": "Find distance between 2 nodes in a Binary tree",
+        "important": false
+      },
+      {
+        "name": "Kth Ancestor of node in a Binary tree",
+        "important": false
+      },
+      {
+        "name": "Find all Duplicate subtrees in a Binary tree",
+        "important": true
+      },
+      {
+        "name": "Tree Isomorphism Problem",
+        "important": false
+      }
+    ]
+  },
+  {
+    "topic": "Binary Search Trees",
+    "problems": [
+      {
+        "name": "Fina a value in a BST",
+        "important": false
+      },
+      {
+        "name": "Deletion of a node in a BST",
+        "important": false
+      },
+      {
+        "name": "Find min and max value in a BST",
+        "important": false
+      },
+      {
+        "name": "Find inorder successor and inorder predecessor in a BST",
+        "important": false
+      },
+      {
+        "name": "Check if a tree is a BST or not",
+        "important": false
+      },
+      {
+        "name": "Populate Inorder successor of all nodes",
+        "important": false
+      },
+      {
+        "name": "Find LCA  of 2 nodes in a BST",
+        "important": false
+      },
+      {
+        "name": "Construct BST from preorder traversal",
+        "important": false
+      },
+      {
+        "name": "Convert Binary tree into BST",
+        "important": false
+      },
+      {
+        "name": "Convert a normal BST into a Balanced BST",
+        "important": false
+      },
+      {
+        "name": "Merge two BST",
+        "important": true
+      },
+      {
+        "name": "Find Kth largest element in a BST",
+        "important": false
+      },
+      {
+        "name": "Find Kth smallest element in a BST",
+        "important": false
+      },
+      {
+        "name": "Count pairs from 2 BST whose sum is equal to given value \"X\"",
+        "important": false
+      },
+      {
+        "name": "Find the median of BST in O(n) time and O(1) space",
+        "important": false
+      },
+      {
+        "name": "Count BST ndoes that lie in a given range",
+        "important": false
+      },
+      {
+        "name": "Replace every element with the least greater element on its right",
+        "important": false
+      },
+      {
+        "name": "Given \"n\" appointments, find the conflicting appointments",
+        "important": false
+      },
+      {
+        "name": "Check preorder is valid or not",
+        "important": false
+      },
+      {
+        "name": "Check whether BST contains Dead end",
+        "important": false
+      },
+      {
+        "name": "Largest BST in a Binary Tree",
+        "important": true
+      },
+      {
+        "name": "Flatten BST to sorted list",
+        "important": false
+      }
+    ]
+  },
+  {
+    "topic": "Greedy",
+    "problems": [
+      {
+        "name": "Activity Selection Problem",
+        "important": false
+      },
+      {
+        "name": "Job SequencingProblem",
+        "important": false
+      },
+      {
+        "name": "Huffman Coding",
+        "important": false
+      },
+      {
+        "name": "Water Connection Problem",
+        "important": false
+      },
+      {
+        "name": "Fractional Knapsack Problem",
+        "important": false
+      },
+      {
+        "name": "Greedy Algorithm to find Minimum number of Coins",
+        "important": false
+      },
+      {
+        "name": "Maximum trains for which stoppage can be provided",
+        "important": false
+      },
+      {
+        "name": "Minimum Platforms Problem",
+        "important": false
+      },
+      {
+        "name": "Buy Maximum Stocks if i stocks can be bought on i-th day",
+        "important": false
+      },
+      {
+        "name": "Find the minimum and maximum amount to buy all N candies",
+        "important": false
+      },
+      {
+        "name": "Minimize Cash Flow among a given set of friends who have borrowed money from each other",
+        "important": false
+      },
+      {
+        "name": "Minimum Cost to cut a board into squares",
+        "important": false
+      },
+      {
+        "name": "Check if it is possible to survive on Island",
+        "important": false
+      },
+      {
+        "name": "Find maximum meetings in one room",
+        "important": false
+      },
+      {
+        "name": "Maximum product subset of an array",
+        "important": false
+      },
+      {
+        "name": "Maximize array sum after K negations",
+        "important": false
+      },
+      {
+        "name": "Maximize the sum of arr[i]*i",
+        "important": false
+      },
+      {
+        "name": "Maximum sum of absolute difference of an array",
+        "important": false
+      },
+      {
+        "name": "Maximize sum of consecutive differences in a circular array",
+        "important": false
+      },
+      {
+        "name": "Minimum sum of absolute difference of pairs of two arrays",
+        "important": false
+      },
+      {
+        "name": "Program for Shortest Job First (or SJF) CPU Scheduling",
+        "important": false
+      },
+      {
+        "name": "Program for Least Recently Used (LRU) Page Replacement algorithm",
+        "important": false
+      },
+      {
+        "name": "Smallest subset with sum greater than all other elements",
+        "important": false
+      },
+      {
+        "name": "Chocolate Distribution Problem",
+        "important": false
+      },
+      {
+        "name": "DEFKIN -Defense of a Kingdom",
+        "important": false
+      },
+      {
+        "name": "DIEHARD -DIE HARD",
+        "important": false
+      },
+      {
+        "name": "GERGOVIA -Wine trading in Gergovia",
+        "important": false
+      },
+      {
+        "name": "Picking Up Chicks",
+        "important": false
+      },
+      {
+        "name": "CHOCOLA –Chocolate",
+        "important": false
+      },
+      {
+        "name": "ARRANGE -Arranging Amplifiers",
+        "important": false
+      },
+      {
+        "name": "K Centers Problem",
+        "important": false
+      },
+      {
+        "name": "Minimum Cost of ropes",
+        "important": false
+      },
+      {
+        "name": "Find smallest number with given number of digits and sum of digits",
+        "important": false
+      },
+      {
+        "name": "Rearrange characters in a string such that no two adjacent are same",
+        "important": false
+      },
+      {
+        "name": "Find maximum sum possible equal sum of three stacks",
+        "important": false
+      }
+    ]
+  },
+  {
+    "topic": "BackTracking",
+    "problems": [
+      {
+        "name": "Rat in a maze Problem",
+        "important": false
+      },
+      {
+        "name": "Printing all solutions in N-Queen Problem",
+        "important": false
+      },
+      {
+        "name": "Word Break Problem using Backtracking",
+        "important": false
+      },
+      {
+        "name": "Remove Invalid Parentheses",
+        "important": false
+      },
+      {
+        "name": "Sudoku Solver",
+        "important": false
+      },
+      {
+        "name": "m Coloring Problem",
+        "important": false
+      },
+      {
+        "name": "Print all palindromic partitions of a string",
+        "important": false
+      },
+      {
+        "name": "Subset Sum Problem",
+        "important": false
+      },
+      {
+        "name": "The Knight’s tour problem",
+        "important": false
+      },
+      {
+        "name": "Tug of War",
+        "important": false
+      },
+      {
+        "name": "Find shortest safe route in a path with landmines",
+        "important": false
+      },
+      {
+        "name": "Combinational Sum",
+        "important": false
+      },
+      {
+        "name": "Find Maximum number possible by doing at-most K swaps",
+        "important": false
+      },
+      {
+        "name": "Print all permutations of a string",
+        "important": false
+      },
+      {
+        "name": "Find if there is a path of more than k length from a source",
+        "important": false
+      },
+      {
+        "name": "Longest Possible Route in a Matrix with Hurdles",
+        "important": false
+      },
+      {
+        "name": "Print all possible paths from top left to bottom right of a mXn matrix",
+        "important": false
+      },
+      {
+        "name": "Partition of a set intoK subsets with equal sum",
+        "important": false
+      },
+      {
+        "name": "Find the K-th Permutation Sequence of first N natural numbers",
+        "important": false
+      }
+    ]
+  },
+  {
+    "topic": "Stacks & Queues",
+    "problems": [
+      {
+        "name": "Implement Stack from Scratch",
+        "important": false
+      },
+      {
+        "name": "Implement Queue from Scratch",
+        "important": false
+      },
+      {
+        "name": "Implement 2 stack in an array",
+        "important": false
+      },
+      {
+        "name": "find the middle element of a stack",
+        "important": false
+      },
+      {
+        "name": "Implement \"N\" stacks in an Array",
+        "important": false
+      },
+      {
+        "name": "Check the expression has valid or Balanced parenthesis or not",
+        "important": false
+      },
+      {
+        "name": "Reverse a String using Stack",
+        "important": false
+      },
+      {
+        "name": "Design a Stack that supports getMin() in O(1) time and O(1) extra space",
+        "important": false
+      },
+      {
+        "name": "Find the next Greater element",
+        "important": false
+      },
+      {
+        "name": "The celebrity Problem",
+        "important": false
+      },
+      {
+        "name": "Arithmetic Expression evaluation",
+        "important": false
+      },
+      {
+        "name": "Evaluation of Postfix expression",
+        "important": false
+      },
+      {
+        "name": "Implement a method to insert an element at its bottom without using any other data structure",
+        "important": false
+      },
+      {
+        "name": "Reverse a stack using recursion",
+        "important": false
+      },
+      {
+        "name": "Sort a Stack using recursion",
+        "important": false
+      },
+      {
+        "name": "Merge Overlapping Intervals",
+        "important": false
+      },
+      {
+        "name": "Largest rectangular Area in Histogram",
+        "important": false
+      },
+      {
+        "name": "Length of the Longest Valid Substring",
+        "important": false
+      },
+      {
+        "name": "Expression contains redundant bracket or not",
+        "important": false
+      },
+      {
+        "name": "Implement Stack using Queue",
+        "important": false
+      },
+      {
+        "name": "Implement Stack using Deque",
+        "important": false
+      },
+      {
+        "name": "Stack Permutations (Check if an array is stack permutation of other)",
+        "important": false
+      },
+      {
+        "name": "Implement Queue using Stack",
+        "important": false
+      },
+      {
+        "name": "Implement \"n\" queue in an array",
+        "important": false
+      },
+      {
+        "name": "Implement a Circular queue",
+        "important": false
+      },
+      {
+        "name": "LRU Cache Implementationa",
+        "important": false
+      },
+      {
+        "name": "Reverse a Queue using recursion",
+        "important": false
+      },
+      {
+        "name": "Reverse the first “K” elements of a queue",
+        "important": false
+      },
+      {
+        "name": "Interleave the first half of the queue with second half",
+        "important": false
+      },
+      {
+        "name": "Find the first circular tour that visits all Petrol Pumps",
+        "important": false
+      },
+      {
+        "name": "Minimum time required to rot all oranges",
+        "important": false
+      },
+      {
+        "name": "Distance of nearest cell having 1 in a binary matrix",
+        "important": false
+      },
+      {
+        "name": "First negative integer in every window of size “k”",
+        "important": false
+      },
+      {
+        "name": "Check if all levels of two trees are anagrams or not",
+        "important": false
+      },
+      {
+        "name": "Sum of minimum and maximum elements of all subarrays of size “k”",
+        "important": false
+      },
+      {
+        "name": "Minimum sum of squares of character counts in a given string after removing “k” characters",
+        "important": false
+      },
+      {
+        "name": "Queue based approach or first non-repeating character in a stream",
+        "important": false
+      },
+      {
+        "name": "Next Smaller Element",
+        "important": false
+      }
+    ]
+  },
+  {
+    "topic": "Heap",
+    "problems": [
+      {
+        "name": "Implement a Maxheap/MinHeap using arrays and recursion",
+        "important": false
+      },
+      {
+        "name": "Sort an Array using heap. (HeapSort)",
+        "important": false
+      },
+      {
+        "name": "Maximum of all subarrays of size k",
+        "important": false
+      },
+      {
+        "name": "“k” largest element in an array",
+        "important": false
+      },
+      {
+        "name": "Kth smallest and largest element in an unsorted array",
+        "important": false
+      },
+      {
+        "name": "Merge “K” sorted arrays",
+        "important": true
+      },
+      {
+        "name": "Merge 2 Binary Max Heaps",
+        "important": false
+      },
+      {
+        "name": "Kth largest sum continuous subarrays",
+        "important": false
+      },
+      {
+        "name": "Leetcode- reorganize strings",
+        "important": false
+      },
+      {
+        "name": "Merge “K” Sorted Linked Lists",
+        "important": true
+      },
+      {
+        "name": "Smallest range in “K” Lists",
+        "important": false
+      },
+      {
+        "name": "Median in a stream of Integers",
+        "important": false
+      },
+      {
+        "name": "Check if a Binary Tree is Heap",
+        "important": false
+      },
+      {
+        "name": "Connect “n” ropes with minimum cost",
+        "important": false
+      },
+      {
+        "name": "Convert BST to Min Heap",
+        "important": false
+      },
+      {
+        "name": "Convert min heap to max heap",
+        "important": false
+      },
+      {
+        "name": "Rearrange characters in a string such that no two adjacent are same",
+        "important": false
+      },
+      {
+        "name": "Minimum sum of two numbers formed from digits of an array",
+        "important": false
+      }
+    ]
+  },
+  {
+    "topic": "Graph",
+    "problems": [
+      {
+        "name": "Create a Graph, print it",
+        "important": false
+      },
+      {
+        "name": "Implement BFS algorithm",
+        "important": false
+      },
+      {
+        "name": "Implement DFS Algo",
+        "important": false
+      },
+      {
+        "name": "Detect Cycle in Directed Graph using BFS/DFS Algo",
+        "important": false
+      },
+      {
+        "name": "Detect Cycle in UnDirected Graph using BFS/DFS Algo",
+        "important": false
+      },
+      {
+        "name": "Search in a Maze",
+        "important": false
+      },
+      {
+        "name": "Minimum Step by Knight",
+        "important": false
+      },
+      {
+        "name": "flood fill algo",
+        "important": false
+      },
+      {
+        "name": "Clone a graph",
+        "important": false
+      },
+      {
+        "name": "Making wired Connections",
+        "important": false
+      },
+      {
+        "name": "word Ladder",
+        "important": false
+      },
+      {
+        "name": "Dijkstra algo",
+        "important": false
+      },
+      {
+        "name": "Implement Topological Sort",
+        "important": false
+      },
+      {
+        "name": "Minimum time taken by each job to be completed given by a Directed Acyclic Graph",
+        "important": false
+      },
+      {
+        "name": "Find whether it is possible to finish all tasks or not from given dependencies",
+        "important": false
+      },
+      {
+        "name": "Find the no. of Isalnds",
+        "important": false
+      },
+      {
+        "name": "Given a sorted Dictionary of an Alien Language, find order of characters",
+        "important": false
+      },
+      {
+        "name": "Implement Kruksal’sAlgorithm",
+        "important": false
+      },
+      {
+        "name": "Implement Prim’s Algorithm",
+        "important": false
+      },
+      {
+        "name": "Total no. of Spanning tree in a graph",
+        "important": false
+      },
+      {
+        "name": "Implement Bellman Ford Algorithm",
+        "important": false
+      },
+      {
+        "name": "Implement Floyd warshallAlgorithm",
+        "important": false
+      },
+      {
+        "name": "Travelling Salesman Problem",
+        "important": false
+      },
+      {
+        "name": "Graph ColouringProblem",
+        "important": false
+      },
+      {
+        "name": "Snake and Ladders Problem",
+        "important": false
+      },
+      {
+        "name": "Find bridge in a graph",
+        "important": false
+      },
+      {
+        "name": "Count Strongly connected Components(Kosaraju Algo)",
+        "important": false
+      },
+      {
+        "name": "Check whether a graph is Bipartite or Not",
+        "important": false
+      },
+      {
+        "name": "Detect Negative cycle in a graph",
+        "important": false
+      },
+      {
+        "name": "Longest path in a Directed Acyclic Graph",
+        "important": false
+      },
+      {
+        "name": "Journey to the Moon",
+        "important": false
+      },
+      {
+        "name": "Cheapest Flights Within K Stops",
+        "important": false
+      },
+      {
+        "name": "Oliver and the Game",
+        "important": false
+      },
+      {
+        "name": "Water Jug problem using BFS",
+        "important": false
+      },
+      {
+        "name": "Water Jug problem using BFS",
+        "important": false
+      },
+      {
+        "name": "Find if there is a path of more thank length from a source",
+        "important": false
+      },
+      {
+        "name": "M-ColouringProblem",
+        "important": false
+      },
+      {
+        "name": "Minimum edges to reverse o make path from source to destination",
+        "important": false
+      },
+      {
+        "name": "Paths to travel each nodes using each edge(Seven Bridges)",
+        "important": false
+      },
+      {
+        "name": "Vertex Cover Problem",
+        "important": false
+      },
+      {
+        "name": "Chinese Postman or Route Inspection",
+        "important": false
+      },
+      {
+        "name": "Number of Triangles in a Directed and Undirected Graph",
+        "important": false
+      },
+      {
+        "name": "Minimise the cashflow among a given set of friends who have borrowed money from each other",
+        "important": false
+      },
+      {
+        "name": "Two Clique Problem",
+        "important": false
+      }
+    ]
+  },
+  {
+    "topic": "Trie",
+    "problems": [
+      {
+        "name": "Construct a trie from scratch",
+        "important": false
+      },
+      {
+        "name": "Find shortest unique prefix for every word in a given list",
+        "important": false
+      },
+      {
+        "name": "Word Break Problem | (Trie solution)",
+        "important": false
+      },
+      {
+        "name": "Given a sequence of words, print all anagrams together",
+        "important": false
+      },
+      {
+        "name": "Implement a Phone Directory",
+        "important": false
+      },
+      {
+        "name": "Print unique rows in a given boolean matrix",
+        "important": false
+      }
+    ]
+  },
+  {
+    "topic": "Dynamic Programming",
+    "problems": [
+      {
+        "name": "Coin ChangeProblem",
+        "important": false
+      },
+      {
+        "name": "Knapsack Problem",
+        "important": false
+      },
+      {
+        "name": "Binomial CoefficientProblem",
+        "important": false
+      },
+      {
+        "name": "Permutation CoefficientProblem",
+        "important": false
+      },
+      {
+        "name": "Program for nth Catalan Number",
+        "important": false
+      },
+      {
+        "name": "Matrix Chain Multiplication",
+        "important": false
+      },
+      {
+        "name": "Edit Distance",
+        "important": false
+      },
+      {
+        "name": "Subset Sum Problem",
+        "important": false
+      },
+      {
+        "name": "Friends Pairing Problem",
+        "important": false
+      },
+      {
+        "name": "Gold Mine Problem",
+        "important": false
+      },
+      {
+        "name": "Assembly Line SchedulingProblem",
+        "important": false
+      },
+      {
+        "name": "Painting the Fenceproblem",
+        "important": false
+      },
+      {
+        "name": "Maximize The Cut Segments",
+        "important": false
+      },
+      {
+        "name": "Longest Common Subsequence",
+        "important": false
+      },
+      {
+        "name": "Longest Repeated Subsequence",
+        "important": false
+      },
+      {
+        "name": "Longest Increasing Subsequence",
+        "important": false
+      },
+      {
+        "name": "Space Optimized Solution of LCS",
+        "important": false
+      },
+      {
+        "name": "LCS (Longest Common Subsequence) of three strings",
+        "important": false
+      },
+      {
+        "name": "Maximum Sum Increasing Subsequence",
+        "important": false
+      },
+      {
+        "name": "Count all subsequences having product less than K",
+        "important": false
+      },
+      {
+        "name": "Longest subsequence such that difference between adjacent is one",
+        "important": false
+      },
+      {
+        "name": "Maximum subsequence sum such that no three are consecutive",
+        "important": false
+      },
+      {
+        "name": "Egg Dropping Problem",
+        "important": false
+      },
+      {
+        "name": "Maximum Length Chain of Pairs",
+        "important": false
+      },
+      {
+        "name": "Maximum size square sub-matrix with all 1s",
+        "important": false
+      },
+      {
+        "name": "Maximum sum of pairs with specific difference",
+        "important": false
+      },
+      {
+        "name": "Min Cost PathProblem",
+        "important": false
+      },
+      {
+        "name": "Maximum difference of zeros and ones in binary string",
+        "important": false
+      },
+      {
+        "name": "Minimum number of jumps to reach end",
+        "important": false
+      },
+      {
+        "name": "Minimum cost to fill given weight in a bag",
+        "important": false
+      },
+      {
+        "name": "Minimum removals from array to make max –min <= K",
+        "important": false
+      },
+      {
+        "name": "Longest Common Substring",
+        "important": false
+      },
+      {
+        "name": "Count number of ways to reacha given score in a game",
+        "important": false
+      },
+      {
+        "name": "Count Balanced Binary Trees of Height h",
+        "important": false
+      },
+      {
+        "name": "LargestSum Contiguous Subarray",
+        "important": true
+      },
+      {
+        "name": "Smallest sum contiguous subarray",
+        "important": false
+      },
+      {
+        "name": "Unbounded Knapsack (Repetition of items allowed)",
+        "important": false
+      },
+      {
+        "name": "Word Break Problem",
+        "important": false
+      },
+      {
+        "name": "Largest Independent Set Problem",
+        "important": false
+      },
+      {
+        "name": "Partition problem",
+        "important": false
+      },
+      {
+        "name": "Longest Palindromic Subsequence",
+        "important": false
+      },
+      {
+        "name": "Count All Palindromic Subsequence in a given String",
+        "important": false
+      },
+      {
+        "name": "Longest Palindromic Substring",
+        "important": false
+      },
+      {
+        "name": "Longest alternating subsequence",
+        "important": false
+      },
+      {
+        "name": "Weighted Job Scheduling",
+        "important": false
+      },
+      {
+        "name": "Coin game winner where every player has three choices",
+        "important": false
+      },
+      {
+        "name": "Count Derangements (Permutation such that no element appears in its original position)",
+        "important": true
+      },
+      {
+        "name": "Maximum profit by buying and selling a share at most twice",
+        "important": true
+      },
+      {
+        "name": "Optimal Strategy for a Game",
+        "important": false
+      },
+      {
+        "name": "Optimal Binary Search Tree",
+        "important": false
+      },
+      {
+        "name": "Palindrome PartitioningProblem",
+        "important": false
+      },
+      {
+        "name": "Word Wrap Problem",
+        "important": false
+      },
+      {
+        "name": "Mobile Numeric Keypad Problem",
+        "important": true
+      },
+      {
+        "name": "Boolean Parenthesization Problem",
+        "important": false
+      },
+      {
+        "name": "Largest rectangular sub-matrix whose sum is 0",
+        "important": false
+      },
+      {
+        "name": "Largest area rectangular sub-matrix with equal number of 1’s and 0’s",
+        "important": true
+      },
+      {
+        "name": "Maximum sum rectangle in a 2D matrix",
+        "important": false
+      },
+      {
+        "name": "Maximum profit by buying and selling a share at most k times",
+        "important": false
+      },
+      {
+        "name": "Find if a string is interleaved of two other strings",
+        "important": false
+      },
+      {
+        "name": "Maximum Length of Pair Chain",
+        "important": false
+      }
+    ]
+  },
+  {
+    "topic": "Bit Manipulation",
+    "problems": [
+      {
+        "name": "Count set bits in an integer",
+        "important": false
+      },
+      {
+        "name": "Find the two non-repeating elements in an array of repeating elements",
+        "important": false
+      },
+      {
+        "name": "Count number of bits to be flipped to convert A to B",
+        "important": false
+      },
+      {
+        "name": "Count total set bits in all numbers from 1 to n",
+        "important": false
+      },
+      {
+        "name": "Program to find whether a no is power of two",
+        "important": false
+      },
+      {
+        "name": "Find position of the only set bit",
+        "important": false
+      },
+      {
+        "name": "Copy set bits in a range",
+        "important": false
+      },
+      {
+        "name": "Divide two integers without using multiplication, division and mod operator",
+        "important": false
+      },
+      {
+        "name": "Calculate square of a number without using *, / and pow()",
+        "important": false
+      },
+      {
+        "name": "Power Set",
+        "important": false
+      }
+    ]
+  }
+]

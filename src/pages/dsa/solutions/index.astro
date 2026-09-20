@@ -1,0 +1,65 @@
+---
+import PrepLayout from '../../../layouts/PrepLayout.astro';
+import { solutions } from '../../../data/dsa-solutions.mjs';
+import { u, kebab } from '../../../consts';
+
+const byTopic = [];
+for (const s of solutions) {
+  let g = byTopic.find((x) => x.topic === s.topic);
+  if (!g) byTopic.push((g = { topic: s.topic, count: 0, approaches: 0 }));
+  g.count++;
+  g.approaches += s.approaches.length;
+}
+const total = solutions.length;
+const totalApproaches = byTopic.reduce((n, g) => n + g.approaches, 0);
+---
+
+<PrepLayout
+  track="dsa"
+  title="DSA Worked Solutions"
+  description={`Multiple interview-ready approaches to ${total} core DSA problems, organised by topic.`}
+>
+  <div class="prose">
+    <h1>Worked Solutions</h1>
+    <p class="lede">
+      {total} problems · {totalApproaches} approaches. Each is stated brute-force first, then
+      optimal, with the idea, time/space complexity and code. Pick a topic — split into
+      separate pages so each loads fast.
+    </p>
+    <p class="xlink"><a href={u('/dsa')}>← Back to the checklist</a></p>
+  </div>
+
+  <div class="grid">
+    {byTopic.map((g) => (
+      <a class="card" href={u(`/dsa/solutions/${kebab(g.topic)}`)}>
+        <span class="card-title">{g.topic}</span>
+        <span class="card-meta">{g.count} problems · {g.approaches} approaches</span>
+      </a>
+    ))}
+  </div>
+</PrepLayout>
+
+<style>
+  .lede { font-size: 1.05rem; margin: 0.4rem 0 0.8rem; }
+  .xlink { font-family: var(--font-mono); font-size: 0.8rem; }
+
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+    gap: 0.9rem;
+    margin-top: 1.8rem;
+  }
+  .card {
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+    padding: 1.1rem 1.2rem;
+    background: var(--navy-card);
+    border: 1px solid var(--navy-line);
+    border-radius: 8px;
+    transition: border-color 0.2s, transform 0.2s;
+  }
+  .card:hover { border-color: var(--navy-line-2); transform: translateY(-2px); }
+  .card-title { font-family: var(--font-display); font-size: 1.2rem; letter-spacing: 0.04em; color: var(--white); }
+  .card-meta { font-family: var(--font-mono); font-size: 0.7rem; color: var(--muted); }
+</style>

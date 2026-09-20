@@ -1,0 +1,102 @@
+---
+title: "System Design — Stock Exchange"
+track: "system-design"
+kind: "notes"
+order: 38
+slug: "stock-exchange"
+updated: 2026-09-11
+description: "Designing a stock exchange's matching engine around a single-threaded sequencer, price-time priority order book, and write-ahead log, plus what happens when the matching engine crashes mid-trade."
+---
+
+import Callout from '../../components/Callout.astro';
+import Mermaid from '../../components/Mermaid.astro';
+
+Part of the [system design](/prep/system-design) series. See the [framework](/prep/system-design) and [building blocks](/prep/system-design/building-blocks) first if you haven't.
+
+## 1. Requirements
+
+**Functional**
+- Accept buy/sell orders (market, limit, cancel, modify) per instrument (ticker/symbol).
+- Match compatible buy and sell orders and execute trades.
+- Broadcast market data (order book depth, trade prints) to subscribers in real time.
+- Maintain a durable, replayable record of every order and trade for audit and recovery.
+
+**Non-functional**
+- **Correctness and determinism above all** — the exact same sequence of orders must always produce the exact same trades and the exact same final book state, replayed or live. A trading system that's fast but occasionally non-deterministic is disqualifying.
+- Extremely low, predictable latency — real exchanges target order acknowledgment in the microsecond range; NASDAQ-class systems target sub-250-microsecond order acknowledgment.
+- Fairness: orders at the same price execute in the order they were received (price-time priority) — no client should be able to jump the queue.
+- No lost or duplicated trades, ever — trades represent legal, financial obligations.
+
+## 2. Where it sits / high-level architecture
+
+<Mermaid caption="Orders funnel through one sequencer into a single-threaded matching core per instrument" code={`flowchart LR
+  T1[Trader client] -->|order| GW1[Gateway]
+  T2[Trader client] -->|order| GW2[Gateway]
+  GW1 --> SEQ[Sequencer<br/>assigns monotonic seq no.]
+  GW2 --> SEQ
+  SEQ --> WAL[(Write-ahead log)]
+  SEQ --> ME[Matching Engine<br/>single thread per instrument]
+  ME --> OB[(In-memory order book)]
+  ME -->|trade| PUB[Market data publisher]
+  ME -->|trade| SET[Settlement / clearing pipeline]
+  PUB --> MD1[Subscriber feeds]
+  WAL -. replay on crash .-> ME
+`} />
+
+- The **sequencer** is the crux of the whole design: a single component that stamps every incoming order with a strictly increasing sequence number, fixing a total order of events for all time. This is what makes "same input sequence → same output trades" possible — determinism requires a single agreed-upon order, and a distributed, multi-writer system without one cannot guarantee it.
+- **One matching engine instance per instrument (or shard of instruments), single-threaded.** This looks like it throws away parallelism, but it removes the entire class of concurrency bugs (lock contention, race conditions on the book) from the hottest, correctness-critical path — parallelism instead comes from running many single-threaded engines, one per instrument, independently.
+- The **write-ahead log** durably persists every sequenced order *before* the matching engine applies it to the in-memory book — this is what allows exact state reconstruction after a crash.
+
+## 3. Core design: matching algorithm and order book structure
+
+| Design point | Approach | Trade-off |
+|---|---|---|
+| Matching priority | Price-time priority: best price first, ties broken by arrival order (FIFO) | Simple and universally understood by traders/regulators, but rewards raw speed (colocation, low-latency networking) — this is the entire reason high-frequency trading firms colocate at exchanges |
+| Order book data structure | Two sorted structures (bids descending, asks ascending) by price, each price level holding a FIFO queue of orders — typically a price-indexed map (e.g. a red-black tree or array-backed levels) over a linked list per level | O(log P) to find the best price level, O(1) to pop the next order at a level; a naive full-book sort per order would not hold up at required throughput |
+| Concurrency model | Single-threaded event loop per instrument; all mutations to that instrument's book are strictly serialized through the sequencer | Removes locking entirely on the hot path, at the cost of one instrument's throughput being capped by one core's speed — mitigated by sharding instruments across engines |
+| Durability | Write to an append-only log before applying to the in-memory book (write-ahead logging), same principle as a database WAL | Adds a disk/network write to the critical path — mitigated with fast sequential writes and, in the highest-performance designs, replication to a standby before acknowledging |
+
+<Callout type="tip">
+"FIFO / price-time priority, single-threaded matching core per instrument, sequencer assigns the total order, write-ahead log before applying to the book" is close to a complete answer to "design a matching engine" in one breath — say it early, then unpack each piece. NASDAQ, NYSE, and Coinbase all document price-time priority as their execution policy for orders at the same price.
+</Callout>
+
+<Callout type="warn">
+The instinct to "parallelize the matching engine for more throughput" is usually wrong and worth naming as a trap you're avoiding, not just avoiding silently: parallel mutation of one instrument's order book reintroduces exactly the race conditions and non-determinism the single-threaded design exists to eliminate. Throughput comes from sharding by instrument, not from threading within one instrument's book.
+</Callout>
+
+## 4. Deep dive
+
+**Why a single-threaded sequencer/matching core, and how it still hits high throughput.** The architecture pattern here — closely associated with LMAX's Disruptor design and echoed across matching-engine write-ups for exchanges like Coinbase — is: gateways accept orders from many clients concurrently and drop each into a lock-free ring buffer; a single sequencer thread reads from that buffer and stamps a monotonic sequence number on each order, which becomes the immutable, globally agreed order of events. Because there's exactly one writer assigning sequence numbers, there's no race to resolve — determinism falls out for free. The actual matching (comparing the new order against the resting book, generating trades) then also runs single-threaded per instrument, consuming the sequencer's output in order. Throughput at exchange scale comes not from parallelizing this loop but from (a) how fast a single core can process an order end-to-end — measured in microseconds, hence extreme attention to memory layout, avoiding garbage collection pauses, kernel-bypass networking — and (b) running many such single-threaded engines in parallel, one per instrument (or shard of instruments), since different instruments' books are fully independent and need no coordination between them.
+
+**Crash recovery via the write-ahead log.** Every order is durably appended to the WAL *before* the matching engine mutates its in-memory book — the same ordering guarantee a database WAL gives you, for the same reason. If the matching engine process crashes, recovery replays the WAL from the last known-good checkpoint (a periodic snapshot of the full book state) forward through every logged order, deterministically reconstructing the exact book and re-deriving any trades that hadn't yet been fully propagated downstream. Because matching is deterministic given the same input sequence, replay reproduces byte-identical results — this determinism requirement is *why* the single-threaded, sequenced design was chosen in the first place; a non-deterministic matching core couldn't be recovered this way. Exchanges typically also maintain a hot standby that consumes the same WAL/sequenced stream in real time, so failover is a matter of promoting the standby (which is already caught up) rather than a cold replay from disk.
+
+## 5. What real systems do today
+
+- **FIFO price-time priority is the algorithm running on Coinbase, most of Binance's spot pairs, and the New York Stock Exchange** — orders at the same price execute in the order the matching engine received them, which is why precise, immutable timestamping at the moment of receipt (and clock synchronization across any distributed gateway nodes) is treated as a hard architectural requirement, not a nice-to-have.
+- **NASDAQ and Coinbase both publicly document price-time priority** as their execution policy for displayed limit orders at the same price — this is not an implementation detail hidden from participants; it's published because trading firms build strategies around it.
+- **NASDAQ-class systems target order acknowledgment latencies under 250 microseconds**, and industry write-ups describing matching-engine architecture consistently point to the LMAX Disruptor pattern (lock-free ring buffer, single sequencer thread assigning a monotonic sequence number, single-threaded per-instrument matching) as the reference architecture for hitting that bar deterministically.
+- **Durability via write-ahead logging before applying mutations to in-memory state is described as standard practice** across matching-engine architecture write-ups, specifically framed as enabling crash recovery by replaying the log to reconstruct exact state — the same principle used by relational database WALs, applied to a much higher-throughput, lower-latency workload.
+- Trading-app platform write-ups (Robinhood-style guides) note that even consumer-facing trading apps split into microservices around **real-time market data pipelines, the matching/order-routing layer, portfolio management, and compliance/reporting** as distinct concerns — a retail brokerage in the US typically routes orders to external exchanges/market makers rather than running its own matching engine, so "build a matching engine" and "build a brokerage" are related but distinct system-design problems worth distinguishing explicitly if asked.
+
+## 6. Scaling & failure
+
+| Bottleneck | Fix | New cost |
+|---|---|---|
+| One instrument's throughput capped by single-core/single-thread speed | Not fixed by more threads on that instrument — fixed by tight, allocation-free hot-path code (avoid GC pauses, use fixed-size data structures) and kernel-bypass networking | Significant engineering investment in low-level performance work, not a scaling knob you turn casually |
+| Many instruments, one engine per instrument doesn't fit one machine | Shard instruments across many matching-engine processes/machines, each independently sequenced | Cross-instrument operations (a multi-leg order spanning two instruments) need explicit coordination the single-instrument model doesn't give you for free |
+| Market data fan-out to thousands of subscribers | Dedicated publish layer decoupled from the matching engine — the matching engine emits trade/book-delta events to a broadcast bus, never talks to subscribers directly | Market data can lag the matching engine by the fan-out layer's own latency, which must be bounded and monitored separately from matching latency |
+| WAL write on the critical path | Fast sequential-write storage (NVMe, or even RAM-backed with synchronous replication) so the durability write doesn't dominate per-order latency | Durability guarantee depends on how the replica/storage itself is protected — a WAL that isn't replicated is still a single point of data loss |
+
+**What happens when the matching engine crashes mid-trade.** Because every order was durably written to the WAL *before* being applied to the book, nothing the engine had accepted is lost — on restart (or on failover to a hot standby already consuming the same sequenced stream), the engine replays from the last checkpoint and deterministically reconstructs the exact book state, including any trade that had matched but whose downstream effects (market data broadcast, settlement handoff) hadn't yet completed. The critical design requirement this depends on is that **matching is a pure, deterministic function of the sequenced order stream** — if it weren't (e.g. if it depended on wall-clock time read at match time, or if two threads could reorder mutations), replay could reconstruct a *different*, inconsistent book, which would be catastrophic for a system where the book determines real financial obligations. Downstream consumers (market data subscribers, the settlement pipeline) must themselves be idempotent against a replayed/redelivered trade event, the same discipline used throughout money-correctness systems.
+
+## Interview follow-ups
+
+- *"Why single-threaded matching instead of parallelizing for more throughput?"* — Concurrent mutation of one order book reintroduces the race conditions and non-determinism the design exists to avoid; throughput instead comes from sharding independent instruments across many single-threaded engines.
+- *"How do you guarantee fairness — that no client can jump the order queue?"* — Price-time priority enforced by a single sequencer assigning one monotonic, immutable sequence number per order the instant it's received; all matching decisions are made against that total order, not against per-gateway arrival time.
+- *"The matching engine crashes. How do you recover without losing or reordering any trade?"* — Write-ahead log persists every sequenced order before it's applied to the book; recovery replays from the last checkpoint, and because matching is a deterministic function of the sequenced stream, replay reproduces the exact prior state.
+- *"How do you scale to thousands of instruments without one giant bottleneck?"* — Shard instruments across independent single-threaded matching engines — different instruments' books never need to coordinate, so this scales close to linearly with instrument count, unlike scaling one instrument's own throughput.
+- *"Where does market data publishing fit, and why not have the matching engine push to subscribers directly?"* — A decoupled publish/fan-out layer consumes trade and book-delta events from the matching engine, so thousands of slow or bursty subscriber connections never add latency or backpressure to the matching hot path.
+- *"What's the difference between building a matching engine and building a retail brokerage app?"* — A brokerage (Robinhood-style) is typically a client of external exchanges/market makers plus its own portfolio, compliance, and market-data-pipeline services — it usually doesn't run its own price-forming matching engine; naming this distinction shows you're not conflating two different systems.
+- *"How would clock synchronization actually break time-priority fairness in a distributed gateway setup?"* — If gateways timestamp orders locally before the sequencer sees them, clock skew between gateways could misorder genuinely simultaneous orders; the fix is that the sequencer's assigned sequence number — not any gateway's local timestamp — is the authoritative order, so skew at the edge never reaches the matching decision.
+
+Sources: [Order Matching Engine: What Every Crypto Exchange Developer Must Know — DEV Community](https://dev.to/riley_quinn_8e58a0a96d107/order-matching-engine-what-every-crypto-exchange-developer-must-know-1ic3) · [The Order Matching Engine: Price-Time Priority, Order Books, and Throughput Optimization](https://hosseinnejati.medium.com/the-order-matching-engine-price-time-priority-order-books-and-throughput-optimization-de5badb936f9) · [Designing a matching engine that keeps price-time priority — techinterview](https://www.techinterview.org/post/3233477258/matching-engine-price-time-priority-system-design/) · [Exchange Matching Engine — Coinbase Developer Documentation](https://docs.cdp.coinbase.com/exchange/concepts/matching-engine) · [Design A Stock Exchange System: A Complete Guide 2026](https://www.systemdesignhandbook.com/guides/design-a-stock-exchange-system/) · [Design Robinhood: How to Design a Trading App (2026)](https://www.systemdesignhandbook.com/guides/design-robinhood/)

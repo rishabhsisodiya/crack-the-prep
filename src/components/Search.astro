@@ -1,0 +1,55 @@
+---
+import { u } from '../consts';
+const bundle = `${import.meta.env.BASE_URL.replace(/\/$/, '')}/_pagefind/`;
+---
+
+<div class="search">
+  <div id="search"></div>
+  <p class="search-hint" id="search-hint">Loading search…</p>
+</div>
+
+<link rel="stylesheet" href={`${bundle}pagefind-ui.css`} />
+
+<style is:global>
+  .search {
+    --pagefind-ui-scale: 0.9;
+    --pagefind-ui-primary: var(--cyan);
+    --pagefind-ui-text: var(--white);
+    --pagefind-ui-background: var(--navy-card);
+    --pagefind-ui-border: var(--navy-line-2);
+    --pagefind-ui-tag: var(--navy-mid);
+    --pagefind-ui-border-width: 1px;
+    --pagefind-ui-border-radius: 8px;
+    --pagefind-ui-font: var(--font-body);
+  }
+  .search .pagefind-ui__search-input { background: var(--navy); color: var(--white); }
+  .search .pagefind-ui__result { border-top: 1px solid var(--navy-line); }
+  .search .pagefind-ui__result-link { color: var(--blue-light); }
+  .search-hint { font-family: var(--font-mono); font-size: 0.75rem; color: var(--muted); margin-top: 0.6rem; }
+</style>
+
+<script define:vars={{ bundle }} is:inline>
+  (function () {
+    var hint = document.getElementById('search-hint');
+    var s = document.createElement('script');
+    s.src = bundle + 'pagefind-ui.js';
+    s.onload = function () {
+      if (typeof window.PagefindUI !== 'function') {
+        if (hint) hint.textContent = 'Search is unavailable right now.';
+        return;
+      }
+      new window.PagefindUI({
+        element: '#search',
+        bundlePath: bundle,
+        showSubResults: true,
+        showImages: false,
+        pageSize: 8,
+      });
+      if (hint) hint.remove();
+    };
+    s.onerror = function () {
+      if (hint) hint.textContent = 'Search index is built at deploy time — try it on the live site.';
+    };
+    document.head.appendChild(s);
+  })();
+</script>

@@ -1,0 +1,91 @@
+---
+import PrepLayout from '../../layouts/PrepLayout.astro';
+import dsa from '../../data/dsa.json';
+import { solutions } from '../../data/dsa-solutions.mjs';
+import { u } from '../../consts';
+
+const totalProblems = dsa.reduce((n, g) => n + g.problems.length, 0);
+const solvedCount = solutions.length;
+const approachCount = solutions.reduce((n, s) => n + s.approaches.length, 0);
+
+const cards = [
+  {
+    href: u('/dsa/algorithms'),
+    title: 'Algorithms & Big-O',
+    blurb: 'Complexity notation, searching and sorting algorithms, recursion, and classic algorithm problems.',
+  },
+  {
+    href: u('/dsa/data-structures'),
+    title: 'Data Structures',
+    blurb: 'Arrays, objects, stacks, queues, linked lists, hash tables, trees and graphs — with JavaScript implementations.',
+  },
+  {
+    href: u('/dsa/patterns'),
+    title: 'Patterns',
+    blurb: 'The dozen recurring patterns — the trigger that tells you which applies, the approach, complexity and reference code.',
+  },
+  {
+    href: u('/dsa/checklist'),
+    title: 'Practice Checklist',
+    blurb: `${totalProblems} problems across ${dsa.length} topics. Tick them off as you solve — progress saved in your browser.`,
+  },
+  {
+    href: u('/dsa/solutions'),
+    title: 'Worked Solutions',
+    blurb: `${solvedCount} problems solved with ${approachCount} approaches — brute force first, then optimal, with idea, complexity and code.`,
+  },
+];
+---
+
+<PrepLayout
+  track="dsa"
+  title="Data Structures & Algorithms"
+  description="DSA for coding interviews — theory, patterns, a practice checklist, and worked solutions with multiple approaches."
+>
+  <div class="prose">
+    <h1>Data Structures &amp; Algorithms</h1>
+    <p class="lede">
+      Everything for the coding round: the theory, the patterns that map a problem to a
+      technique, a practice checklist to track progress, and worked solutions with
+      multiple approaches.
+    </p>
+  </div>
+
+  <div class="grid">
+    {cards.map((c) => (
+      <a class="card" href={c.href}>
+        <span class="card-title">{c.title}</span>
+        <span class="card-blurb">{c.blurb}</span>
+      </a>
+    ))}
+  </div>
+</PrepLayout>
+
+<style>
+  .lede { font-size: 1.05rem; margin: 0.4rem 0 0.5rem; max-width: 62ch; }
+
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 1rem;
+    margin-top: 1.8rem;
+  }
+  .card {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+    padding: 1.3rem 1.4rem;
+    background: var(--navy-card);
+    border: 1px solid var(--navy-line);
+    border-radius: 8px;
+    transition: border-color 0.2s, transform 0.2s;
+  }
+  .card:hover { border-color: var(--navy-line-2); transform: translateY(-2px); }
+  .card-title {
+    font-family: var(--font-display);
+    font-size: 1.3rem;
+    letter-spacing: 0.04em;
+    color: var(--white);
+  }
+  .card-blurb { font-size: 0.9rem; color: var(--text); }
+</style>

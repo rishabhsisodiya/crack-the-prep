@@ -1,0 +1,195 @@
+---
+import { getCollection, render } from 'astro:content';
+import PrepLayout from '../../layouts/PrepLayout.astro';
+import TableOfContents from '../../components/TableOfContents.astro';
+import { TRACKS, trackBySlug, u } from '../../consts';
+
+export function getStaticPaths() {
+  return TRACKS.filter((t) => t.hasQuestions).map((t) => ({ params: { track: t.slug } }));
+}
+
+const { track } = Astro.params;
+const meta = trackBySlug(track!)!;
+
+const list = await getCollection('notes', (e) => e.data.track === track && e.data.kind === 'questions' && !e.data.draft);
+const entry = list[0];
+
+let Content, headings;
+if (entry) ({ Content, headings } = await render(entry));
+const updated = entry?.data.updated;
+---
+
+<PrepLayout
+  track={track!}
+  title={`${meta.title} — Questions`}
+  description={`Interview questions for ${meta.title}, with model answers you reveal on click.`}
+>
+  {headings && headings.some((h) => h.depth > 2) && (
+    <Fragment slot="toc"><TableOfContents headings={headings} maxDepth={2} /></Fragment>
+  )}
+  {entry ? (
+    <article class="prose">
+      <h1>{meta.title} — Interview Questions</h1>
+      <p class="lede">
+        Self-test drill. Each answer is hidden — read the question, answer it in your head, then reveal.
+      </p>
+      {updated && (
+        <p class="reviewed">
+          Last reviewed {updated.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}
+        </p>
+      )}
+      <div class="qa-controls" hidden>
+        <button type="button" data-all="open">Reveal all</button>
+        <button type="button" data-all="close">Hide all</button>
+        <span class="qa-count"></span>
+      </div>
+      <p class="xlink"><a href={u(`/${track}`)}>← {meta.title} notes</a></p>
+
+      <div id="qa" class="qa-root">
+        <Content />
+      </div>
+    </article>
+  ) : (
+    <div class="prose">
+      <h1>{meta.title} — Questions</h1>
+      <div class="soon">
+        <p class="soon-tag">Coming next</p>
+        <p>The question bank for this track is written up in a later build step.</p>
+        <p><a href={u(`/${track}`)}>← {meta.title} notes</a></p>
+      </div>
+    </div>
+  )}
+</PrepLayout>
+
+<style>
+  .lede { font-size: 1.05rem; margin: 0.4rem 0 1rem; }
+  .reviewed { font-family: var(--font-mono); font-size: 0.72rem; color: var(--muted); margin: 0 0 1rem; }
+  .xlink { margin: 0 0 1.6rem; font-family: var(--font-mono); font-size: 0.8rem; }
+  .soon { border: 1px solid var(--navy-line); border-left: 3px solid var(--cyan); border-radius: 0 6px 6px 0; padding: 1.2rem 1.4rem; background: var(--navy-card); }
+  .soon-tag { font-family: var(--font-mono); font-size: 0.62rem; letter-spacing: 0.16em; text-transform: uppercase; color: var(--cyan); margin-bottom: 0.4rem; }
+
+  .qa-controls { display: flex; align-items: center; gap: 0.6rem; margin: 0 0 1.4rem; }
+  .qa-controls button {
+    font-family: var(--font-mono);
+    font-size: 0.68rem;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    padding: 0.35rem 0.7rem;
+    background: var(--navy-card);
+    border: 1px solid var(--navy-line-2);
+    color: var(--muted);
+    border-radius: 4px;
+    cursor: pointer;
+  }
+  .qa-controls button:hover { color: var(--cyan); border-color: var(--cyan); }
+  .qa-count { font-family: var(--font-mono); font-size: 0.72rem; color: var(--muted); }
+
+  /* enhanced question blocks */
+  .qa-root :global(details.qa) {
+    border: 1px solid var(--navy-line);
+    border-radius: 8px;
+    background: var(--navy-card);
+    margin: 0.7rem 0;
+    overflow: hidden;
+  }
+  .qa-root :global(details.qa > summary) {
+    list-style: none;
+    cursor: pointer;
+    padding: 0.9rem 1.1rem;
+    display: flex;
+    gap: 0.7rem;
+    align-items: flex-start;
+    font-weight: 600;
+    color: var(--white);
+  }
+  .qa-root :global(details.qa > summary::-webkit-details-marker) { display: none; }
+  .qa-root :global(details.qa > summary::before) {
+    content: 'Q';
+    font-family: var(--font-mono);
+    color: var(--cyan);
+    font-size: 0.85rem;
+    flex-shrink: 0;
+  }
+  .qa-root :global(details.qa > summary::after) {
+    content: '▸';
+    margin-left: auto;
+    color: var(--muted);
+    transition: transform 0.2s;
+  }
+  .qa-root :global(details.qa[open] > summary) {
+    border-bottom: 1px solid var(--navy-line);
+    background: rgba(0, 180, 216, 0.06);
+  }
+  .qa-root :global(details.qa[open] > summary::after) { transform: rotate(90deg); }
+  .qa-root :global(.qa-body) { padding: 0.4rem 1.1rem 1rem; }
+  .qa-root :global(.qa-body > :first-child) { margin-top: 0.6rem; }
+
+  /* pre-enhancement fallback: plain readable doc */
+  .qa-root :global(h2) { cursor: default; }
+  .qa-root :global(details.qa[id]) { scroll-margin-top: 5rem; }
+</style>
+
+<script>
+  const root = document.getElementById('qa');
+  if (root) {
+    const controls = document.querySelector<HTMLElement>('.qa-controls');
+    const countEl = document.querySelector<HTMLElement>('.qa-count');
+
+    // Turn each question heading + its content into a collapsible <details>.
+    // A heading is a "question" when its content (up to the next heading of the
+    // same or higher level) has no sub-headings and no <details> of its own.
+    // So flat "## Question" pages work, and sectioned pages (## Section → ### Question,
+    // or ### Group → #### Question with its own answer toggle) keep their structure.
+    const kids = [...root.children] as HTMLElement[];
+    const level = (el: HTMLElement) => (/^H[2-4]$/.test(el.tagName) ? Number(el.tagName[1]) : 0);
+    const groups: { q: HTMLElement; body: HTMLElement[] }[] = [];
+
+    kids.forEach((el, i) => {
+      const lv = level(el);
+      if (!lv) return;
+      const body: HTMLElement[] = [];
+      for (let j = i + 1; j < kids.length; j++) {
+        const next = kids[j];
+        const nlv = level(next);
+        if (nlv && nlv <= lv) break;
+        body.push(next);
+      }
+      const isQuestion = body.length > 0 && !body.some((n) => level(n) || n.tagName === 'DETAILS' || n.querySelector('details'));
+      if (isQuestion) groups.push({ q: el, body });
+    });
+
+    const details: HTMLDetailsElement[] = [];
+    for (const g of groups) {
+      const d = document.createElement('details');
+      d.className = 'qa';
+      const s = document.createElement('summary');
+      s.textContent = g.q.textContent?.replace(/^\*+/, '').trim() || 'Question';
+      if (g.q.id) d.id = g.q.id; // keep in-page links (TOC) working
+      d.appendChild(s);
+      const body = document.createElement('div');
+      body.className = 'qa-body';
+      g.body.forEach((n) => body.appendChild(n));
+      d.appendChild(body);
+      g.q.replaceWith(d);
+      details.push(d);
+    }
+
+    // The layout changed after the browser applied the URL hash, so jump again.
+    if (location.hash) {
+      const target = document.getElementById(decodeURIComponent(location.hash.slice(1)));
+      if (target instanceof HTMLDetailsElement) target.open = true;
+      target?.scrollIntoView();
+    }
+
+    if (details.length && controls) {
+      controls.hidden = false;
+      if (countEl) countEl.textContent = `${details.length} questions`;
+      controls.querySelectorAll<HTMLButtonElement>('button[data-all]').forEach((btn) =>
+        btn.addEventListener('click', () => {
+          const open = btn.dataset.all === 'open';
+          details.forEach((d) => (d.open = open));
+        }),
+      );
+    }
+  }
+</script>

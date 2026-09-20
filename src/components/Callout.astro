@@ -1,0 +1,9 @@
+---
+interface Props { type?: 'note' | 'tip' | 'important' | 'warning' | 'caution'; label?: string }
+const { type = 'note', label } = Astro.props;
+const fallback = { note: 'Note', tip: 'Tip', important: 'Important', warning: 'Warning', caution: 'Caution' };
+---
+
+<aside class={`callout callout--${type}`} data-label={label ?? fallback[type]}>
+  <slot />
+</aside>

@@ -1,0 +1,87 @@
+---
+title: "System Design — Nearby Friends"
+track: "system-design"
+kind: "notes"
+order: 25
+slug: "nearby-friends"
+updated: 2026-09-11
+description: "Designing a live 'friends near me' feature — continuous location ingestion, fan-out to a friend graph, and why this is a much harder write path than a static proximity search."
+---
+
+import Callout from '../../components/Callout.astro';
+import Mermaid from '../../components/Mermaid.astro';
+
+Part of the [system design](/prep/system-design) series. See the [framework](/prep/system-design) and [building blocks](/prep/system-design/building-blocks) first if you haven't.
+
+## 1. Requirements
+
+**Functional**
+- Show a user which of their friends are currently within some radius (e.g. 5 miles), updated in near real time as people move.
+- Users opt in to location sharing; only mutual friends who've opted in see each other.
+- Update a friend's position on the viewer's screen within a few seconds of it changing.
+
+**Non-functional**
+- Massive concurrent write volume — every opted-in user's phone pushes a location update every few seconds, continuously, not on-demand like a search query (this is the opposite read:write profile of Proximity Service).
+- Low end-to-end latency for propagation (location changes → friend sees it), but individual position precision can be loose (rounding to ~100m is fine and actually desirable for privacy).
+- Must scale to tens of millions of concurrent connections, and gracefully shed load — a delayed update is fine, a crashed service is not.
+- Respect that this is sensitive personal data — location history should not be retained longer than needed and must be access-controlled per friendship, not globally readable.
+
+## 2. High-level architecture
+
+<Mermaid caption="Continuous ingestion fanned out over persistent connections, not polling" code={`flowchart LR
+  Phone1[Phone A] -->|location every ~5-30s| GW[Location Ingestion Service]
+  Phone2[Phone B] -->|location every ~5-30s| GW
+  GW --> Q[Message Queue / Stream]
+  Q --> LOC[(Location Store<br/>latest position per user, TTL)]
+  Q --> FANOUT[Fan-out Service]
+  FANOUT --> GRAPH[(Friend Graph)]
+  FANOUT -->|push via WebSocket| Phone3[Phone C, viewing]
+`} />
+
+The key design fork versus a static proximity search: this is a **write-heavy, push-based** system, not a read-heavy, pull-based one. A location update needs to reach every online friend who's currently viewing the "nearby friends" screen, which means either persistent connections (WebSocket) pushing updates, or a bounded-frequency poll — not an on-demand query per friend.
+
+## 3. Update propagation trade-offs
+
+| Approach | Latency | Server cost | Notes |
+|---|---|---|---|
+| Client polls server every N seconds | Bounded by poll interval (e.g. 5-10s staleness) | Lower — no persistent connections, simple to scale horizontally | Simplest to build; acceptable staleness for a "nearby friends" feature where sub-second precision isn't the point |
+| Server pushes via WebSocket/long-poll | Near real-time (sub-second) | Higher — millions of held-open connections need connection-server infrastructure (sharded gateway layer) | Needed for something like Snap Map's live-motion feel |
+| Hybrid: poll when app foregrounded, push (silent notification) to wake sync when a close friend moves nearby | Balances both | Moderate | What most production location-sharing features converge on to save battery |
+
+<Callout type="warn">
+Don't default to "just push everything over WebSockets" without naming the cost: a live position feed for tens of millions of users means tens of millions of held-open connections and constant small writes, which is a very different (and much more expensive) infrastructure shape than a typical read-heavy API. A poller with a sane interval is a legitimate, often-correct answer here — say why you're choosing one over the other.
+</Callout>
+
+## 4. Deep dive: fan-out and the friend graph problem
+
+**The fan-out problem**: naively, every location update would require checking every friend's current position to compute new distances — O(friends) work per update, and it doesn't parallelize cleanly if friends are scattered across shards. The standard fix: maintain a **reverse index of "who is subscribed to whom's updates while nearby-view is open"** — only fan out an update to friends actively viewing the feature, not the user's entire friend list. This turns an O(all friends) problem into O(currently-active viewers), which is normally a tiny fraction.
+
+**Storing "latest position"**: don't append every location ping to a growing history table — overwrite a single row per user (`user_id -> {lat, lng, timestamp}`) in a fast key-value store (Redis or similar) with a short TTL. If a user's row hasn't been refreshed recently (they went offline or closed the app), treat them as "not currently nearby" rather than showing a stale pin. This also directly satisfies the privacy requirement — there's no growing location history to leak or need to purge.
+
+**Distance computation at scale**: for each active viewer, compute distance to their mutual friends' latest cached positions rather than running a spatial-index query per user — since the candidate set (mutual friends who are also opted in and active) is small (tens, not millions), a simple Haversine loop over cached positions is cheaper than standing up a full geospatial index for this use case, unlike Proximity Service where the candidate universe is enormous.
+
+## 5. What real systems do today
+
+Facebook's original **Nearby Friends** feature (and its 2018 Snap-Map-style redesign) used opt-in, coarse-grained location sharing — deliberately showing only city/neighborhood-level proximity by default rather than exact pins, both as a product/privacy choice and because it relaxes the freshness and precision requirements on the backend considerably compared to a live map. **Snapchat's Snap Map**, by contrast, shows much more precise live positions and leans harder into the near-real-time push model, reflecting a different privacy/product trade-off for a smaller, closer friend circle.
+
+Community system-design breakdowns of this problem (LeetCode discuss, and several system-design blogs) size the problem at roughly 10 million concurrent users pushing updates and note the resulting write volume (cited around 13M+ location updates/second at large scale) is the dominant cost driver — which is why the architecture optimizes the ingestion/write path (batched writes, a message queue absorbing bursts, TTL'd latest-position stores) rather than optimizing for read-side query sophistication the way Proximity Service does.
+
+## 6. Scaling & failure
+
+- **Ingestion service overwhelmed by write volume** → put a message queue (Kafka or similar) directly behind the ingestion gateway so location writes are buffered and consumed asynchronously by the location-store writer and fan-out service, decoupling "accept the update" from "propagate the update."
+- **Fan-out becomes expensive for users with huge friend counts** → cap how many friends are actively fanned out to at once (paginate/batch), and only compute fan-out for friends whose last-known position is already within a coarse bounding box, before doing precise distance math.
+- **WebSocket connection layer under memory pressure from millions of held-open connections** → shard the connection layer itself (consistent hashing of user ID to a connection-server instance), so no single instance holds an unbounded number of sockets.
+
+**What happens when the location store (or its cache layer) dies**: newly arriving location updates queue up in the message queue (durable, so no data loss) but stop propagating to viewers, so users see friends "frozen" at their last known position rather than an error — which is a fine degraded state for this feature (better than crashing the whole app). On recovery, catch up the backlog from the queue rather than discarding it, since a location update from 30 seconds ago is still usable, unlike, say, a stale price quote.
+
+## Interview follow-ups
+
+- *"Why is this a fundamentally different design problem than Proximity Service, even though both involve 'find things near a point'?"* — Proximity Service is read-heavy over near-static data; Nearby Friends is write-heavy over continuously changing data with a push requirement — opposite ends of the read:write spectrum.
+- *"Do you poll or push for the location feed?"* — Trade-off between real-time feel (push/WebSocket, expensive at scale) and simplicity/battery life (poll, bounded staleness); most production systems use a hybrid.
+- *"How do you avoid O(friend count) work on every single location update?"* — Fan out only to friends actively viewing the nearby-friends screen (a small, dynamic subscriber set), not the whole friend graph.
+- *"Do you store a history of a user's location?"* — No — overwrite a single latest-position row with a TTL; this both simplifies the system and directly serves the privacy requirement of not retaining location history.
+- *"A user has 5,000 friends. Does their phone compute distance to all 5,000 every update?"* — No — only to mutual, opted-in, currently-active friends, which in practice is a tiny fraction; batch/paginate if that set is still large.
+- *"The location ingestion pipeline goes down for two minutes. What does the user see?"* — Friends appear frozen at last-known position rather than the app erroring; the queue buffers incoming updates durably and the backlog catches up on recovery.
+- *"How do you balance freshness against user battery life?"* — Loosen update frequency (e.g. every 30s instead of every 5s) and use coarser location precision (~100m rounding) — both reduce radio/GPS wake-ups without meaningfully hurting the product experience.
+
+Sources: [Design NearBy Friends Service — Abhishek Saini, Medium](https://abhishek-saini.medium.com/design-nearby-friends-service-3af672f83518) · [System Design Reading Notes: Nearby Friends — SXStudio](https://www.sx-studio.com/nearby-friends/) · [Design Nearby Friends — LeetCode Discuss](https://leetcode.com/discuss/post/430926/Design-Nearby-Friends/) · [Facebook hopes to revive its 'Nearby Friends' with a Snap-Map-like interface — 9to5Mac](https://9to5mac.com/2018/10/03/facebook-location-sharing-nearby-friends/) · [Facebook testing Snap Map-style redesign of Nearby Friends — TechCrunch](https://techcrunch.com/2018/10/03/facebook-nearby-map/)

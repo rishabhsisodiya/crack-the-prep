@@ -1,0 +1,238 @@
+---
+title: "Modern JavaScript (ES2020 → ES2026)"
+part: "JavaScript Notes"
+track: "javascript"
+kind: "notes"
+order: 20
+updated: 2026-09-06
+description: "A living reference of recent ECMAScript additions — ES2020 through ES2026 — with short examples, plus proposals to watch."
+---
+
+import Callout from '../../components/Callout.astro';
+
+<Callout type="note" label="Living document">
+JavaScript ships a new ECMAScript edition every June. This page tracks what landed
+recently and what's next. To update it: check the finished proposals at
+<a href="https://github.com/tc39/proposals/blob/main/finished-proposals.md">tc39/proposals</a>
+and the Stage-3 list at <a href="https://tc39.es/process-document/">tc39.es</a>, then add a
+section below (newest first).
+</Callout>
+
+Everything from **ES2020 onward is safe to use** in evergreen browsers and current Node
+without a transpile step. Interviewers increasingly expect familiarity with at least
+ES2020–ES2023; Temporal and `using` are the 2025–26 talking points.
+
+## ES2026 — shipping now
+
+The 17th edition. Reached Stage 4 in early 2026.
+
+### Temporal API — the `Date` replacement
+
+Immutable, timezone- and calendar-aware date/time. Fixes almost every `Date` foot-gun
+(mutability, month indexing, parsing, timezone math).
+
+```js
+const now = Temporal.Now.plainDateTimeISO();          // 2026-09-06T14:32:10
+const birthday = Temporal.PlainDate.from('1994-05-20');
+const daysAlive = now.toPlainDate().since(birthday).days;
+
+const meeting = Temporal.ZonedDateTime.from({
+  timeZone: 'Asia/Kolkata',
+  year: 2026, month: 9, day: 6, hour: 18,
+});
+meeting.withTimeZone('America/New_York').toString(); // same instant, NY wall-clock
+```
+
+### Explicit resource management — `using` / `await using`
+
+Deterministic cleanup, no `try/finally`. The resource must implement
+`Symbol.dispose` (or `Symbol.asyncDispose`).
+
+```js
+function openFile(path) {
+  const handle = fs.openSync(path, 'r');
+  return { handle, [Symbol.dispose]() { fs.closeSync(handle); } };
+}
+
+{
+  using file = openFile('data.txt');
+  read(file.handle);
+} // file automatically closed here, even on throw
+```
+
+### `Array.fromAsync()`
+
+Builds an array from an async iterable — the `for await` loop you kept writing by hand.
+
+```js
+const lines = await Array.fromAsync(readLinesStream(file));
+```
+
+### `Error.isError()`
+
+Reliable cross-realm error check (survives iframes / worker boundaries where
+`instanceof Error` fails).
+
+```js
+if (Error.isError(err)) console.error(err.stack);
+```
+
+## ES2025
+
+16th edition, approved June 2025.
+
+### Iterator helpers
+
+Lazy `.map` / `.filter` / `.take` / `.drop` / `.flatMap` / `.reduce` directly on any
+iterator — no `[...spread]` to an array first.
+
+```js
+const firstThreeEven = someHugeIterator()
+  .filter((n) => n % 2 === 0)
+  .map((n) => n * n)
+  .take(3)
+  .toArray();
+```
+
+### Set methods
+
+```js
+const a = new Set([1, 2, 3]);
+const b = new Set([2, 3, 4]);
+a.union(b);              // {1,2,3,4}
+a.intersection(b);       // {2,3}
+a.difference(b);         // {1}
+a.isSubsetOf(b);         // false
+```
+
+### `Promise.try()`
+
+Runs a function and always returns a promise — sync throws, sync returns, and async
+results all funnel through one `.catch`.
+
+```js
+Promise.try(() => mightThrowSyncOrReturnPromise(input))
+  .then(handle)
+  .catch(reportError);
+```
+
+### JSON modules
+
+```js
+import config from './config.json' with { type: 'json' };
+```
+
+### `RegExp.escape()`
+
+Escape a string for safe use inside a dynamic `RegExp`.
+
+```js
+const re = new RegExp(RegExp.escape(userInput), 'g');
+```
+
+### Also in ES2025
+
+- **`Float16Array`** — 16-bit float typed array (ML, graphics, WebGPU).
+- **Regex pattern modifiers** — `(?i:...)` / `(?-i:...)` to toggle flags for part of a pattern.
+- **Duplicate named capture groups** across alternation branches.
+
+## ES2024
+
+### `Object.groupBy()` / `Map.groupBy()`
+
+```js
+const byRole = Object.groupBy(users, (u) => u.role);
+// { admin: [...], member: [...] }
+```
+
+### `Promise.withResolvers()`
+
+Get a promise plus its `resolve` / `reject` without the callback-closure dance.
+
+```js
+const { promise, resolve, reject } = Promise.withResolvers();
+socket.once('message', resolve);
+socket.once('error', reject);
+await promise;
+```
+
+### Also in ES2024
+
+- **`String.prototype.isWellFormed()` / `toWellFormed()`** — detect / fix lone surrogates.
+- **RegExp `v` flag** — set notation and string properties in character classes.
+- **`ArrayBuffer.prototype.resize()` / `transfer()`** — resizable and transferable buffers.
+- **`Atomics.waitAsync()`** — non-blocking wait on shared memory.
+
+## ES2023
+
+### Change array by copy
+
+Non-mutating versions of the four mutating array methods:
+
+```js
+const sorted = list.toSorted((a, b) => a - b); // list unchanged
+const reversed = list.toReversed();
+const patched = list.with(2, 'x');             // copy with index 2 replaced
+const spliced = list.toSpliced(1, 2, 'a', 'b');
+```
+
+### `findLast()` / `findLastIndex()`
+
+```js
+const lastError = log.findLast((e) => e.level === 'error');
+```
+
+### Also in ES2023
+
+- Symbols allowed as **WeakMap keys**.
+- Hashbang (`#!/usr/bin/env node`) is now part of the grammar.
+
+## ES2022
+
+- **Top-level `await`** in modules — no async IIFE wrapper for entry points.
+- **Class fields, `#private` fields and methods, `static {}` init blocks.**
+- **`Array.prototype.at()` / `String.prototype.at()`** — `arr.at(-1)` for the last item.
+- **`Object.hasOwn(obj, key)`** — the safe replacement for `obj.hasOwnProperty(key)`.
+- **`error.cause`** — `new Error('failed', { cause: originalError })`.
+- **RegExp `d` flag** — match start/end indices via `match.indices`.
+
+```js
+class Counter {
+  #count = 0;                       // private field
+  static #instances = 0;
+  static { Counter.#instances = 0; } // static block
+  increment() { return ++this.#count; }
+}
+```
+
+## ES2021
+
+- **`String.prototype.replaceAll()`** — no more `/g` regex just to replace all.
+- **`Promise.any()`** — first fulfilled wins; rejects with an `AggregateError` only if all fail.
+- **Logical assignment** — `a ??= b`, `a ||= b`, `a &&= b`.
+- **Numeric separators** — `1_000_000`, `0xFF_EC_DE`.
+- **`WeakRef` / `FinalizationRegistry`** — advanced, rarely needed.
+
+## ES2020
+
+The baseline for "modern JS".
+
+- **Optional chaining** — `user?.profile?.avatar`.
+- **Nullish coalescing** — `value ?? fallback` (only `null`/`undefined`, unlike `||`).
+- **`Promise.allSettled()`** — wait for all, never short-circuit on rejection.
+- **`BigInt`** — arbitrary-precision integers: `9007199254740993n`.
+- **`globalThis`** — one name for the global object across browser / Node / worker.
+- **Dynamic `import()`** — `const mod = await import('./heavy.js')`.
+- **`String.prototype.matchAll()`**, **`import.meta`**, **stable `Array.prototype.sort`**.
+
+## Proposals to watch
+
+| Proposal | Stage | What it is |
+|---|---|---|
+| Decorators | 3 | `@decorator` syntax for classes, fields, methods, accessors |
+| Signals (`TC39/proposal-signals`) | 1 | Built-in reactive state primitive (`Signal.State`, `Signal.Computed`) |
+| `Math.sumPrecise` | 3+ | Accurate summation of a list of numbers |
+| Pattern matching (`match` / `when`) | 1 | Structural `switch`-like matching |
+| Records &amp; Tuples | on hold | Deeply immutable value types (`#{}` / `#[]`) — being redesigned |
+
+Check the current list at <a href="https://github.com/tc39/proposals">github.com/tc39/proposals</a>.

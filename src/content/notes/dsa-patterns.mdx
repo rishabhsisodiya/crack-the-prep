@@ -1,0 +1,264 @@
+---
+title: "DSA Patterns"
+part: "DSA"
+track: "dsa"
+kind: "notes"
+order: 3
+slug: "patterns"
+description: "The dozen patterns that cover most interview coding problems: the trigger that tells you which one applies, the approach, complexity, and reference code."
+updated: 2026-09-02
+---
+
+import Callout from '../../components/Callout.astro';
+
+Interview coding is pattern recognition under time pressure. For each pattern below: the **trigger** that should make you reach for it, the **approach**, the **complexity**, and reference code. Write your own version before reading the code.
+
+<Callout type="tip">
+Consistency beats intensity: three problems every day for a month beats ten problems twice a week. Keep a one-line log of "pattern → trigger" and re-read it weekly.
+</Callout>
+
+## The problem-solving script
+
+Say this out loud in the room — communication is scored:
+
+1. Restate the problem and confirm constraints, input ranges, duplicates, empty input, sortedness.
+2. Walk one small example by hand.
+3. State the brute force and its Big-O — always, even if trivial.
+4. Name the pattern and why it applies.
+5. Sketch the approach in two or three sentences and get a nod before coding.
+6. Code in small pieces, narrating intent.
+7. Dry-run on your example, then edge cases: empty, single element, all duplicates, negatives, already sorted, overflow.
+8. State the final time and space complexity unprompted.
+
+## Hashing
+
+**Trigger:** "have I seen this before?", counting frequencies, grouping, complement lookups. Turns an O(n²) scan into O(n).
+
+```js
+function twoSum(nums, target) {
+  const seen = new Map(); // value -> index
+  for (let i = 0; i < nums.length; i++) {
+    const need = target - nums[i];
+    if (seen.has(need)) return [seen.get(need), i];
+    seen.set(nums[i], i);
+  }
+  return [];
+}
+```
+
+O(n) time, O(n) space. Related: group anagrams (key by sorted string), subarray sum equals k (prefix-sum counts in a map).
+
+## Two pointers
+
+**Trigger:** a sorted array, or comparing from both ends; find a pair or triplet, reverse in place, partition, dedupe.
+
+```js
+function pairSumSorted(a, target) {
+  let l = 0, r = a.length - 1;
+  while (l < r) {
+    const s = a[l] + a[r];
+    if (s === target) return [l, r];
+    s < target ? l++ : r--;
+  }
+  return [];
+}
+```
+
+O(n) after an O(n log n) sort. Three-sum: fix one element, two-pointer the rest, skip duplicates.
+
+## Sliding window
+
+**Trigger:** longest, shortest, or count of a contiguous subarray or substring meeting a constraint. Expand the right edge; shrink the left while the window is invalid.
+
+```js
+function longestUniqueSubstring(s) {
+  const last = new Map();
+  let start = 0, best = 0;
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (last.has(c) && last.get(c) >= start) start = last.get(c) + 1;
+    last.set(c, i);
+    best = Math.max(best, i - start + 1);
+  }
+  return best;
+}
+```
+
+O(n) time. Also: minimum window substring, max sum subarray of size k, longest with at most k distinct.
+
+## Binary search
+
+**Trigger:** sorted-array lookup, or a monotonic predicate over a numeric range ("smallest capacity such that we finish in D days").
+
+```js
+// leftmost index where pred(x) is true; pred must be false...false, true...true
+function lowerBound(lo, hi, pred) {
+  while (lo < hi) {
+    const mid = lo + ((hi - lo) >> 1);
+    if (pred(mid)) hi = mid;
+    else lo = mid + 1;
+  }
+  return lo;
+}
+```
+
+O(log n), times an O(n) check when searching the answer space. Keep one template; define the predicate carefully; use the shift or `Math.floor` to avoid mid overflow.
+
+## Stack
+
+**Trigger:** matching pairs, "most recent unresolved thing", or "next greater / smaller element" (a monotonic stack).
+
+```js
+function nextGreater(nums) {
+  const res = Array(nums.length).fill(-1);
+  const st = []; // indices, values decreasing
+  for (let i = 0; i < nums.length; i++) {
+    while (st.length && nums[i] > nums[st[st.length - 1]]) {
+      res[st.pop()] = nums[i];
+    }
+    st.push(i);
+  }
+  return res;
+}
+```
+
+O(n) — each index is pushed and popped once.
+
+## Fast and slow pointers
+
+**Trigger:** linked-list cycle detection, finding the middle, reordering.
+
+```js
+function hasCycle(head) {
+  let slow = head, fast = head;
+  while (fast && fast.next) {
+    slow = slow.next;
+    fast = fast.next.next;
+    if (slow === fast) return true;
+  }
+  return false;
+}
+```
+
+O(n) time, O(1) space. The middle is `slow` when `fast` reaches the end. Use a dummy head node for insert- or delete-heavy problems.
+
+## Trees — BFS and DFS
+
+**Trigger:** anything hierarchical. Level-order needs a queue; depth, diameter, path sum, and validation are recursive.
+
+```js
+function levelOrder(root) {
+  if (!root) return [];
+  const res = [], q = [root];
+  while (q.length) {
+    const level = [];
+    for (let n = q.length; n > 0; n--) {
+      const node = q.shift();
+      level.push(node.val);
+      if (node.left) q.push(node.left);
+      if (node.right) q.push(node.right);
+    }
+    res.push(level);
+  }
+  return res;
+}
+```
+
+O(n) time. A binary-search-tree in-order traversal yields sorted order. Know: validate a BST by passing down min and max bounds; lowest common ancestor.
+
+## Graphs
+
+**Trigger:** nodes and edges, or a grid treated as a graph. BFS for shortest path in an unweighted graph; DFS for connectivity and cycles; Kahn's algorithm or DFS colours for topological sort.
+
+```js
+function numIslands(grid) {
+  const R = grid.length, C = grid[0].length;
+  let count = 0;
+  const sink = (r, c) => {
+    if (r < 0 || c < 0 || r >= R || c >= C || grid[r][c] !== '1') return;
+    grid[r][c] = '0';
+    sink(r + 1, c); sink(r - 1, c); sink(r, c + 1); sink(r, c - 1);
+  };
+  for (let r = 0; r < R; r++)
+    for (let c = 0; c < C; c++)
+      if (grid[r][c] === '1') { count++; sink(r, c); }
+  return count;
+}
+```
+
+O(V + E).
+
+## Heap / priority queue
+
+**Trigger:** "k largest or smallest", "kth", streaming order statistics. JavaScript has no built-in heap — carry a small class or keep a sorted array for tiny k.
+
+```js
+// k largest: keep a min-heap of size k; the root is the kth largest.
+// Running median: a max-heap for the low half, a min-heap for the high half.
+```
+
+Top-k is O(n log k).
+
+## Backtracking
+
+**Trigger:** generate all subsets, permutations, or combinations; constraint satisfaction.
+
+```js
+function subsets(nums) {
+  const res = [], path = [];
+  const bt = (start) => {
+    res.push([...path]);
+    for (let i = start; i < nums.length; i++) {
+      path.push(nums[i]);
+      bt(i + 1);
+      path.pop(); // undo
+    }
+  };
+  bt(0);
+  return res;
+}
+```
+
+Shape: choose, recurse, un-choose. Permutations track a `used` array; combination sum allows reuse by recursing on `i` rather than `i + 1`. Exponential by nature — that is expected.
+
+## Dynamic programming
+
+**Trigger:** "number of ways", "min or max cost", "can we reach", with overlapping subproblems and choices at each step.
+
+Steps: define the state (what `dp[i]` means), the recurrence, the base case, the fill order, the answer cell. Then reduce space if only the last few states are needed.
+
+```js
+function coinChange(coins, amount) {
+  const dp = Array(amount + 1).fill(Infinity);
+  dp[0] = 0;
+  for (let a = 1; a <= amount; a++)
+    for (const c of coins)
+      if (c <= a) dp[a] = Math.min(dp[a], dp[a - c] + 1);
+  return dp[amount] === Infinity ? -1 : dp[amount];
+}
+```
+
+O(amount × coins). House robber: `dp[i] = max(dp[i-1], dp[i-2] + nums[i])`, reducible to two variables.
+
+## Intervals
+
+**Trigger:** overlapping ranges, scheduling, "can attend all", "rooms needed". Almost always: sort by start first.
+
+```js
+function merge(intervals) {
+  intervals.sort((a, b) => a[0] - b[0]);
+  const res = [intervals[0]];
+  for (let i = 1; i < intervals.length; i++) {
+    const last = res[res.length - 1];
+    if (intervals[i][0] <= last[1]) last[1] = Math.max(last[1], intervals[i][1]);
+    else res.push(intervals[i]);
+  }
+  return res;
+}
+```
+
+O(n log n). Minimum meeting rooms: sort starts and ends separately and sweep, or use a min-heap of end times.
+
+## When you do not recognise the problem
+
+Look for structure: sorted implies binary search or two pointers; contiguous implies sliding window; "seen before" implies a hash; a tree or graph implies BFS or DFS; optimal over choices with overlap implies DP; "k of something" implies a heap. Pick the most promising, sketch it in words, get a nod, then code.

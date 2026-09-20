@@ -1,0 +1,64 @@
+---
+import { SITE, TRACKS, u } from '../consts';
+const year = new Date().getFullYear();
+---
+
+<footer class="foot">
+  <div class="wrap foot-grid">
+    <div>
+      <p class="foot-brand">CRACKTHE<span>PREP</span></p>
+      <p class="foot-tag">
+        Free interview preparation for full-stack engineers.
+      </p>
+    </div>
+    <nav aria-label="Tracks">
+      <ul>
+        {TRACKS.map((t) => (
+          <li><a href={u(`/${t.slug}`)}>{t.title}</a></li>
+        ))}
+      </ul>
+    </nav>
+  </div>
+  <div class="wrap foot-base">
+    <span>© {year} {SITE.name}</span>
+    <span>Notes are study material, not a substitute for building things.</span>
+  </div>
+</footer>
+
+<style>
+  .foot {
+    border-top: 1px solid var(--navy-line);
+    margin-top: 5rem;
+    padding: 3rem 0 2rem;
+    background: var(--navy-mid);
+  }
+  .foot-grid {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 2.5rem;
+    justify-content: space-between;
+  }
+  .foot-brand {
+    font-family: var(--font-display);
+    font-size: 1.4rem;
+    letter-spacing: 0.14em;
+    color: var(--white);
+  }
+  .foot-brand span { color: var(--muted); }
+  .foot-tag { max-width: 42ch; font-size: 0.9rem; margin-top: 0.4rem; }
+  .foot nav ul { list-style: none; display: grid; grid-template-columns: 1fr 1fr; gap: 0.4rem 2rem; }
+  .foot nav a { font-family: var(--font-mono); font-size: 0.78rem; color: var(--muted); }
+  .foot nav a:hover { color: var(--cyan); }
+  .foot-base {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 1rem;
+    justify-content: space-between;
+    margin-top: 2.5rem;
+    padding-top: 1.5rem;
+    border-top: 1px solid var(--navy-line);
+    font-family: var(--font-mono);
+    font-size: 0.7rem;
+    color: var(--muted);
+  }
+</style>

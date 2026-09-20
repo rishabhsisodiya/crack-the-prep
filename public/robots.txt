@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://rishabhsisodiya.github.io/crack-the-prep/sitemap-index.xml

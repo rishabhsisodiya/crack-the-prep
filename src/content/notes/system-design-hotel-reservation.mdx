@@ -1,0 +1,109 @@
+---
+title: "System Design — Hotel Reservation"
+track: "system-design"
+kind: "notes"
+order: 32
+slug: "hotel-reservation"
+updated: 2026-09-11
+description: "Designing a hotel reservation system — room-type inventory modeling, preventing double-booking under concurrency, controlled overbooking, and the search/booking split."
+---
+
+import Callout from '../../components/Callout.astro';
+import Mermaid from '../../components/Mermaid.astro';
+
+Part of the [system design](/prep/system-design) series. See the [framework](/prep/system-design) and [building blocks](/prep/system-design/building-blocks) first if you haven't.
+
+## 1. Requirements
+
+**Functional**
+- Search available rooms by hotel, date range, room type, guest count.
+- Reserve a room for a date range; support cancellation and modification.
+- Support multiple sales channels for the same hotel (direct site, OTA partners like Expedia/Booking.com) without overselling inventory across them.
+- Allow controlled overbooking per hotel policy (a real revenue-management lever, not a bug).
+
+**Non-functional**
+- **Never sell a room that doesn't exist** for the requested dates — this is the core invariant, same class of problem as e-commerce inventory.
+- Search must be fast and can be eventually consistent (a slightly stale "3 rooms left" is fine).
+- Booking (the write) must be strongly consistent — two guests must never both get confirmed for the last room.
+- High read:write ratio — search traffic vastly exceeds actual bookings (browsing-to-booking conversion is typically low single-digit percent).
+
+## 2. Where it sits / high-level architecture
+
+<Mermaid caption="Search path is cached and eventually consistent; booking path is the strongly-consistent write" code={`flowchart TD
+  U[Guest] --> SRCH[Search service]
+  SRCH --> CACHE[(Availability cache<br/>Redis, per hotel/date)]
+  CACHE -. refreshed async .-> INV[(Inventory DB<br/>source of truth)]
+  U --> BOOK[Booking service]
+  BOOK -->|atomic conditional decrement| INV
+  BOOK --> RES[(Reservations table)]
+  BOOK --> PAY[Payment service]
+  OTA[OTA partners: Expedia, Booking.com] -->|same booking API| BOOK
+  INV -->|change events| SWEEP[Expiry sweeper: releases<br/>unconfirmed holds]
+`} />
+
+- **Search is a read-mostly path**: serve from a cache/denormalized availability index refreshed asynchronously from the inventory DB. Overselling is not a search-layer concern — worst case a stale search result gets rejected at booking time and the guest sees a graceful "just sold out" instead of a broken transaction.
+- **Booking is the write path that must be correct**: every confirmed reservation goes through one atomic inventory decrement against the source-of-truth database, regardless of which channel (direct site or OTA) initiated it. All channels call the same internal booking API — this is the standard pattern (a **channel manager** in hotel-industry terms) precisely so two different sales channels can't independently oversell the same inventory.
+
+## 3. Inventory modeling — the key design decision
+
+| Model | What it tracks | Pros | Cons |
+|---|---|---|---|
+| Per physical room | `room_101` booked for date range | Exact, matches reality | Explodes row count (hotels x rooms x days); doesn't match how hotels actually sell |
+| Per room-type, per date (count) | `(hotel_id, room_type_id, date) → available_count` | Small table, matches how hotels actually sell and how OTAs query | Physical room assignment deferred to check-in |
+
+<Callout type="tip">
+This is the detail that separates a strong answer from a generic one: hotels sell **room types** ("Deluxe King"), not physical rooms — the actual room number is assigned at check-in by front-desk staff. Modeling inventory as `(hotel_id, room_type_id, date) → count` instead of tracking individual rooms is both simpler and matches the real domain, the same way Booking.com-style systems are described in practice. Say this explicitly.
+</Callout>
+
+**Data model.** `room_types(hotel_id, type_id, name, base_price, total_rooms)`. `inventory(hotel_id, type_id, date, available_count)` — one row per room-type per night, decremented on booking. `reservations(id, hotel_id, type_id, checkin, checkout, guest_id, status, hold_expires_at)`. Booking a 3-night stay touches 3 inventory rows (one per date) in a single transaction.
+
+## 4. Deep dive — preventing double-booking under concurrency
+
+The core race: two guests hit "book" on the last available room for the same night at the same instant. Options, worst to best:
+
+1. **Naive read-then-write** (`SELECT available_count`, check `> 0` in app code, then `UPDATE`) — classic TOCTOU race. Both requests can read `1`, both proceed, both decrement. This is the wrong answer and worth naming explicitly as the failure mode to avoid.
+2. **Pessimistic row lock** (`SELECT ... FOR UPDATE`) — correct, but serializes all bookings for that room-type/date behind one lock; fine at normal load, a bottleneck during a flash sale or a popular event weekend.
+3. **Atomic conditional update** (the standard fix):
+
+```sql
+UPDATE inventory
+SET available_count = available_count - 1
+WHERE hotel_id = :h AND type_id = :t AND date = :d
+  AND available_count > 0;
+-- 0 rows affected across ANY of the date range => sold out, roll back the whole reservation
+```
+
+This serializes correctly at the database level with no application-side lock — the same pattern used for e-commerce inventory decrements. For a multi-night stay, wrap the per-date decrements in one transaction so a mid-range sellout (available for night 1, sold out for night 2) rolls back cleanly instead of leaving a partial reservation.
+
+4. **Distributed lock (Redis Redlock) for a hold/checkout flow** — used when the flow needs a short-lived "hold" while the guest enters payment details (so the room doesn't get sold out from under them mid-checkout), separate from the final atomic decrement. This is what several booking-system write-ups describe: a short TTL lock or hold row created at "begin checkout," released by a sweeper if payment isn't completed within a few minutes.
+
+<Callout type="warn">
+A lock alone is not the fix — "solving" double-booking with only a distributed lock and no atomic, conditional write at the database is a well-documented trap: the lock protects the critical section in your app code, but a lock that expires mid-request, or a second write path that doesn't take the lock (a batch import, an OTA webhook), still races past it. The atomic conditional `UPDATE` is what actually guarantees correctness; the lock/hold is a UX layer on top of it.
+</Callout>
+
+## 5. What real systems do today
+
+- **Booking.com's data model** sells room types, not physical rooms, with actual room assignment happening at check-in — inventory is tracked at the type level, which keeps the core booking table small and avoids needing to solve room-assignment optimization on the hot booking path at all.
+- Industry write-ups on scaling booking systems consistently converge on the same two-part pattern: **Redis-based short-TTL locks or holds** for the "user is mid-checkout" window, layered on top of **atomic, conditional database writes** (a transaction or a Lua script) as the actual correctness guarantee — the lock alone is explicitly called out as insufficient in multiple recent (2025–2026) engineering write-ups on this exact problem.
+- **Controlled overbooking is standard practice, not a bug**: hotels commonly overbook by roughly 10–15% to absorb no-show rates that typically run 5–15%, with luxury properties keeping the overbooking margin much tighter (under ~3%) because the cost of "walking" a guest (rebooking them elsewhere plus compensation) is higher relative to brand damage. This means the inventory count guarding bookings isn't literally `total_rooms` — it's `total_rooms + overbooking_buffer`, set per property by revenue management, with a separate process (predictive no-show modeling) tuning the buffer over time.
+- **Channel management**: because the same hotel sells through its own site plus OTAs (Expedia, Booking.com) simultaneously, real systems route every channel through one internal inventory/booking API (a "channel manager") specifically to avoid the multi-channel double-sell problem — two independent systems each thinking they have the last room.
+
+## 6. Scaling & failure
+
+- **Inventory table becomes a write hotspot for a popular hotel on a popular date** (e.g. a major event weekend) → the conditional-update pattern already avoids app-level locks, but at very high contention even row-level DB locking queues up. Fix: for the hottest hotel/date pairs, hold the counter in an in-memory store (Redis, atomic `DECR` with a floor at 0) and reconcile to the database asynchronously, the same pattern used for flash-sale inventory generally.
+- **Search cache goes stale during a burst of bookings** (shows "5 available" when it's really 0) → not a correctness problem since booking re-checks at write time, but a bad UX (users bounce off a sold-out booking attempt). Fix: shorten cache TTL for high-demand hotels, or push cache invalidation events on every successful booking instead of relying purely on TTL expiry.
+- **Hold/lock sweeper falls behind** (abandoned checkouts don't release their held inventory promptly) → rooms appear sold out when they're actually just held by an abandoned session. Fix: keep hold TTLs short (a few minutes), and make the sweeper a lightweight scheduled job scanning `WHERE hold_expires_at < now()` on an indexed column, not a per-reservation timer.
+
+**What happens when the inventory database (source of truth) dies**: this is the dependency the whole system hangs off, so degrade explicitly rather than fail silently. Search should keep serving from its cache (slightly stale, but the guest can still browse). Booking must **fail closed** — refuse new confirmations rather than accept a booking it can't atomically verify against real inventory, because a false "confirmed" here means an actual guest with nowhere to sleep, which is a far worse failure than a temporary "booking unavailable, try again" message. A read replica can keep search alive during a primary outage, but writes should queue or reject until the primary (or a promoted replica) is back, never optimistically accept and reconcile later for something with this high a cost-of-being-wrong.
+
+## Interview follow-ups
+
+- *"Why model inventory per room-type instead of per physical room?"* — Matches how hotels actually sell (room type, not room number, until check-in); keeps the booking-critical table small and avoids a room-assignment optimization problem on the hot path.
+- *"Two guests click 'book' on the last room at the same instant — walk me through what stops a double-booking."* — Atomic conditional `UPDATE ... WHERE available_count > 0`, not a read-then-write or a lock alone; the DB serializes it.
+- *"Why would a lock alone not be enough?"* — Lock protects your app's critical section, but a competing write path that doesn't take the same lock (a batch import, a different service, an expired lock) still races past it; the real guarantee has to live in the atomic write itself.
+- *"A hotel wants to overbook by 10%. How does that change your inventory model?"* — The available-count check compares against `total_rooms + overbooking_buffer`, not raw physical capacity; the buffer is a per-property, revenue-management-tuned input, separately modeled from no-show prediction.
+- *"The hotel sells through its own site and three OTAs. How do you avoid selling the same room twice across channels?"* — All channels call one internal booking API/channel manager against one inventory source of truth; no channel gets its own copy of the counter.
+- *"Inventory DB is down. What happens to search? To booking?"* — Search degrades to cached/stale data (acceptable); booking fails closed and refuses new confirmations rather than risk an unverified oversell.
+- *"How do you handle a multi-night booking where night 2 sells out mid-transaction?"* — Wrap all per-date decrements for the stay in one DB transaction; any single date failing rolls back the whole reservation rather than leaving a partial booking.
+
+Sources: [The Double-Booking Trap in Distributed Systems — Umesh Kumar Yadav, Medium](https://medium.com/codetutorials/the-double-booking-trap-in-distributed-systems-why-locks-alone-fail-to-guarantee-correctness-96ea87bb550c) · [Solving Double Booking at Scale — ITNEXT](https://itnext.io/solving-double-booking-at-scale-system-design-patterns-from-top-tech-companies-4c5a3311d8ea) · [Hotel Booking Systems That Scale: Inventory, Double-Booking Prevention & Dynamic Pricing — developersvoice.com](https://developersvoice.com/blog/practical-design/scalable-hotel-inventory-system-architecture/) · [Designing a Hotel Booking System — mteq.pro](https://www.mteq.pro/blog/designing-hotel-booking-system) · [2026 Hotel Reservation Systems: Boost Bookings & Management — RateGain](https://rategain.com/blog/complete-guide-to-hotel-reservation-system/) · [Hotel Overbooking Strategy: Do It Right in 2026 — RoomMaster](https://www.roommaster.com/blog/hotel-overbooking)

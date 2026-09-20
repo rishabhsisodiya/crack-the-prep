@@ -1,0 +1,100 @@
+---
+title: "System Design — Real-time Gaming Leaderboard"
+track: "system-design"
+kind: "notes"
+order: 35
+slug: "gaming-leaderboard"
+updated: 2026-09-11
+description: "Designing a real-time leaderboard with Redis sorted sets, windowed rankings, sharding for celebrity-scale player counts, and what happens when the ranking store dies."
+---
+
+import Callout from '../../components/Callout.astro';
+import Mermaid from '../../components/Mermaid.astro';
+
+Part of the [system design](/prep/system-design) series. See the [framework](/prep/system-design) and [building blocks](/prep/system-design/building-blocks) first if you haven't.
+
+## 1. Requirements
+
+**Functional**
+- Submit a score update for a player after a match/game event.
+- Get a player's current rank and score instantly.
+- Get the top-N players (global, regional, or friends-only).
+- Get a "nearby" view — the players just above and below a given player's rank.
+- Support multiple time windows at once: all-time, weekly, daily/seasonal.
+
+**Non-functional**
+- Rank queries must be fast (tens of ms) — this is read-heavy, on-screen-during-gameplay traffic.
+- Score updates arrive in bursts (end of match, tournament finale) — must absorb spikes without falling behind.
+- Approximate is fine at the tail (rank 4,000,001 vs 4,000,003 doesn't matter); exact is required near the top (esports payouts, "Challenger" cutoffs) and for the querying player's own rank.
+- Must scale to tens of millions of concurrently ranked players (a title like League of Legends ranks players per-region, per-queue-type, per-season).
+
+## 2. Where it sits / high-level architecture
+
+<Mermaid caption="Score write path vs. rank read path" code={`flowchart LR
+  Game[Game server] -->|match result| API[Score Service]
+  API --> Val[Validate + anti-cheat check]
+  Val --> Q[[Score-update queue]]
+  Q --> W[Ranking worker]
+  W --> ZS[(Redis Sorted Set<br/>per window/region)]
+  W --> DB[(Durable score store<br/>Postgres/Cassandra)]
+  Client[Player client] -->|GET rank / top-N| RS[Ranking read API]
+  RS --> ZS
+  RS -. cold / historical .-> DB
+`} />
+
+- The **sorted set** (Redis `ZADD`/`ZSCORE`/`ZREVRANK`/`ZRANGE`) is the hot path: O(log N) insert, O(log N) rank lookup, O(log N + M) range fetch for top-N. It is *the* standard structure for this problem because rank and score-order are the same operation the data structure already maintains — no separate sort step, no batch re-ranking job.
+- The **durable store** (a relational or wide-column table) is the source of truth for scores and history; the sorted set is a fast, rebuildable projection of it, exactly like a cache. If Redis is lost, it can be rebuilt from the durable store.
+- Writes go through a **queue**, not directly from the game server to Redis, so a burst of match-ends (e.g. a tournament round finishing simultaneously) doesn't stall gameplay-critical paths — the worker drains at its own pace.
+
+## 3. Core design: score encoding and windowing
+
+| Design point | Approach | Trade-off |
+|---|---|---|
+| Tie-breaking | Encode a composite score: `score * 10^9 + (maxTimestamp - achieved_at)` (or negative timestamp) so earlier ties rank higher, all as one sortable float/int | Loses raw timestamp in the sorted-set value; keep it in the durable row for display |
+| Multiple windows | One sorted set per window key: `lb:global:alltime`, `lb:global:daily:2026-09-11`, `lb:region:na:weekly:2026-W37` | N windows = N writes per score event; bound this to the windows you actually show |
+| Regional/segment boards | Separate sorted set per shard key (region, game mode, skill bracket) rather than one giant global set | Avoids one hot key; matches how players actually query ("my region's top 100") |
+| Nearby-rank view | `ZREVRANK` for the player's index, then `ZREVRANGE index-4 index+4` | Cheap once you have the index; no separate query pattern needed |
+| Expiring windows | Daily/weekly sets get a `TTL` or are rotated to a new key each period and the old one archived to the durable store | Old sorted sets don't need to live in Redis forever |
+
+<Callout type="tip">
+The interview trap here is proposing a SQL `ORDER BY score DESC LIMIT 100` with `ROW_NUMBER()` for rank. It works at small scale but a full sort (or an index scan across millions of rows) on every leaderboard view does not hold up under read-heavy, real-time traffic — that's exactly the gap a sorted set closes: the structure stays sorted continuously, so "top 100" and "my rank" are O(log N), not a re-sort per request.
+</Callout>
+
+<Callout type="warn">
+Redis sorted sets are single-threaded per key and held in memory — a truly enormous global set (hundreds of millions of members) on one node becomes a memory and single-key-contention problem. That's the case for sharding by region/mode rather than one worldwide set, well before you hit a "leaderboard too big for one machine" wall.
+</Callout>
+
+## 4. Deep dive
+
+**Hot-key writes at a score event.** A single viral moment (a battle-royale match ending for 100 concurrent games) can hammer one sorted-set key with thousands of `ZADD`s per second. Two mitigations, both used in practice: (1) batch score updates in the worker — buffer for a short window (hundreds of ms) and apply as one pipelined multi-`ZADD`, cutting round trips; (2) shard the leaderboard itself by a stable dimension (region, or a hash bucket merged only at read time for a "global" view) so no single Redis key absorbs all the write traffic. A fully global top-100 across shards is then computed by merging the shards' local top-K — cheap because K is small, even if the union of players is huge.
+
+**Consistency between the fast (Redis) and durable (DB) stores.** The sorted set is a cache-like projection; the durable store is truth. Write the score to the durable store first (or via the same event that also updates Redis — an outbox-style pattern), so a Redis crash never loses the actual score, only the derived ranking, which is cheaply rebuildable by replaying/scanning the durable store into a fresh sorted set. Never treat the sorted set as the only copy of a competitive score used for payouts or promotion — audits and disputes need the durable, append-only record.
+
+## 5. What real systems do today
+
+- **Riot Games' League of Legends ranked ladder** keeps most tiers (Iron through Diamond) as bucketed tiers/divisions driven by a hidden MMR, but the apex tiers — Master, Grandmaster, Challenger — are a single continuous ladder per region/queue where players are ordered purely by League Points (LP); Grandmaster/Challenger have a fixed seat count set per shard, so admission is a live top-K cutoff, not a fixed threshold — exactly the "give me the top N right now" query a sorted-set-style structure is built for.
+- **Redis itself is the de facto default** for this problem across the industry — engineering write-ups (OneUptime, Levelop, and others in 2025–2026) consistently converge on `ZADD`/`ZREVRANK`/`ZRANGE` with per-window keys (`leaderboard:global:daily:<date>`, `leaderboard:region:na:weekly:<week>`) as the production pattern, because the sorted set already maintains rank order as an intrinsic property rather than something computed on read.
+- At scale (100M+ players), practitioners shard sorted sets by region/segment and keep a separate small "top overall" set that's updated only when a score could plausibly enter the global top-K, rather than recomputing a merge of all shards on every write.
+
+## 6. Scaling & failure
+
+| Bottleneck | Fix | New cost |
+|---|---|---|
+| One giant sorted set, hot single key | Shard by region/mode/hash bucket | Global top-N needs a merge across shards |
+| Write bursts at match-end | Queue + batched pipelined `ZADD` in the worker | Slightly stale rank for a few hundred ms after a burst |
+| Read fan-out (every client polling rank) | Cache top-100 view (it changes slowly relative to poll rate); push rank deltas via WebSocket instead of polling | Clients see rank via push, added connection-management complexity |
+| Redis node memory limit | Redis Cluster, sharded by leaderboard key | Cross-shard queries (global top-N) need app-side merging |
+
+**What happens when Redis (the ranking store) dies.** The durable store still has every score — nothing is lost, but rank lookups have no O(log N) structure to serve them from. Fail over to: (1) a standby Redis replica promoted automatically (standard Redis Sentinel/Cluster failover, sub-second to a few seconds), or (2) if the whole ranking tier is down, serve **stale** cached top-N snapshots (last known good, refreshed every few seconds) for the read-heavy top-of-board views, and degrade "my exact rank" to an approximate or "unavailable — try again" response rather than doing a full table sort under load, which would just extend the outage into the database tier too. Rebuilding a sorted set from the durable store is a bounded, scriptable operation (scan and `ZADD` in bulk) — treat it like cache warm-up, not disaster recovery.
+
+## Interview follow-ups
+
+- *"Why a sorted set instead of a database ORDER BY / window function?"* — Sorted sets keep rank as a maintained property of the structure (O(log N) per update), so "top N" and "my rank" never need a fresh sort; a DB approach re-sorts (or scans an index) on every read under a read-heavy, latency-sensitive workload.
+- *"How do you break ties (same score)?"* — Encode a composite sort key (score plus inverted timestamp) so the structure resolves ties without a second query.
+- *"100M players, one leaderboard — what breaks first?"* — Single-key memory and write contention on one sorted set; shard by region/mode and merge only the small top-K at read time.
+- *"How do you show 'nearby players' (rank ± 5) efficiently?"* — `ZREVRANK` for the index, then a `ZREVRANGE` slice around it — same structure, no extra index.
+- *"Redis is down. What does the leaderboard show?"* — Serve a stale cached top-N snapshot for the common view; the durable store still has ground truth, and the sorted set is rebuilt from it, not treated as lost data.
+- *"How would you support daily, weekly, and all-time boards without tripling write cost naively?"* — One sorted set per window with cheap TTL/rotation; only pay the extra `ZADD` cost for windows you actually expose, and drop truly stale windows to the durable store.
+- *"Where does anti-cheat / score validation fit?"* — Before the score ever reaches the queue — validating client-reported results server-side (or trusting only server-authoritative match results) is a prerequisite; a leaderboard is only as trustworthy as the scores it's fed.
+
+Sources: [How to Use Redis for Gaming Leaderboards — OneUptime](https://oneuptime.com/blog/post/2026-01-21-redis-gaming-leaderboards/view) · [Build a Redis Sorted Set Leaderboard for 100M Players — Levelop](https://levelop.dev/blog/100m-players-updating-scores-every-second-redis-gets-you-to-v1) · [Designing Real-Time Leaderboards: Redis Sorted Sets and Architecture Patterns](https://systemdr.systemdrd.com/p/designing-real-time-leaderboards) · [Real-time gaming leaderboard — ByteByteGo](https://bytebytego.com/courses/system-design-interview/real-time-gaming-leaderboard) · [Rank — League of Legends Wiki](https://wiki.leagueoflegends.com/en-us/Rank)

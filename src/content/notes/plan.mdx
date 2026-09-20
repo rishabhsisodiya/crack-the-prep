@@ -1,0 +1,73 @@
+---
+title: "The Prep Plan"
+track: "plan"
+kind: "notes"
+order: 0
+description: "How to prepare for full-stack engineering interviews: what each round tests, how to prioritise, and a four-week schedule you can compress or stretch."
+updated: 2026-09-02
+---
+
+import Callout from '../../components/Callout.astro';
+
+A full-stack interview loop usually has four kinds of round: **coding / DSA**, **system design**, a **deep-dive on your own work**, and **behavioral**. Bigger companies weight DSA and system design heavily; smaller teams weight practical coding and your project history. This plan gets all four warm at once.
+
+<Callout type="tip">
+The goal is not to memorise answers. It is to rebuild recall speed and to genuinely re-own the systems on your resume, so answers are generated under pressure rather than recited.
+</Callout>
+
+## The one rule for talking about your own work
+
+Never claim a decision you cannot defend. For every non-trivial choice in a project — a database, a framework, an auth model, a caching layer — be ready to say **why it was the right call** and **what the alternatives cost**. "It was generated / it was already there and I kept it" is fine only if you can then justify keeping it. Interviewers find the gap between a senior-sounding resume and shallow ownership with three follow-ups: *why that way?*, *what broke?*, *what would you change?*
+
+## What each round is really testing
+
+| Round | What they score | How to prepare |
+|---|---|---|
+| Coding / DSA | Can you pattern-match a problem, code it cleanly, reason about complexity, and communicate while doing it | Volume + a fixed problem-solving script (see the [DSA track](/prep/dsa)) |
+| System design | Can you take a vague prompt to a working architecture, make trade-offs explicit, and handle scale and failure | A repeatable framework + building blocks + worked problems (see the [System Design track](/prep/system-design)) |
+| Project deep-dive | Do you actually understand what you built, or only describe it | Re-open the repo, trace one request end to end, redraw the schema from memory |
+| Behavioral | Ownership, conflict, judgement, communication — with real examples | 7–8 rehearsed STAR stories (see the [Behavioral track](/prep/behavioral)) |
+
+## A four-week schedule
+
+Assumes roughly 2–3 focused hours on weekdays and more on weekends. Compress to two weeks by doubling the daily load; stretch to eight by halving it. Start applying at the end of week two so real interviews land in weeks three and four — early ones are calibration.
+
+### Week 1 — DSA engine on, re-own your systems
+
+- **DSA every day:** arrays and hashing, two pointers, sliding window, stack. Start a "pattern → trigger" log.
+- Clone and run every project you will talk about. For the two or three you will lean on: trace one full request end to end, then redraw the schema and architecture from memory and check.
+- Fill a "must be able to explain" list for each project — write the answers out loud.
+- **Behavioral:** draft one STAR story per day.
+
+### Week 2 — Finish deep-dives, fundamentals, start applying
+
+- **DSA:** binary search, linked lists, trees (traversal, BFS, BST). Re-solve week-1 misses.
+- Fundamentals pass: the language runtime, HTTP and idempotency, auth and token handling, SQL indexing and isolation levels, caching and cache invalidation.
+- Finish the STAR set (7–8 stories); draft "why leaving", "why this company", and your questions for them.
+- **Start applying.** Referrals first.
+
+### Week 3 — System design and behavioral, first mocks
+
+- **DSA:** heaps, backtracking, graphs (BFS/DFS, grid problems, topological sort). First timed mock interview.
+- Learn the system-design framework and building blocks. Two timed 45-minute mock designs; record yourself and note every hand-wave.
+- Rehearse four STAR stories aloud with follow-ups; do one full behavioral mock.
+
+### Week 4 — Integrate and run real loops
+
+- **DSA:** intervals, greedy, light dynamic programming. Then re-drill every problem you missed all month.
+- Two full mock loops (coding + system design + behavioral). Debrief hard.
+- Real interviews start landing. Before each: a 20-minute DSA warm-up and a re-read of that company's notes.
+
+### Beyond week 4 — sustain
+
+Maintenance mode: one medium problem, one spoken design prompt, and two STAR stories re-read, daily. After every real interview, write down each question you fumbled and fix it that night. Keep several processes alive to the offer stage — it is your only real negotiating leverage.
+
+## Interview-day checklist
+
+- 20–30 minute DSA warm-up so you are not cold on the first problem.
+- Re-read your one-pager on the company and your questions for them.
+- Have ready in one sentence each: your current role and dates, why you are leaving, your years of experience.
+- Coding: clarify, examples, brute force with its complexity, optimise, code, test edge cases — narrating throughout.
+- Design: run the framework out loud; state trade-offs unprompted.
+- Behavioral: STAR, lead with the result, keep each story under about two and a half minutes, then stop.
+- If you do not know something, say so and reason toward an answer aloud. That scores better than bluffing.

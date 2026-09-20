@@ -1,0 +1,108 @@
+---
+title: "System Design — News Feed"
+track: "system-design"
+kind: "notes"
+order: 19
+slug: "news-feed"
+updated: 2026-09-11
+description: "Designing a ranked news feed from fan-out-on-write vs fan-out-on-read through the celebrity problem, two-stage ranking, and what happens when Redis or the fan-out workers die."
+---
+
+import Callout from '../../components/Callout.astro';
+import Mermaid from '../../components/Mermaid.astro';
+
+Part of the [system design](/prep/system-design) series. See the [framework](/prep/system-design) and [building blocks](/prep/system-design/building-blocks) first if you haven't.
+
+## 1. Requirements
+
+**Functional**
+- Users follow other users/pages; posting shows up in followers' home feeds.
+- Feed is paginated, roughly reverse-chronological but usually re-ranked, not pure chronological.
+- Support text, images, video attachments; support likes/comments as ranking signals.
+- New posts should show up "soon" — seconds, not real-time-chat-fast.
+
+**Non-functional**
+- Read-heavy by a wide margin: feed opens vastly outnumber posts. A 300M-DAU app opening the feed ~10x/day is on the order of 30-35K feed reads/sec average, 3-4x that at peak.
+- Feed read latency target sub-200ms end to end.
+- Tolerate eventual consistency — a post appearing in a follower's feed 5-10 seconds late is fine; the home feed being unavailable is not.
+- Must not fall over when one account has 50-100M followers (the celebrity problem) — this is the whole design problem, not an edge case.
+
+## 2. Where it sits / high-level architecture
+
+<Mermaid caption="Hybrid fan-out architecture" code={`flowchart TD
+  U[User posts] --> PS[Post service]
+  PS --> PDB[(Posts DB\\nsharded by author_id)]
+  PS --> CLS{Author follower\\ncount > threshold?}
+  CLS -- normal user --> FQ[[Fan-out queue]]
+  FQ --> FW[Fan-out workers]
+  FW --> FC[(Redis: feed:userId\\nsorted set, capped ~800)]
+  CLS -- celebrity --> SKIP[Skip fan-out,\\nmark as celebrity post]
+  R[User opens feed] --> FS[Feed service]
+  FS --> FC
+  FS -->|merge celebrity posts\\nfrom followed celebrities| PDB
+  FS --> RANK[Ranker]
+  RANK --> U
+`} />
+
+- **Post service** writes the post durably first (source of truth), then triggers fan-out asynchronously — never fan out synchronously in the write path, or a celebrity post would make the API hang for followers × writes.
+- **Fan-out workers** consume from a queue and push the post id into each follower's precomputed feed (Redis sorted set, score = timestamp, capped to a few hundred entries so it doesn't grow unbounded for power users who follow thousands of accounts).
+- **Feed service** on read merges the precomputed list with any celebrity posts pulled live, then re-ranks.
+
+## 3. Fan-out strategy trade-off
+
+| Strategy | Write cost | Read cost | Breaks down when |
+|---|---|---|---|
+| Fan-out on write (push) | O(followers) per post | O(1) — read a precomputed list | A celebrity with 50-100M followers posts: one post becomes tens of millions of writes |
+| Fan-out on read (pull) | O(1) per post | O(followees) merge per read, every read | A user follows thousands of accounts, or reads happen far more often than posts (which is always) |
+| Hybrid (push + pull) | O(followers) for normal users only | O(1) + a small merge of celebrity posts | Rarely — this is what large systems converge on |
+
+<Callout type="tip">
+Say the celebrity number out loud in the interview: at 50M followers, one tweet under pure push is 50M writes. That number is the reason nobody runs pure fan-out-on-write at this scale — lead with it rather than waiting to be asked.
+</Callout>
+
+**The hybrid, precisely**: pick a follower-count threshold (commonly discussed as ~1M, but it's really "does fan-out cost outweigh the savings"). Below it, push. Above it, skip fan-out entirely and instead let the read path pull the celebrity's last N posts directly from the posts store and merge them into the pushed feed at read time. This caps total write amplification at (celebrity count × celebrity post rate), which is tiny compared to (celebrity count × their follower count).
+
+## 4. Deep dive — ranking
+
+Reverse-chronological is the naive baseline and worth stating first, but real feeds re-rank. Meta's own description of Instagram's pipeline (Explore, but the same shape drives the main feed) is a clean template for the interview:
+
+1. **Retrieval / candidate generation** — pull a few hundred to ~1,500 candidates from multiple sources: recent posts from people you follow, a "trending" heuristic source, and pre-generated candidates capturing longer-term interest. This stage is cheap and approximate on purpose.
+2. **Early-stage ranking** — a lightweight model (Meta describes a two-tower neural network comparing user and media embeddings) cuts candidates down to roughly the top 100. Cheap enough to run on every candidate.
+3. **Late-stage ranking** — a heavier multi-task model (predicting like/comment/save/share probability) scores the remaining ~100 and produces the final order. Expensive, so it only runs on the survivors of stage 2.
+
+This two-stage shape (cheap wide filter, expensive narrow reranker) is the standard answer to "how would you rank a feed of millions of candidates in under 200ms" — you never run the expensive model on the full candidate set.
+
+<Callout type="warn">
+Don't let ranking becomes an ML tangent. In an interview, name the two-stage structure, the signals (recency, affinity/how often you interact with this author, predicted engagement, content type diversity), and move on — the systems part of the question is the fan-out and storage, not the model architecture.
+</Callout>
+
+## 5. What real systems do today
+
+- **Meta/Instagram** (per Meta's engineering blog, 2025-2026) runs retrieval → early-stage ranking (two-tower model, ~1,500 → ~100 candidates) → late-stage multi-task ranking, and has scaled this to "1000 models" serving different surfaces (main feed, Explore, Reels) — each surface reuses the same retrieval/ESR/LSR funnel shape rather than a bespoke pipeline per surface.
+- **X/Twitter** historically hit the celebrity problem literally: a 50M-follower account tweeting under naive push fan-out is 50M writes for one post, which is the textbook justification every write-up cites for the hybrid design.
+- Feed storage at this scale is typically **posts in a sharded relational or wide-column store keyed by author_id**, with the precomputed per-user feed living in **Redis sorted sets** capped in length — old entries fall off rather than growing forever, since nobody scrolls back 800 posts.
+- Fan-out workers are backed by a **durable queue** (Kafka-style) so a worker crash doesn't lose fan-out jobs — they're replayed, and a post that never got fanned out to a given follower is healed by the read-time merge picking up the author's very recent posts regardless.
+
+## 6. Scaling & failure
+
+- **Bottleneck: Redis feed store hot on writes for viral posts** → shard feed keys by user_id across a Redis cluster so no single node absorbs all fan-out traffic for a trending moment.
+- **Bottleneck: fan-out queue backs up during a spike** → autoscale fan-out workers horizontally (they're stateless and embarrassingly parallel across follower lists) and prioritize by author tier if needed.
+- **Bottleneck: posts DB hot on a single author shard for celebrities** → celebrities' posts still only get fan-out'd rarely relative to reads, so the actual hot path is reads of the celebrity's post — cache their recent posts aggressively since they're read by millions of followers' feed-merges.
+
+**What happens when Redis (the feed store) dies**: the precomputed feeds disappear, but nothing is permanently lost — Redis here is a cache/materialized view, not the source of truth. Feed reads fall back to a degraded pull-path: fetch recent posts from the author IDs a user follows directly from the posts DB and merge on the fly. This is slower and heavier on the DB, so pair it with aggressive query result caching and possibly a temporary read-rate limit, but it is a *correct*, if slower, feed rather than an outage. Fan-out workers, once Redis is back, simply rebuild the sorted sets from the posts DB — the Redis feed store is disposable and self-healing by design, same pattern as the ride-hailing geo-index in the worked-problems guide.
+
+<Callout type="warn">
+The reason Redis can safely be "just a cache" here is that the posts DB is always the durable source of truth and every post carries a timestamp/author_id that lets the feed be reconstructed. If you ever find yourself designing a feed system where Redis holds data that can't be rebuilt from a system of record, that's a red flag to raise unprompted.
+</Callout>
+
+## Interview follow-ups
+
+- *"Walk me through what happens when a celebrity with 50M followers posts."* — Detect follower count over threshold at write time, skip synchronous/async push fan-out for that post, and instead have the read path merge the celebrity's recent posts in live. Say the write-amplification number explicitly.
+- *"Why not just always pull at read time and skip fan-out entirely?"* — Reads vastly outnumber writes (a post is written once, read by every follower every time they open the app), so precomputing on write amortizes the cost across all those reads; pure pull makes every single feed open pay a k-way merge cost.
+- *"How do you rank a candidate pool of thousands of posts in under 200ms?"* — Two-stage: cheap broad retrieval/early ranking cuts to ~100, then an expensive model only runs on the survivors.
+- *"Redis holding the feeds just went down. What happens to the product?"* — Feed reads degrade to a live pull-and-merge from the posts DB; slower, but not an outage, because Redis is a rebuildable cache, not a source of truth.
+- *"A user follows 5,000 accounts. Does the celebrity-merge path scale to them?"* — The merge only needs to touch celebrity accounts (a small, bounded subset of the 5,000, since most followees are normal users already covered by the pushed feed), so it stays cheap regardless of total follow count.
+- *"How do you keep the per-user feed list from growing forever?"* — Cap the Redis sorted set at a few hundred entries (oldest evicted); nobody scrolls back further, and older history can be served by a slower cold path if ever needed.
+- *"Fan-out worker crashes mid-job for a viral post. What's lost?"* — Nothing durable — the fan-out job comes from a durable queue and is retried/replayed; the post itself is already safely in the posts DB regardless of fan-out state.
+
+Sources: [Design Deep Dives: News Feed System — Medium](https://medium.com/@rameshwar.blog/design-deep-dives-news-feed-system-ec6085c5ed9f) · [News Feed System Design: Architecture, Fan-Out Strategies & Ranking — Codelit.io](https://codelit.io/blog/news-feed-system-design) · [System Design: Feed Ranking and Personalization — techinterview.org](https://www.techinterview.org/post/3233466385/system-design-feed-ranking/) · [Scaling the Instagram Explore recommendations system — Engineering at Meta](https://engineering.fb.com/2023/08/09/ml-applications/scaling-instagram-explore-recommendations-system/) · [Journey to 1000 models: Scaling Instagram's recommendation system — Engineering at Meta](https://engineering.fb.com/2025/05/21/production-engineering/journey-to-1000-models-scaling-instagrams-recommendation-system/)

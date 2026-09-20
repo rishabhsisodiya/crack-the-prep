@@ -1,0 +1,68 @@
+---
+import { getCollection, render } from 'astro:content';
+import PrepLayout from '../../layouts/PrepLayout.astro';
+import TableOfContents from '../../components/TableOfContents.astro';
+import { trackBySlug, u, noteSlug } from '../../consts';
+
+export async function getStaticPaths() {
+  const notes = await getCollection('notes', (e) => e.data.kind === 'notes' && !e.data.draft);
+  const byTrack = new Map<string, typeof notes>();
+  for (const e of notes) {
+    const arr = byTrack.get(e.data.track) ?? [];
+    arr.push(e);
+    byTrack.set(e.data.track, arr);
+  }
+
+  const paths = [];
+  for (const [track, arrRaw] of byTrack) {
+    if (arrRaw.length < 2) continue;
+    const arr = [...arrRaw].sort((a, b) => a.data.order - b.data.order);
+    const many = arr.length >= 3; // contents-mode tracks: every doc gets a page
+    const list = many ? arr : arr.slice(1);
+    list.forEach((e, i) => {
+      const prev = i > 0 ? list[i - 1] : null;
+      const next = i < list.length - 1 ? list[i + 1] : null;
+      paths.push({
+        params: { track, page: noteSlug(e.data) },
+        props: {
+          entry: e,
+          prev: prev && { href: u(`/${track}/${noteSlug(prev.data)}`), label: prev.data.title },
+          next: next && { href: u(`/${track}/${noteSlug(next.data)}`), label: next.data.title },
+        },
+      });
+    });
+  }
+  return paths;
+}
+
+const { entry, prev, next } = Astro.props;
+const meta = trackBySlug(entry.data.track)!;
+const { Content, headings } = await render(entry);
+const updated = entry.data.updated;
+---
+
+<PrepLayout
+  track={entry.data.track}
+  title={entry.data.title}
+  description={entry.data.description ?? `${entry.data.title} — study notes.`}
+  prev={prev ?? undefined}
+  next={next ?? undefined}
+>
+  {headings && (
+    <Fragment slot="toc"><TableOfContents headings={headings} /></Fragment>
+  )}
+
+  <article class="prose">
+    <p class="xlink"><a href={u(`/${entry.data.track}`)}>← {meta.title}</a></p>
+    <h1>{entry.data.title}{entry.data.imp && <span class="imp-badge">high-yield</span>}</h1>
+    {updated && (
+      <p class="reviewed">Last reviewed {updated.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}</p>
+    )}
+    <Content />
+  </article>
+</PrepLayout>
+
+<style>
+  .xlink { font-family: var(--font-mono); font-size: 0.8rem; margin: 0 0 1rem; }
+  .reviewed { font-family: var(--font-mono); font-size: 0.72rem; color: var(--muted); margin: 0 0 1rem; }
+</style>

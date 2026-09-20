@@ -1,0 +1,102 @@
+---
+title: "System Design — Notification System"
+track: "system-design"
+kind: "notes"
+order: 18
+slug: "notification-system"
+updated: 2026-09-11
+description: "Designing a multi-channel notification system — fan-out architecture, preferences and dedupe, provider failover, and what happens when a channel provider goes down mid-send."
+---
+
+import Callout from '../../components/Callout.astro';
+import Mermaid from '../../components/Mermaid.astro';
+
+Part of the [system design](/prep/system-design) series. See the [framework](/prep/system-design) and [building blocks](/prep/system-design/building-blocks) first if you haven't.
+
+## 1. Requirements
+
+**Functional**
+- Any internal service can request a notification (`{userId, type, templateId, data}`) without knowing which channel(s) the recipient prefers.
+- Support multiple channels — push, email, SMS, in-app — with per-user, per-notification-type preferences (opted in/out, quiet hours).
+- Render a template, send via the right provider(s), and track delivery status (`queued` → `sent` → `delivered`/`bounced`/`failed`).
+- Handle both single-recipient sends (a comment reply) and massive fan-out sends (a creator posting to 500,000 followers) through the same system.
+
+**Non-functional**
+- At-least-once delivery with idempotency — a duplicate send is a far worse user experience than a slightly-delayed one.
+- Fan-out to a huge recipient list must not time out or block the triggering request; the producer fires an event and moves on.
+- No channel should block another — a slow/down email provider must not delay push notifications.
+- Respect user preferences and rate limits even under a burst (a marketing campaign shouldn't spam a user who muted that notification type, or exceed a "max 1 notification per hour" cap).
+
+## 2. High-level architecture
+
+<Mermaid caption="Two-stage fan-out: generate, then deliver, on independent pipelines" code={`flowchart TD
+  P[Producer service] -->|NotificationRequested event| Q1[[Ingestion queue]]
+  Q1 --> FO[Fan-out stage]
+  FO -->|expand recipient list<br/>batch into tasks| Q2[[Per-recipient task queue]]
+  Q2 --> GEN[Generation workers]
+  GEN --> PREF[(Preferences + quiet hours)]
+  GEN --> DEDUP[(Redis: dedupe + rate limit)]
+  GEN --> TPL[Template render]
+  GEN -->|per channel| QP[[Push queue]]
+  GEN -->|per channel| QE[[Email queue]]
+  GEN -->|per channel| QS[[SMS queue]]
+  QP --> SP[Push sender] --> PROV1[APNs / FCM]
+  QE --> SE[Email sender] --> PROV2[SES / SendGrid]
+  QS --> SS[SMS sender] --> PROV3[Twilio]
+  PROV1 -.webhook.-> STAT[(Delivery status store)]
+`} />
+
+The key structural decision is splitting **fan-out** (turning one event into N per-recipient tasks) from **delivery** (turning one per-recipient task into an actual send), and then splitting delivery again *per channel* so push, email, and SMS run on fully independent queues and worker pools. A single "one big pipeline does everything" design is what breaks first at scale — exactly the failure mode described in §5 below.
+
+## 3. Fan-out strategies
+
+| Strategy | How | Best for |
+|---|---|---|
+| Inline fan-out | The triggering request itself loops over recipients and sends | Never, at any real scale — ties send latency (and provider outages) to the producer's request/response cycle |
+| Single fan-out task | One queue message expands to N sends inside one worker | Small recipient lists (a reply notification to one user); breaks down for large lists — the worker can time out or die mid-expansion |
+| Batched fan-out | The fan-out stage splits a large recipient list into many smaller batches, each an independent, retryable, horizontally-scalable task | Large lists (a creator's followers, a broadcast) — this is the production-standard pattern |
+
+<Callout type="tip">
+A candidate who says "fan-out on write" and stops there hasn't answered the hard part of this problem. The hard part is what happens when the recipient list is 5 million — a single task that loops 5 million times is a timeout waiting to happen. Say explicitly that fan-out must itself be a horizontally-scalable, batchable stage, not a single unit of work.
+</Callout>
+
+## 4. Deep dive — dedupe, preferences, and rate limiting
+
+**Preferences and quiet hours.** Every generation worker checks the recipient's preference for this notification `type` and `channel` before rendering anything — opted-out short-circuits immediately, and quiet-hours logic either delays the task (re-enqueue with a scheduled time) or drops it, depending on notification urgency (a security alert overrides quiet hours; a "someone liked your post" does not).
+
+**Dedupe.** Producers are allowed to be imprecise (an at-least-once event bus may redeliver, a retry may resend), so every send carries a `dedupeKey` and workers check-and-set it in a TTL'd store (`sent:{dedupeKey}:{channel}`) before sending — this is the same idempotency principle as a payment webhook handler: the queue guarantees at-least-once *delivery of the task*, the dedupe key gives you effectively-once *sending*.
+
+**Rate limiting** runs per-user, per-type, in Redis, using the same token-bucket mechanism as a general-purpose [rate limiter](/prep/system-design/rate-limiter) — but enforcing a *ceiling on how often we notify someone*, not how often they can call an API. This matters most exactly when fan-out is largest: a viral post's comment notifications can otherwise bury a popular user in thousands of pings within seconds.
+
+## 5. What real systems do today
+
+Patreon's engineering team published a 2026 write-up on rebuilding their notification platform specifically because their prior single-pipeline design timed out generating notifications for creators with very large audiences — a single task trying to expand hundreds of thousands of recipients inline could not complete within task time limits. Their fix was a dedicated **fanout platform**: a horizontally-scalable stage that automatically splits large recipient lists into smaller batches processed asynchronously, decoupled from the delivery systems downstream, built around six explicit design goals — horizontal scalability, per-channel isolation (in-app, push, and email run independently so one channel's failure or slowness can't cascade into another), priority-based queuing (time-sensitive notifications get dedicated queues and worker pools separate from bulk sends), and observability across the notification lifecycle. They migrated over 200 notification types off a 13-year-old monolithic codebase incrementally rather than in one cutover, and the new platform now supports large-scale launches and creator-acquisition events that would have broken the old single-pipeline design.
+
+The broader pattern across current (2025–2026) engineering write-ups on notification systems is consistent with Patreon's approach: treat generation and delivery as separate scaling domains, treat each channel as an independently-scaled pipeline with its own queue and worker pool so a slow or down provider on one channel never backpressures another, and put queues between every stage specifically so each layer can absorb bursts and apply backpressure without the upstream stage needing to know or care.
+
+## 6. Scaling & failure
+
+| Bottleneck | Fix | New cost |
+|---|---|---|
+| Fan-out stage times out on huge recipient lists | Batch the recipient list into independently-processed chunks (Patreon's approach) rather than one task per event | More queue messages and coordination overhead, but each is small and retryable |
+| One channel's provider is slow, backing up its queue | Per-channel queues and worker pools, fully isolated from other channels | More infrastructure to run and monitor per channel |
+| A burst (marketing campaign) overwhelms per-user rate limits or providers | Priority queues — separate lanes for time-sensitive vs. bulk/marketing sends, with bulk sends throttled harder | Bulk sends may take longer to fully deliver during a spike, which is the correct trade-off |
+| Delivery status webhooks arrive out of order or duplicated | Idempotent status updates keyed by provider event id, last-write-wins on terminal states only | Small chance of a transient status flicker before the terminal state lands |
+
+**What happens when a channel provider goes down.** A circuit breaker on the sender's error rate to that provider trips and routes traffic to a secondary provider for that channel (e.g., failing over from one email provider to another) with a half-open probe periodically testing recovery. Failed sends that exhaust retries land in a dead-letter queue with alerting rather than being silently dropped, so they can be manually or automatically replayed once the provider recovers. Because channels are isolated (§5), a dead email provider never affects push or SMS delivery — this isolation is precisely what makes provider failover tractable per-channel instead of an all-or-nothing outage.
+
+<Callout type="warn">
+Don't let "retry on failure" quietly turn into duplicate notifications. Every retry — whether from your own queue's at-least-once redelivery or from failing over to a secondary provider — must pass through the same dedupe key check before actually sending, otherwise a provider failover can double-notify every affected user.
+</Callout>
+
+## Interview follow-ups
+
+- *"A creator with 5 million followers posts. Walk me through what happens."* — Fan-out stage batches the follower list into many small chunks, each processed independently and in parallel by generation workers — never one task looping over 5 million recipients.
+- *"How do you make sure a user doesn't get the same notification twice?"* — A dedupe key checked-and-set in a TTL'd store before every send, covering both queue-level at-least-once redelivery and provider-failover retries.
+- *"Why separate channels into independent pipelines instead of one generic 'send' worker?"* — Isolation: a slow or down email provider must never delay or block push/SMS delivery — exactly the problem Patreon's 2026 redesign was built to fix.
+- *"How do you avoid spamming a user during a traffic burst?"* — Per-user, per-type rate limiting via a token bucket, same primitive as an API rate limiter but capping notification volume instead of request volume.
+- *"How do you handle a notification type that should override quiet hours (e.g. a security alert) vs. one that shouldn't?"* — Urgency is a property of the notification type, checked alongside preferences before rendering; urgent types bypass quiet-hours delay logic, routine ones respect it.
+- *"A provider (e.g. your SMS vendor) goes down for an hour. What happens to those messages?"* — Circuit breaker fails over to a secondary provider where available; anything that still fails goes to a DLQ with alerting for replay, not silently dropped.
+- *"How would you migrate 200 notification types off a legacy system without a risky big-bang cutover?"* — Patreon's answer: incrementally, type by type, keeping the old and new systems running in parallel until each migrated type is verified.
+
+Sources: [How We Scaled Notifications with Fanout — Engineering at Patreon](https://www.patreon.com/engineering/posts/how-we-scaled-162544709) · [Patreon's Legacy Notification Task Times Out with Large Audiences — HackerNoon](https://hackernoon.com/patreons-legacy-notification-task-times-out-with-large-audiences-scalable-solution-implemented) · [Notification System Architecture: Channels, Fan-Out, and Delivery at Scale — Codelit.io](https://codelit.io/blog/notification-system-architecture) · [Designing a Scalable Notification System: From Basics to Fan-Out Architectures — Medium](https://medium.com/@kstvkmrchanda2/designing-a-scalable-notification-system-from-basics-to-fan-out-architectures-b2a3cd249f1b)

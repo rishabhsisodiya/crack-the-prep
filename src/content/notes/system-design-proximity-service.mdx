@@ -1,0 +1,86 @@
+---
+title: "System Design — Proximity Service"
+track: "system-design"
+kind: "notes"
+order: 24
+slug: "proximity-service"
+updated: 2026-09-11
+description: "Designing a 'businesses near me' service — geohash vs quadtree vs Uber's H3, index freshness, and how to serve millions of radius queries per second."
+---
+
+import Callout from '../../components/Callout.astro';
+import Mermaid from '../../components/Mermaid.astro';
+
+Part of the [system design](/prep/system-design) series. See the [framework](/prep/system-design) and [building blocks](/prep/system-design/building-blocks) first if you haven't.
+
+## 1. Requirements
+
+**Functional**
+- Given a lat/lng and radius, return businesses/POIs within that radius (Yelp-style "restaurants near me").
+- Support filters (category, rating) on top of the radius search.
+- Businesses are added/removed/updated relatively infrequently compared to how often they're queried.
+
+**Non-functional**
+- Read-heavy by orders of magnitude — queries per second dwarf writes, so optimize the read path even at the cost of write complexity.
+- Low latency (sub-100ms) even at the 99th percentile — this sits directly on a user-facing search box.
+- Data is static-ish (business locations don't move), which is the key property that makes this different from a live-tracking problem like Nearby Friends.
+- Doesn't need real-time freshness — a business added 10 minutes ago missing from search for a bit is acceptable.
+
+## 2. High-level architecture
+
+<Mermaid caption="Read path optimized with a denormalized, cacheable spatial index" code={`flowchart LR
+  Client -->|lat, lng, radius| LB[Load Balancer]
+  LB --> API[Proximity API]
+  API --> Cache[(Redis Cache<br/>geohash prefix -> business IDs)]
+  Cache -->|miss| Index[(Spatial Index Service<br/>geohash/quadtree)]
+  Index --> DB[(Business DB<br/>source of truth)]
+  Writer[Business Update Service] -->|async rebuild| Index
+`} />
+
+The read path never touches the primary business DB directly — it hits a purpose-built spatial index (in-memory or Redis-backed) that's rebuilt/updated asynchronously from the source-of-truth DB. Because writes are rare relative to reads, it's fine for that index to lag by seconds to minutes.
+
+## 3. Spatial indexing trade-offs
+
+| Approach | How it works | Strength | Weakness | Used by |
+|---|---|---|---|---|
+| Geohash | Base-32 encode lat/lng into a string; longer prefix = smaller area; nearby points *usually* share a prefix | Simple, indexable as a plain string column/Redis sorted set key, easy to shard | Edge cases at grid-cell boundaries (two adjacent points can have completely different prefixes at cell edges); fixed square cell sizes waste precision in sparse areas | Widely used as the simple interview-default answer |
+| Quadtree | Recursively split 2D space into 4 quadrants until each leaf holds ≤N points | Adapts to density — dense cities get small cells, empty rural areas get huge cells automatically | Harder to shard/distribute (it's a tree, not a flat key), more complex to keep balanced under updates | Systems needing adaptive density (map rendering, clustering) |
+| H3 (hexagonal hierarchical index) | Tiles the globe in hexagons at 16 resolutions, each cell has an ID | Hexagons have uniform distance to all 6 neighbors (unlike geohash's square cells, where diagonal neighbors are farther than edge neighbors) — much better for accurate radius/neighbor queries | More complex library/tooling, less "boring" than geohash for a quick interview answer | **Uber** (built and open-sourced it for dynamic pricing, ETA, driver-rider matching) |
+
+<Callout type="tip">
+Interview move: start with geohash because it's simple and defensible, but proactively name its boundary-cell weakness and pivot to "in production, systems like Uber use H3 specifically because hexagons don't have the neighbor-distance distortion that square geohash cells do." That shows you know the trade-off, not just the buzzword.
+</Callout>
+
+## 4. Deep dive: query execution and index freshness
+
+**Radius query with geohash**: compute the geohash prefix covering the query radius, then also check the 8 neighboring cells (since the query point might sit near a cell edge and true nearby points could be one cell over) — this is the "geohash neighbor expansion" trick everyone glosses over until asked. Fetch candidate business IDs from all 9 cells, then do an exact Haversine distance filter in application code to trim anything outside the true radius.
+
+**Why the two-phase filter matters**: the geohash/quadtree index gets you a cheap coarse candidate set (dozens to low-hundreds of businesses), and only that small set gets the expensive precise distance calculation. Running Haversine on every business in the DB per query would never scale; running it on ~9 cells' worth of candidates is trivial.
+
+**Index freshness**: since writes are rare, rebuild the spatial index as a batch job (e.g. every few minutes) rather than updating it transactionally on every business edit. For a business that just opened, a short propagation delay is an acceptable trade for a vastly simpler write path — this is explicitly called out across proximity-service breakdowns as the right lever to pull given the read:write ratio.
+
+## 5. What real systems do today
+
+**Uber's H3**, released in 2018 and still Uber's standard geospatial index, underpins dynamic pricing (surge zones), ETA estimation, and rider-driver matching — Uber picked hexagons specifically because equal-distance neighbors make density and clustering math simpler and more accurate than square-cell alternatives, and H3's hierarchical resolutions (parent/child cells) let the same index serve both "give me drivers in this exact block" and "give me demand across this whole city" queries without maintaining two separate indexes.
+
+Most Yelp/Google-Maps-style breakdowns (Hello Interview and similar) converge on a layered design: geohash or quadtree spatial index kept largely in memory/Redis for the hot query path, PostGIS or a similar geo-extension on the primary DB as the durable source of truth with its own R-tree indexing for less latency-sensitive queries, and periodic (not synchronous) index rebuilds given how skewed the read:write ratio is.
+
+## 6. Scaling & failure
+
+- **Hot cities overload a single shard** → shard the spatial index by geohash prefix itself (e.g. first 2-3 characters), so dense metro areas can be split across more shards than sparse regions — this naturally load-balances by population density rather than by an arbitrary hash.
+- **Cache stampede on a popular area** (e.g. everyone searching "restaurants near Times Square" at lunch) → cache the geohash-cell candidate list itself (not just final results) with a short TTL, since that candidate list changes far less often than the request rate.
+- **Global expansion** → run regional spatial index replicas near users to cut round-trip latency; since freshness tolerance is already loose (minutes), async cross-region replication of the index is fine.
+
+**What happens when the spatial index cache dies**: fall back to querying the primary business DB directly with its native geo-index (PostGIS GiST/R-tree, or a Mongo 2dsphere index) — slower per query and a much higher load spike on the primary DB, but correctness is preserved. The real risk is a thundering herd hitting the DB simultaneously during the cache outage, so pair the fallback with request coalescing (dedupe identical in-flight queries) and aggressive rate limiting on the DB-direct path to keep it from falling over too.
+
+## Interview follow-ups
+
+- *"Geohash vs quadtree vs H3 — which do you pick and why?"* — Geohash for simplicity and easy sharding as a flat key; quadtree when density varies wildly and you need adaptive cell sizes; H3 in production at Uber-scale because hexagonal neighbors are equidistant, which square geohash cells aren't.
+- *"A business is right on the edge of a geohash cell. How do you avoid missing it?"* — Query the cell's geohash prefix plus its 8 neighboring cells, then do a precise distance filter on the combined candidate set.
+- *"How do you avoid running exact distance math against every business in the database?"* — Two-phase filter: cheap coarse candidate set from the spatial index first, expensive Haversine only on that small candidate set.
+- *"Does the index need to be updated the instant a business opens?"* — No — given the extreme read:write skew, batch-rebuilding the index every few minutes is the right trade; strict write-time consistency isn't worth the complexity here.
+- *"The spatial index cache goes down. What happens to search?"* — Falls back to the primary DB's native geo-index (PostGIS/2dsphere), slower and DB-load-heavier but still correct; pair with request coalescing to survive the stampede.
+- *"How would you handle a search spanning a huge radius, like 'within 500 miles'?"* — Walk up to a coarser geohash precision (shorter prefix = bigger cell) rather than expanding neighbor-cell count at fine precision, so the candidate-set size stays manageable.
+- *"Why is this problem fundamentally easier than something like Nearby Friends?"* — Business locations are near-static, so you can precompute and batch-refresh an index; live user locations change continuously, forcing a very different (push/poll-based) design.
+
+Sources: [Design a Proximity Service — SystemDesignPal](https://systemdesignpal.substack.com/p/design-a-proximity-service-interview) · [Geohashing and Quadtrees for Location Based Services — GeeksforGeeks](https://www.geeksforgeeks.org/system-design/geohashing-and-quadtrees-for-location-based-services/) · [H3: Uber's Hexagonal Hierarchical Spatial Index — Uber Engineering](https://www.uber.com/us/en/blog/h3/) · [Visualizing City Cores with H3 — Uber Engineering](https://www.uber.com/us/en/blog/visualizing-city-cores-with-h3/) · [How to Design a Geospatial Search Service — Codesmith](https://www.codesmith.io/blog/how-to-design-geospatial-search-service)

@@ -1,0 +1,286 @@
+---
+title: "System Design"
+track: "system-design"
+kind: "notes"
+order: 0
+description: "A repeatable framework for any system-design question, the building blocks you must be able to reason about, and three worked problems with diagrams."
+updated: 2026-09-02
+---
+
+import Callout from '../../components/Callout.astro';
+import Mermaid from '../../components/Mermaid.astro';
+
+Each bullet under [Building blocks](#building-blocks-to-have-crisp) has a full write-up on the [Building Blocks](/prep/system-design/building-blocks) page — what it is, when to reach for it, and the trade-off it forces. There is also a deeper set of [reference notes](/prep/system-design/reference) on rate limiting, an e-commerce microservice breakdown, and video transcoding. This page is the method and the worked examples.
+
+**Deep dives.** Full standalone write-ups (requirements → algorithm/architecture choice → what real systems do today → what happens when a dependency dies → interview follow-ups), researched against current engineering practice rather than condensed to a paragraph: [Rate Limiter](/prep/system-design/rate-limiter) · [Consistent Hashing](/prep/system-design/consistent-hashing) · [Key-Value Store](/prep/system-design/key-value-store) · [Distributed Cache](/prep/system-design/distributed-cache) · [Unique ID Generator](/prep/system-design/unique-id-generator) · [URL Shortener](/prep/system-design/url-shortener) · [CDN & Load Balancer](/prep/system-design/cdn-load-balancer) · [Web Crawler](/prep/system-design/web-crawler) · [Notification System](/prep/system-design/notification-system) · [News Feed](/prep/system-design/news-feed) · [Chat System](/prep/system-design/chat-system) · [Search Autocomplete](/prep/system-design/search-autocomplete) · [Video Streaming (YouTube)](/prep/system-design/video-streaming-youtube) · [Google Drive](/prep/system-design/google-drive) · [Proximity Service](/prep/system-design/proximity-service) · [Nearby Friends](/prep/system-design/nearby-friends) · [Google Maps](/prep/system-design/google-maps) · [Ride-Sharing Dispatch](/prep/system-design/ride-sharing-dispatch) · [Collaborative Doc Editing](/prep/system-design/collaborative-editing) · [Distributed Message Queue](/prep/system-design/distributed-message-queue) · [Metrics Monitoring & Alerting](/prep/system-design/metrics-monitoring-alerting) · [Ad Click Aggregation](/prep/system-design/ad-click-aggregation) · [Hotel Reservation](/prep/system-design/hotel-reservation) · [Distributed Email Service](/prep/system-design/distributed-email-service) · [S3-like Object Storage](/prep/system-design/object-storage-s3) · [Gaming Leaderboard](/prep/system-design/gaming-leaderboard) · [Payment System](/prep/system-design/payment-system) · [Digital Wallet](/prep/system-design/digital-wallet) · [Stock Exchange](/prep/system-design/stock-exchange). All planned topics complete.
+
+## The framework
+
+Say this structure out loud in every round. Spend the first five minutes on requirements and estimates before drawing anything.
+
+1. **Clarify scope** — core features only; explicitly park the rest.
+2. **Non-functional requirements** — scale (daily active users, requests per second, read-to-write ratio), latency target, consistency versus availability, data retention.
+3. **Estimate** — requests per second is roughly requests per day divided by 86,400; storage per year; peak is 2–10 times average.
+4. **API** — four to six endpoints with the key parameters.
+5. **Data model** — entities plus the access patterns that drive the SQL-versus-NoSQL choice and the indexes.
+6. **High-level architecture** — client, load balancer, services, and then cache, database, queue, blob store, CDN, search as needed. Draw it.
+7. **Deep dive** — the one or two hard parts the interviewer steers you to.
+8. **Scale and failure** — name the bottleneck, then the fix (replica, shard, cache, queue); say what happens when each component dies.
+9. **Trade-offs** — state what you gave up and why it is acceptable here.
+
+## Building blocks to have crisp
+
+- **Load balancing** — L4 versus L7, health checks, round robin versus least connections.
+- **Horizontal versus vertical scaling** — and why stateless services scale out cleanly while databases do not.
+- **Replication** — read replicas scale reads and give failover, but writes still bottleneck on one primary and replicas lag.
+- **Sharding** — splits writes and storage across primaries; costs cross-shard queries and rebalancing; watch for hot keys.
+- **Caching** — cache-aside pattern, TTLs and eviction, and the hard part: **invalidation**. Know cache stampede and how to prevent it (single-flight lock, early recompute, TTL jitter, serve-stale-while-revalidate).
+- **CAP in practice** — partitions happen, so you are really choosing consistency or availability *during* a partition. Most web systems pick availability with eventual consistency plus idempotency; money and inventory pick consistency for the critical path.
+- **Consistent hashing** — adding or removing a node reshuffles only about 1/N of keys; virtual nodes even out the spread.
+- **Message queues** — SQS or RabbitMQ for transient work with retries and a dead-letter queue; Kafka for a durable, replayable event log read by many consumers.
+- **Idempotency** — every consumer and every externally-triggered write must tolerate being run twice. There is no true exactly-once delivery over a network; you get effectively-once *processing* by deduplicating on an id or using conditional writes.
+- **Rate limiting** — token bucket is the usual default (smooth average, controlled bursts); see the reference notes for the alternatives.
+- **Outbox pattern** — write the domain change and an event row in the same transaction; a relay publishes the event. Removes the "committed but the message was lost" gap.
+- **CDN and blob storage** — static assets and large files never touch your origin.
+- **Observability** — metrics, logs, traces; alert on the symptom users feel (latency, error rate), not just on CPU.
+
+<Callout type="tip">
+When you get a problem you have not seen, still open with the brute-force or naïve architecture and its limits. It is a correct baseline and it buys you thinking time.
+</Callout>
+
+## Worked problem 1 — a support-ticketing system with SLA tracking
+
+**Scope.** Create tickets from several channels (web form, email, phone, an inbound webhook); assign and route; a fixed status workflow; SLA timers that can pause; notifications; agent and manager dashboards.
+
+**Scale.** Assume 10,000 tickets a day with about 50 events each — roughly 6 writes per second, read-heavy dashboards. One primary relational database with a read replica and a cache handles this comfortably.
+
+**API.** `POST /tickets`, `PATCH /tickets/:id/transition`, `POST /tickets/:id/comments`, `GET /tickets?filters`, `GET /dashboards/:role`.
+
+**Data model (relational).** `tickets` (status enum, priority, sla_policy_id, assignee, timestamps); `ticket_events` (append-only audit log); `sla_clocks` (policy, target_at, paused_at, elapsed_ms); `inbound_messages` (raw payload plus a dedupe key). Index `(tenant, status, priority, created_at)` and `(assignee, status)`.
+
+<Mermaid caption="Multi-channel intake funnels into one create path" code={`flowchart LR
+  Web[Web form] --> N[Normalise to a CreateTicket command]
+  Email[Email webhook] --> N
+  Phone[Telephony webhook] --> N
+  API[Partner webhook] --> N
+  N --> Dedupe{Seen this\\nchannel id?}
+  Dedupe -- yes --> Existing[Return existing ticket]
+  Dedupe -- no --> Create[CreateTicketService]
+  Create --> DB[(Tickets DB)]
+  Create --> Q[[Event queue]]
+  Q --> Notify[Notification worker]
+  Q --> SLA[SLA engine]
+`} />
+
+**Workflow.** An explicit state machine: an allowed-transitions table plus a guard that checks the actor's role and required fields. An illegal transition returns a conflict and writes nothing. Every valid transition appends a `ticket_events` row — that is both the audit trail and the trigger for the SLA clock.
+
+**SLA engine.** On each status change, start, pause, or stop the clock (pause while waiting on the customer). A job runs every minute and scans `sla_clocks WHERE target_at < now() + 15min AND not breached` for warnings and escalation — a small, indexed, bounded scan rather than a timer per ticket.
+
+**Dashboards.** Per-widget queries cached with a short TTL, keyed by role plus widget plus a hash of the filters, invalidated on relevant writes. Heavy aggregations hit the read replica or a nightly rollup table.
+
+**Failure.** Notification provider down — messages stay queued, dead-letter after N attempts. Replica lag — dashboards show a freshness timestamp. One channel adapter down — the others are unaffected.
+
+**Trade-offs.** A minute-granularity SLA scan instead of exact per-ticket timers: simpler and good enough. Cached dashboards can be up to a minute stale: acceptable for a management view.
+
+## Worked problem 2 — ride-hailing dispatch
+
+**Scope.** Drivers stream location; a rider requests a ride; match the nearest suitable available driver; handle accept, decline, and timeout; track the trip live.
+
+**Scale.** 50,000 active drivers sending location every 4 seconds is about 12,500 writes per second — location writes dominate, so they do **not** go in a relational database.
+
+<Mermaid caption="Location index in memory, trip state durable" code={`flowchart TD
+  D[Driver app] -->|location every 4s| LI[Location ingest]
+  LI --> Geo[(Redis geo index\\nper region)]
+  R[Rider app] -->|request ride| M[Matching service]
+  M -->|GEOSEARCH radius| Geo
+  M -->|filter + rank by ETA| M
+  M -->|atomic claim| Geo
+  M --> T[(Trip state DB)]
+  T --> WS[WebSocket gateway]
+  WS -->|driver location| R
+`} />
+
+**Matching.** On a request, search a radius in the geo index (grow it if empty) for candidates, filter by availability, vehicle type, and rating, rank by estimated time of arrival from a routing service (not straight-line distance), and offer to the top driver with a short accept timeout.
+
+**No double-assignment.** Before offering, take an atomic claim — a conditional set with a short expiry, or a conditional update `WHERE status = 'available'`. On decline or timeout, release and offer the next candidate. The trip row is the durable source of truth; the geo index is just a fast, self-healing cache rebuilt from the next heartbeats.
+
+**Live updates.** Driver location is pushed to the rider over a WebSocket through a gateway subscribed to that trip's channel, with polling as a fallback.
+
+**Trade-offs.** The in-memory geo index is approximate and volatile, but fast and self-healing. A straight-line prefilter with a routing-service rerank balances cost and accuracy.
+
+## Worked problem 3 — e-commerce checkout with no oversell
+
+**Core invariant.** Never sell more units than exist, even during a flash sale.
+
+**Reservation model.** On "begin checkout", create a reservation that decrements available stock with a short TTL; a sweeper releases expired reservations. The decrement is an atomic conditional update:
+
+```sql
+UPDATE inventory SET available = available - :qty
+WHERE sku = :sku AND available >= :qty;
+-- 0 rows affected  =>  out of stock
+```
+
+This serialises correctly under contention without application-level locks.
+
+**Flash-sale spike.** Put the hot SKUs' counters in an in-memory store with an atomic decrement-with-floor, and reconcile to the database asynchronously. Cache product pages at the CDN so only the buy action reaches the origin.
+
+**Payment.** Create the order as `pending`, call the payment provider, and confirm on its webhook. The webhook handler must be **idempotent** (deduplicate on the provider's event id) because providers retry. On payment failure or timeout, release the reservation.
+
+<Callout type="warning">
+Reservations can briefly show an item as unavailable that later frees up when a TTL expires. That is the correct trade-off against overselling — which is a real customer and finance problem.
+</Callout>
+
+**Failure.** A lost payment webhook is caught by a reconciliation job that polls the provider for pending orders. In-memory counter drift is trued up periodically from the database, which is the source of truth.
+
+## Worked problem 4 — a URL shortener
+
+**Scope.** `POST` a long URL, get a short code back; `GET /:code` redirects (301/302); basic click analytics.
+
+**Scale.** Assume 100M new URLs/month (~40 writes/s) and a 100:1 read:write ratio (~4,000 redirects/s), 5 years retention → ~6B rows. Redirects must be fast (sub-50ms) and are massively cacheable.
+
+**API.** `POST /urls {url, customAlias?, ttl?}` → `{code, shortUrl}` · `GET /:code` → `301` to the long URL · `GET /urls/:code/stats`.
+
+**Generating the code.**
+- **Counter + base62**: a global auto-increment id encoded base62 gives short, collision-free codes (`https://…/aZ4k`). The counter can be a DB sequence or ranges handed out to app servers (each server pre-claims 1,000 ids).
+- **Random**: 7 random base62 chars = 62⁷ ≈ 3.5 trillion; check-and-retry on the rare collision.
+- **Hash**: base62 of the first 43 bits of `SHA256(url)` — same URL maps to the same code, but needs collision handling.
+
+**Data model.** `urls(code PK, long_url, created_at, expires_at, owner_id)`. A key-value store (DynamoDB, Cassandra) fits: single-key lookups, huge volume, no joins. Analytics events go to a separate append-only store / stream.
+
+<Mermaid caption="Reads are almost entirely served from cache" code={`flowchart LR
+  U[Client] --> LB[Load balancer]
+  LB --> S[Shortener service]
+  S -->|GET /:code| C[(Redis cache)]
+  C -- hit --> S
+  C -- miss --> DB[(Key-value store)]
+  DB --> C
+  S -->|POST| CNT[ID / counter]
+  S -.click event.-> Q[[Analytics stream]]
+`} />
+
+**Deep dive — read path.** `GET /:code` checks Redis (code → long_url), falls back to the KV store, back-fills the cache with a long TTL. Hit rate is very high because a small fraction of links get most traffic. Use `301` for permanent links (browsers cache it, cutting server load) or `302` if you need every click to hit your server for analytics.
+
+**Failure & abuse.** Cache node loss → cold reads hit the KV store, which is provisioned to absorb it. Malicious/long-tail abuse → rate-limit creation per user/IP, scan submitted URLs against a safe-browsing list, support link expiry and disable.
+
+**Trade-offs.** Counter+base62 gives the shortest codes but needs a highly-available id source; random codes remove that dependency at the cost of a length bit and rare retries.
+
+## Worked problem 5 — a news feed / timeline
+
+**Scope.** Users follow other users; the home feed shows recent posts from followees, newest first, paginated.
+
+**Scale.** 100M DAU, average 200 follows, ~1B posts/day. The hard part is that a celebrity with 50M followers makes naive fan-out explode.
+
+**Two strategies.**
+- **Fan-out on write (push)**: when a user posts, append the post id to every follower's precomputed feed list (in Redis). Reads are then a cheap range read. Great for read latency; expensive and wasteful for users with huge follower counts or inactive followers.
+- **Fan-out on read (pull)**: store posts per author; at read time, merge the latest posts from everyone the user follows. No write amplification; reads are heavier (a k-way merge across hundreds of authors).
+
+**Hybrid (what large systems do).** Push for normal accounts; for a handful of "celebrity" accounts, pull their recent posts at read time and merge them into the pushed feed. This caps write cost while keeping reads fast.
+
+<Mermaid caption="Hybrid fan-out" code={`flowchart TD
+  P[User posts] --> W[Post service]
+  W --> DB[(Posts DB)]
+  W --> F{Author a celebrity?}
+  F -- no --> FO[Fan-out worker] --> R[(Redis: feed per follower)]
+  F -- yes --> SKIP[skip fan-out]
+  RD[User opens feed] --> M[Feed service]
+  M --> R
+  M -->|merge celebrity posts| DB
+`} />
+
+**Data model.** `posts(id, author_id, body, created_at)`; `follows(follower_id, followee_id)`; Redis `feed:{userId}` = sorted set of post ids by timestamp, capped to ~800 entries.
+
+**Deep dive — ranking.** A pure reverse-chronological feed is simplest. A ranked feed scores candidate posts (recency, affinity to the author, engagement, media type) and sorts by score — usually a two-stage design: cheap candidate generation, then an ML re-ranker on the top few hundred.
+
+**Failure & consistency.** Fan-out is asynchronous, so a new post appears in followers' feeds within seconds, not instantly — acceptable. A dropped fan-out job is healed by also pulling the author's very recent posts at read time.
+
+**Trade-offs.** Push optimises the common read at the cost of write amplification and storage; pull does the opposite. The hybrid adds complexity but is the only thing that scales to power-law follower distributions.
+
+## Worked problem 6 — a chat / messaging service
+
+**Scope.** 1:1 and group messages, delivery + read receipts, online presence, message history, push notifications when offline.
+
+**Scale.** 500M users, tens of billions of messages/day, long-lived connections.
+
+**Connections.** Clients hold a **WebSocket** to a gateway server. A connection registry (Redis) maps `userId → gatewayNodeId` so a message for an offline-on-this-node recipient can be routed to the right gateway (or to push if they have no live connection).
+
+<Mermaid caption="Message path" code={`flowchart LR
+  A[Sender] -- WebSocket --> G1[Gateway A]
+  G1 --> MS[Message service]
+  MS --> DB[(Messages store)]
+  MS --> REG[(Redis: user -> gateway)]
+  MS -->|route| G2[Gateway B]
+  G2 -- WebSocket --> B[Recipient]
+  MS -->|recipient offline| PUSH[Push / APNs / FCM]
+`} />
+
+**Data model.** Messages are write-heavy, read by conversation, never updated → a wide-column store (Cassandra/HBase) partitioned by `conversation_id`, clustered by `message_id` (a time-sortable id like a Snowflake/ULID). `conversations`, `participants`, and per-user `last_read_message_id` for unread counts.
+
+**Deep dive — delivery guarantees.** Each message gets a client-generated id for **idempotent** send (retries don't duplicate). The server persists first, then delivers, then the recipient ACKs; unACKed messages are re-sent on reconnect. "Delivered" and "read" are just special events written back to the conversation.
+
+**Presence.** Heartbeats over the socket update a Redis key with a short TTL; absence of a heartbeat = offline. Presence fan-out to a user's contacts is throttled (people don't need sub-second accuracy).
+
+**Failure.** Gateway node dies → clients reconnect (to any node) and replay missed messages from the store using their last-seen id. Message store is the source of truth; the socket layer is stateless and disposable.
+
+**Trade-offs.** Storing every message forever is expensive — tier old messages to cheaper storage. Strict ordering is per-conversation only (a global order across conversations isn't needed and would be a bottleneck).
+
+## Worked problem 7 — a notification service
+
+**Scope.** Other services request a notification (email / SMS / push); the service renders a template, respects user preferences and rate limits, sends via a provider, retries, and tracks delivery.
+
+**Scale.** Millions of notifications/hour, bursty (a marketing send), multiple channels, multiple providers per channel.
+
+**Flow.** Producers publish a `NotificationRequested` event `{type, userId, channel?, templateId, data, dedupeKey}` to a queue. A worker:
+1. resolves the user's channel + preferences (opted out? quiet hours?),
+2. checks a **dedupe** store (`sent:{dedupeKey}:{channel}`, TTL) to skip duplicates,
+3. applies **rate limits** (per user, per type) via a token bucket in Redis,
+4. renders the template,
+5. sends via the channel provider.
+
+<Mermaid caption="Queue-driven, provider-failover" code={`flowchart TD
+  SVC[Producers] --> Q[[Queue]]
+  Q --> WK[Notification worker]
+  WK --> PREF[(Preferences)]
+  WK --> DEDUP[(Redis: dedupe + rate limit)]
+  WK --> TPL[Template render]
+  WK --> P1[Primary provider]
+  P1 -- error rate high --> CB{Circuit breaker}
+  CB --> P2[Secondary provider]
+  WK -->|failed N times| DLQ[[Dead-letter queue]]
+  P1 -.webhook.-> STAT[(Delivery status)]
+`} />
+
+**Reliability.** At-least-once queue + idempotent send (dedupe key) = effectively-once. Failed sends retry with exponential backoff; after N attempts they go to a DLQ with an alert. Per-channel **provider failover**: a circuit breaker on the primary's error rate flips traffic to a secondary, with a half-open probe to recover.
+
+**Delivery tracking.** Provider webhooks update a per-notification status (`queued`/`sent`/`delivered`/`bounced`/`failed`); hard bounces are suppressed for future sends.
+
+**Trade-offs.** Async means no "sent before the API returns" guarantee — fine for notifications. Dedupe is a best-effort TTL window; size it to how late a duplicate could realistically arrive.
+
+## Worked problem 8 — a distributed rate limiter
+
+See the [full deep dive](/prep/system-design/rate-limiter) for algorithm trade-offs (GCRA vs sliding window), IETF rate-limit headers, and the Redis-down failure mode. Condensed version below.
+
+**Scope.** Cap requests per client (API key / user / IP) across a fleet of stateless servers — e.g. 1,000 requests per minute.
+
+**Why it's non-trivial.** Each server sees only its own traffic; the limit is global. State must be shared and updated atomically.
+
+**Approach — token bucket in Redis with a Lua script.** The script reads the bucket, refills tokens based on elapsed time, spends one if available, and writes back — all atomically in one round trip.
+
+```lua
+-- KEYS[1] = bucket key, ARGV = capacity, refillPerSec, now, requested
+local b = redis.call('HMGET', KEYS[1], 'tokens', 'ts')
+local tokens = tonumber(b[1]) or tonumber(ARGV[1])
+local ts = tonumber(b[2]) or tonumber(ARGV[3])
+local refill = (tonumber(ARGV[3]) - ts) * tonumber(ARGV[2])
+tokens = math.min(tonumber(ARGV[1]), tokens + refill)
+local allowed = tokens >= tonumber(ARGV[4])
+if allowed then tokens = tokens - tonumber(ARGV[4]) end
+redis.call('HMSET', KEYS[1], 'tokens', tokens, 'ts', ARGV[3])
+redis.call('EXPIRE', KEYS[1], math.ceil(tonumber(ARGV[1]) / tonumber(ARGV[2])) * 2)
+return allowed and 1 or 0
+```
+
+**Algorithms recap.** Fixed window (simple, allows a 2× edge burst) · sliding-window log (accurate, more memory) · sliding-window counter (good approximation, cheap) · **token bucket** (smooth average, controlled bursts — the usual default) · leaky bucket (constant output rate).
+
+**Scale & latency.** One Redis round trip per request adds ~0.5ms; co-locate Redis with the app tier. For extreme scale, each server keeps a local approximate counter synced to Redis periodically (accepting small overshoot), or shard buckets by client key across a Redis cluster.
+
+**Failure.** Redis down → **fail open** (allow traffic) for a customer-facing API, or **fail closed** for an abuse-prone endpoint. Return `429` with a `Retry-After` header when limited.

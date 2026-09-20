@@ -1,0 +1,47 @@
+---
+/**
+ * Usage in .mdx:
+ *   <Mermaid code={`flowchart LR; A-->B`} />
+ * or with a caption:
+ *   <Mermaid caption="Request path"> flowchart LR; A-->B </Mermaid>
+ */
+interface Props { code?: string; caption?: string }
+const { code, caption } = Astro.props;
+const body = code ?? (await Astro.slots.render('default'));
+---
+
+<figure class="mermaid-fig">
+  <pre class="mermaid">{body}</pre>
+  {caption && <figcaption>{caption}</figcaption>}
+</figure>
+
+<style>
+  .mermaid-fig { margin: 1.6rem 0; }
+  .mermaid-fig figcaption {
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    color: var(--muted);
+    text-align: center;
+    margin-top: 0.5rem;
+  }
+</style>
+
+<script>
+  // Runs once per page; renders every .mermaid block.
+  import mermaid from 'mermaid';
+  const dark = {
+    theme: 'base',
+    themeVariables: {
+      background: '#0c1420',
+      primaryColor: '#0f2340',
+      primaryBorderColor: '#00b4d8',
+      primaryTextColor: '#f0f4ff',
+      lineColor: '#48cae4',
+      secondaryColor: '#0d1f3c',
+      tertiaryColor: '#0d1f3c',
+      fontfamily: 'DM Sans, sans-serif',
+    },
+  };
+  mermaid.initialize({ startOnLoad: false, securityLevel: 'strict', ...dark });
+  mermaid.run({ querySelector: '.mermaid:not([data-processed])' }).catch(() => {});
+</script>

@@ -1,0 +1,163 @@
+---
+title: "React 19"
+part: "React Notes"
+track: "react"
+kind: "notes"
+order: 29
+updated: 2026-09-06
+description: "What changed in React 19: the use() API, Actions and the new form hooks, ref as a prop, metadata hoisting, the React Compiler, and how these supersede older patterns."
+---
+
+import Callout from '../../components/Callout.astro';
+
+React 19 shipped in December 2024. It builds on React 18's concurrent renderer and
+makes several long-standing patterns unnecessary.
+
+<Callout type="note">
+The "React 18 updates" chapter is still relevant — `createRoot`, automatic batching,
+`useTransition`, `useDeferredValue`, `useId` and Suspense all carry forward. This
+chapter is only the deltas.
+</Callout>
+
+## `use()` — read a promise or context during render
+
+`use()` is a new API (not a hook — it can be called conditionally and in loops) that
+unwraps a promise or reads a context.
+
+```jsx
+import { use, Suspense } from 'react';
+
+function Comments({ commentsPromise }) {
+  const comments = use(commentsPromise); // suspends until it resolves
+  return comments.map((c) => <p key={c.id}>{c.text}</p>);
+}
+
+function Page({ commentsPromise }) {
+  return (
+    <Suspense fallback={<Spinner />}>
+      <Comments commentsPromise={commentsPromise} />
+    </Suspense>
+  );
+}
+```
+
+The promise should be created by a framework/cache, not inside render, so it isn't
+recreated every time.
+
+## Actions and the new form hooks
+
+An **Action** is an async function passed to `<form action={...}>` (or called from an
+event) that React tracks for pending state, errors, and optimistic updates.
+
+### `useActionState`
+
+Wraps an action and gives you its return value, a bound action, and a pending flag.
+
+```jsx
+import { useActionState } from 'react';
+
+function Signup() {
+  const [error, submit, pending] = useActionState(async (prev, formData) => {
+    const res = await createUser(formData.get('email'));
+    if (!res.ok) return 'That email is taken';
+    redirect('/welcome');
+  }, null);
+
+  return (
+    <form action={submit}>
+      <input name="email" />
+      <button disabled={pending}>Sign up</button>
+      {error && <p role="alert">{error}</p>}
+    </form>
+  );
+}
+```
+
+### `useFormStatus`
+
+Lets a nested component (e.g. a submit button) read the parent form's pending state
+without prop-drilling.
+
+```jsx
+import { useFormStatus } from 'react-dom';
+
+function SubmitButton() {
+  const { pending } = useFormStatus();
+  return <button disabled={pending}>{pending ? 'Saving…' : 'Save'}</button>;
+}
+```
+
+### `useOptimistic`
+
+Show an optimistic value immediately while an action is in flight; React reverts it if
+the action fails.
+
+```jsx
+const [optimisticTodos, addOptimistic] = useOptimistic(todos, (state, newTodo) => [
+  ...state,
+  { ...newTodo, sending: true },
+]);
+```
+
+## `ref` as a regular prop — no more `forwardRef`
+
+Function components now accept `ref` directly in props.
+
+```jsx
+// React 19
+function Input({ placeholder, ref }) {
+  return <input placeholder={placeholder} ref={ref} />;
+}
+
+// Before: function Input(props, ref) wrapped in React.forwardRef(...)
+```
+
+`forwardRef` still works but is deprecated; a codemod migrates it. Refs also support a
+**cleanup function** returned from the ref callback.
+
+## Document metadata hoisting
+
+`<title>`, `<meta>` and `<link>` rendered anywhere in the tree are automatically hoisted
+into `<head>` — no more `react-helmet` for basic cases.
+
+```jsx
+function Post({ post }) {
+  return (
+    <article>
+      <title>{post.title}</title>
+      <meta name="description" content={post.excerpt} />
+      <h1>{post.title}</h1>
+    </article>
+  );
+}
+```
+
+Stylesheets and async scripts rendered in components are also deduped and ordered.
+
+## Other changes
+
+- **`<Context>` as a provider** — `<ThemeContext value={theme}>` instead of `<ThemeContext.Provider value={theme}>`.
+- **Better error reporting** — hydration mismatches show a single diff; `onCaughtError` / `onUncaughtError` root options.
+- **`ref` cleanup**, **`useDeferredValue` initial value**, and Suspense sibling pre-warming.
+- **Removed**: legacy `ReactDOM.render`, `hydrate`, string refs, `defaultProps` on function components (use default parameters), legacy context (`contextTypes`), `propTypes` (they're ignored — use TypeScript).
+
+## The React Compiler
+
+An optional build-time compiler (Babel/SWC plugin) that automatically memoises
+components and values, so you rarely need `useMemo` / `useCallback` / `React.memo` by
+hand. It relies on you following the Rules of React (no mutation during render, pure
+components). Adopt it incrementally per directory; it's independent of the React 19
+runtime.
+
+## What supersedes what
+
+| Old pattern | React 19 |
+|---|---|
+| `forwardRef` | `ref` prop |
+| `react-helmet` for `<title>`/`<meta>` | render them directly |
+| Manual `useMemo` / `useCallback` everywhere | the React Compiler |
+| `Context.Provider` | `<Context>` |
+| `defaultProps` (function components) | default parameters |
+| `propTypes` | TypeScript |
+| Data fetching in `useEffect` | `use(promise)` + Suspense (with a framework/cache) |
+| Manual form pending/error state | Actions + `useActionState` / `useFormStatus` |

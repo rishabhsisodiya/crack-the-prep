@@ -1,0 +1,108 @@
+---
+title: "System Design — Ride-Sharing Dispatch"
+track: "system-design"
+kind: "notes"
+order: 27
+slug: "ride-sharing-dispatch"
+updated: 2026-09-11
+description: "Designing Uber/Lyft-style dispatch — geospatial indexing with H3, batch matching vs greedy nearest-driver, atomic claims, and what happens when the location store dies."
+---
+
+import Callout from '../../components/Callout.astro';
+import Mermaid from '../../components/Mermaid.astro';
+
+Part of the [system design](/prep/system-design) series. See the [framework](/prep/system-design) and [building blocks](/prep/system-design/building-blocks) first if you haven't.
+
+## 1. Requirements
+
+**Functional**
+- Drivers stream GPS location continuously; riders request a trip from A to B.
+- Match a rider to a nearby, available, suitable (vehicle type, rating) driver.
+- Handle accept/decline/timeout on the offer without ever double-booking a driver.
+- Track the trip live (driver position, ETA) until completion; support cancellation by either side.
+
+**Non-functional**
+- Match latency in the low seconds, even in dense cities — riders churn fast if the spinner spins too long.
+- Location writes dominate the system by orders of magnitude over trip requests — the design has to be built around the write path, not the read path.
+- Regional, not global — a rider in Austin should never be considered against a driver in Mumbai. This is a strong partitioning hint from minute one.
+- No double-assignment under concurrent matching for the same driver.
+
+## 2. Where it sits / high-level architecture
+
+<Mermaid caption="Location writes and trip matching are separate hot paths" code={`flowchart TD
+  D[Driver app] -->|location every 4s, batched| ING[Location ingest service]
+  ING --> GEO[(Geospatial index<br/>sharded by region/H3 cell)]
+  ING -.async persist.-> LOGDB[(Location history store)]
+  R[Rider app] -->|POST /trips/request| MS[Matching service]
+  MS -->|query candidates in radius| GEO
+  MS -->|rank by ETA| ROUTE[Routing/ETA service]
+  MS -->|atomic claim, short TTL| GEO
+  MS --> TRIP[(Trip state store)]
+  TRIP --> WS[WebSocket / push gateway]
+  WS --> R
+  WS --> D
+`} />
+
+- **Location ingest** is a thin, horizontally-scaled write path: a driver's phone batches a few GPS points and pushes them every 3-5 seconds; the service writes the latest point into a geospatial index keyed by region so a query never has to scan another continent's data.
+- **Matching service** is stateless and reads the geo index — it never holds driver state itself, so it scales out trivially behind a load balancer.
+- **Trip state store** (a relational DB or a strongly-consistent KV store) is the durable source of truth; the geo index is a fast, disposable, self-healing cache that gets rebuilt from the next heartbeat if it's ever lost.
+
+## 3. Geospatial indexing and matching strategy trade-offs
+
+| Approach | Query cost | Precision | Notes |
+|---|---|---|---|
+| Naive scan + Haversine | O(all drivers) | Exact distance | Fine for a demo, dead on arrival past a few thousand drivers |
+| Geohash | O(cells in radius) | Grid cells are rectangular, distort near poles | Simple to reason about, easy off-the-shelf support (Redis `GEOADD`/`GEOSEARCH`) |
+| Uber's H3 (hexagonal hierarchical index) | O(cells in radius) | Uniform neighbor distance in every direction | Every cell has exactly 6 equidistant neighbors — no diagonal-distance distortion like a square grid has; multi-resolution hierarchy lets you widen the search by walking up a level instead of re-querying from scratch |
+| Quadtree / R-tree | O(log n) | Exact-ish | Common in general-purpose spatial DBs (PostGIS); more complex to shard than a flat hash grid |
+
+<Callout type="tip">
+Say explicitly why hexagons beat squares in an interview: a square grid's diagonal neighbors are further away than its edge neighbors (~1.41x), which biases "nearest cell" search. A hexagon's 6 neighbors are all equidistant from center, so ring-expansion search (radius 1, then 2, then 3 cells) gives a uniform, unbiased search area. This is exactly why Uber built and open-sourced <a href="https://www.uber.com/en-ES/blog/h3/">H3</a> instead of using geohash.
+</Callout>
+
+**Matching: greedy nearest-driver vs batched/global matching**
+- **Greedy (myopic)**: as soon as a request comes in, offer it to the closest available driver. Simple, low latency, but locally optimal only — it can strand a driver 30 seconds away from Rider A when a driver 2 minutes away from Rider B would have made both assignments better in aggregate.
+- **Batch matching**: collect requests and available drivers over a short window (e.g. a few hundred ms to a couple seconds) and solve a bipartite matching/assignment problem (Hungarian algorithm or a cheaper greedy-with-lookahead approximation) to minimize total wait time across the batch. This is closer to what large-scale marketplaces actually run once volume justifies the extra latency and complexity — recent Lyft research on "non-exclusive notifications" explores offering a ride to multiple drivers at once and letting the first acceptance win, trading a small amount of driver-side uncertainty for faster overall matching.
+
+## 4. Deep dive — no double-assignment, and the offer/accept/timeout dance
+
+The hardest correctness problem: two concurrent match attempts must never both claim the same driver.
+
+- **Atomic claim in the index**: before offering a trip to a driver, the matching service performs a conditional operation — `SET driver:{id}:status = 'offered' IF status == 'available'` (or a Redis `WATCH`/`MULTI`, or a Lua script) — with a short TTL (a few seconds). If the conditional fails, another match attempt got there first; move to the next candidate.
+- **Offer with timeout**: the driver's app gets a push with an accept window (commonly 10-15 seconds). No response by the deadline = automatic release of the claim, next candidate gets the offer.
+- **The trip row is the source of truth, not the claim**: the claim in the geo index is a short-lived, best-effort lock to prevent a race during the *offer* phase. Once the driver accepts, the transition to `on_trip` is written durably to the trip state store, which is what all downstream services (billing, ETA, support) trust — the geo index can be wrong or stale and self-heals from the driver's next heartbeat.
+- **Distributed lock caveats**: a naive Redis-based lock (Redlock-style) is good enough here because the cost of a rare double-offer is low (worst case: two riders briefly see the same driver as "matched," resolved within one accept/decline cycle) — this is a case where you explicitly don't need the heavier guarantees of Zookeeper/etcd consensus, and should say so to show judgment about matching lock strength to the actual blast radius of failure.
+
+## 5. What real systems do today
+
+- **Uber's H3** grid underpins not just dispatch but surge pricing and ETA computation — the same hexagonal index is reused across the marketplace stack so pricing and matching reason about the same spatial buckets.
+- Common production stacks described in recent engineering write-ups use **Redis geospatial commands (`GEOADD`/`GEOSEARCH`) or a custom H3-backed index** for the hot driver-location layer, backed by **PostGIS** for heavier geospatial queries like zone/geofence definitions that don't need sub-second latency.
+- **Driver Assignment Service pattern**: a service consumes ride requests, queries the location cache for nearby candidates, ranks by ETA from a routing service (not straight-line distance — a river or highway can make a "close" driver much further in real travel time), and acquires a short-lived distributed lock before making the offer, exactly the claim pattern above.
+- **Lyft's research on non-exclusive/batch notification** algorithms (2025-2026 papers on single-cycle approximation algorithms for ride-hailing matching) shows the field moving toward offering rides to multiple candidate drivers per cycle rather than pure sequential greedy offers, to cut aggregate wait time.
+- Location writes are treated as the dominant traffic: with tens of thousands of active drivers each pushing an update every few seconds, ingest is deliberately kept as a thin, stateless, horizontally-scaled layer separate from the heavier matching logic.
+
+## 6. Scaling & failure
+
+| Bottleneck | Fix | New cost |
+|---|---|---|
+| Single geo index node can't hold a whole metro's driver positions at write volume | Shard by region/H3 cell prefix across a cluster | Cross-region trips (near a shard boundary) need a small radius-search fan-out across 2 shards |
+| Matching service becomes CPU-bound doing batch assignment at rush hour | Increase batch window slightly, or fall back to greedy under load | Slightly worse global optimality, but bounded latency — the right trade under load |
+| Routing/ETA service is a shared dependency every match call hits | Cache recent ETA computations for common cell-pairs for a few seconds | ETA is very slightly stale, acceptable at ride-matching precision |
+| Trip state store write volume grows with trip count | Shard by trip_id or rider region | Cross-shard queries (e.g. a driver's full trip history) need a secondary index/read model |
+
+**What happens when the geospatial index dies**
+- The geo index is explicitly designed to be disposable: it's a live cache of "who's where right now," not historical truth. If the Redis cluster (or H3-backed store) holding it goes down, new match requests fail or degrade for the seconds it takes to fail over — but the moment it's back, driver apps' next heartbeat (within a few seconds, since they're already pushing on that cadence) repopulates it from scratch. No durable data is lost because location history is written asynchronously to a separate durable store, not read from the hot index.
+- Trip state store failure is more serious — that's the actual source of truth for who is matched to whom and billing. It needs standard database HA (leader/replica with automated failover) because unlike the geo index, it cannot simply be "rebuilt from the next heartbeat."
+- Mitigation during a geo-index outage: fail the match request with a retry-soon response rather than silently matching against stale/empty data — a rider retrying in 5 seconds is a much better failure mode than being matched to a driver who moved away 10 minutes ago.
+
+## Interview follow-ups
+
+- *"Why hexagons instead of a simple lat/lng grid?"* — Uniform neighbor distance (H3) vs a square grid's diagonal-distance bias; makes radius-expansion search unbiased.
+- *"How do you prevent two riders from being matched to the same driver at the same instant?"* — Atomic conditional claim in the geo index with a short TTL, offer/accept/timeout, durable trip-state transition as the real source of truth.
+- *"Greedy vs batch matching — which would you pick and why?"* — Greedy is simpler and lower-latency but locally optimal; batch (bipartite assignment over a short window) reduces aggregate wait time at the cost of a small added delay and more compute — justify the choice by scale/volume.
+- *"The geospatial index cluster just went down. What happens?"* — Degrade match requests for a few seconds; it self-heals from the next driver heartbeat because it's a disposable cache, not source of truth. Contrast with trip-state-store failure, which needs real HA.
+- *"How do you rank candidate drivers — nearest by distance or something else?"* — ETA from a routing service, not straight-line distance; a nearby driver across a river/highway can have a worse real ETA.
+- *"How would this differ for surge pricing?"* — Same H3 cells used for matching double as the aggregation unit for local supply/demand ratio, so pricing and matching share one spatial abstraction instead of two.
+- *"What's the failure mode if the routing/ETA service is slow or down?"* — Fall back to straight-line-distance ranking rather than blocking matching entirely; a slightly worse match beats no match.
+
+Sources: [H3: Uber's Hexagonal Hierarchical Spatial Index — Uber Blog](https://www.uber.com/en-ES/blog/h3/) · [Uber Interview Guide 2026: Dispatch Systems, Geospatial Algorithms, and Marketplace Engineering](https://www.techinterview.org/post/3233460273/uber-interview-guide-2026-dispatch-systems-geospatial-algorithms-and-marketplace-engineering/) · [Non-Exclusive Notifications for Ride-Hailing at Lyft — arXiv](https://arxiv.org/pdf/2603.21533) · [Uber / Nearby Drivers System Design — systemdesignschool.io](https://systemdesignschool.io/problems/uber/solution) · [Design a Ride-Sharing Platform Like Uber — System Design Handbook](https://www.systemdesignhandbook.com/guides/design-uber/)

@@ -1,0 +1,104 @@
+---
+title: "System Design — CDN & Load Balancer"
+track: "system-design"
+kind: "notes"
+order: 16
+slug: "cdn-load-balancer"
+updated: 2026-09-11
+description: "How a request actually gets from a browser to your origin — DNS/Anycast edge routing, CDN caching, L4 vs L7 load balancing, health checks, and what happens when a data center goes dark."
+---
+
+import Callout from '../../components/Callout.astro';
+import Mermaid from '../../components/Mermaid.astro';
+
+Part of the [system design](/prep/system-design) series. See the [framework](/prep/system-design) and [building blocks](/prep/system-design/building-blocks) first if you haven't.
+
+## 1. Requirements
+
+**Functional**
+- Serve static and cacheable content (images, JS/CSS bundles, video segments, API responses that are safe to cache) from a point close to the user, not from origin.
+- Distribute dynamic/uncacheable traffic across many origin servers so no single server is overwhelmed.
+- Detect an unhealthy server or data center and stop sending it traffic automatically.
+
+**Non-functional**
+- Minimize round-trip latency — every extra hop is milliseconds a user feels; global users should not all be routed to one region.
+- High availability — losing one edge node, one origin server, or even one entire region should not be user-visible.
+- Absorb traffic spikes (flash sale, viral post, DDoS) without origin servers ever seeing the full brunt of it.
+
+## 2. Where each piece sits
+
+<Mermaid caption="Request path from browser to origin" code={`flowchart LR
+  U[User] --> DNS[DNS / Anycast routing]
+  DNS --> EDGE["Nearest CDN edge PoP"]
+  EDGE -- cache hit --> U
+  EDGE -- cache miss --> GLB["Global load balancer<br/>(cross-region)"]
+  GLB --> RLB1["Regional LB<br/>(L7, us-east)"]
+  GLB --> RLB2["Regional LB<br/>(L7, eu-west)"]
+  RLB1 --> S1[Origin server]
+  RLB1 --> S2[Origin server]
+  RLB2 --> S3[Origin server]
+  RLB2 --> S4[Origin server]
+`} />
+
+- **DNS / Anycast** picks *which data center or CDN PoP* the user's connection lands on, based on geographic or network proximity — this is the coarsest, cheapest layer of load distribution and it happens before a single byte of the actual request is processed.
+- **CDN edge** serves cacheable content directly from a point-of-presence near the user; a cache miss falls through toward origin.
+- **Global load balancer** picks a *region* (often DNS-based or Anycast-based itself) when you operate in more than one.
+- **Regional/L7 load balancer** picks a specific *server* within a region, and can make content-aware decisions (route `/api/*` differently from `/static/*`).
+
+## 3. L4 vs L7 load balancing
+
+| | L4 (transport layer) | L7 (application layer) |
+|---|---|---|
+| Sees | IP + port, TCP/UDP stream | Full HTTP request — headers, path, cookies |
+| Routing decisions | Which backend, based on connection-level hashing | Path-based, header-based, cookie-based (sticky sessions), A/B routing |
+| Overhead | Very low — no request parsing | Higher — terminates/inspects HTTP, often TLS too |
+| Typical use | Raw throughput, non-HTTP protocols, DDoS-scale traffic | Microservice routing, canary releases, WAF integration |
+| Examples | AWS NLB, IPVS/LVS, Cloudflare Spectrum | AWS ALB, Envoy, NGINX, Cloudflare's L7 stack |
+
+<Callout type="tip">
+Say this trade-off explicitly in an interview: L4 is faster and dumber, L7 is slower and smarter. Most real architectures use both — an L4 layer absorbs raw connection volume and basic DDoS at the edge, then hands healthy TCP streams to an L7 layer that makes routing decisions your application actually cares about.
+</Callout>
+
+**Balancing algorithms**: round robin (simplest, ignores server load), least connections (better under uneven request costs), weighted round robin (accounts for heterogeneous server capacity), and consistent hashing (keeps the same client/key routed to the same backend — essential when backends hold local cache or session state, since it minimizes redistribution when a server is added or removed, the same property that makes consistent hashing useful for cache sharding elsewhere in system design).
+
+## 4. CDN caching deep dive
+
+A CDN is, at its core, a distributed cache-aside layer sitting in front of your origin, plus the network routing to get users to the *nearest* copy.
+
+- **Cache keys** are usually the full URL plus a normalized set of headers (`Vary: Accept-Encoding`, sometimes `Accept-Language`). Getting the cache key wrong is the most common CDN bug — too broad and you serve the wrong content to the wrong user (a serious bug for personalized pages); too narrow and your hit rate collapses.
+- **TTLs** come from `Cache-Control` headers set by the origin (`max-age`, `s-maxage` for CDN-specific overrides, `stale-while-revalidate` to serve a slightly stale copy while refreshing in the background rather than making the user wait on a miss).
+- **Purging/invalidation** is the hard part — CDNs offer both TTL-based expiry (passive, eventual) and explicit purge APIs (active, for "this changed right now, get it out of every edge node immediately"). Purge propagation across thousands of global PoPs is itself a distributed-systems problem the CDN provider solves so you don't have to.
+- **Origin shield**: a second caching tier between edge PoPs and origin so that a cache miss at 200 edge locations doesn't turn into 200 simultaneous requests to origin (the classic cache-stampede problem, at CDN scale) — the origin shield absorbs the fan-in and makes only one request to origin per miss.
+
+## 5. What real systems do today
+
+Modern edge stacks increasingly co-locate load balancing with security and caching at the same layer rather than as separate hops. Cloudflare's reference architecture runs DDoS protection, WAF, bot management, CDN caching, and load balancing all inside the same L7 stack at the edge, so a request can be inspected, cached, and routed in one pass rather than bouncing between separately-operated tiers. Cloudflare's load balancing product specifically combines global Anycast routing with real-time health checks across data centers or cloud providers, and (as of a 2025 feature, Monitor Groups) lets an operator combine multiple health signals — not just "did the origin respond to a ping" but "are all the critical dependent services of this origin healthy" — into one failover decision, because a server that responds to a shallow health check can still be failing the requests that matter.
+
+Google Cloud's global HTTP(S) load balancer is built on the same Anycast-plus-Maglev-style principle: a single global IP address fronts backends across every region, with Cloud CDN sitting directly in front of the managed instance groups so cacheable responses never reach the load balancer's backend logic at all. The general industry pattern across these platforms in 2025–2026 write-ups is consistent: push as much of the decision (cache-or-not, healthy-or-not, which-region) as early in the path as possible, because every layer a request survives before being dropped or misrouted is wasted latency and wasted origin capacity.
+
+## 6. Scaling & failure
+
+| Bottleneck | Fix | New cost |
+|---|---|---|
+| Origin overwhelmed by cache misses | Origin shield / two-tier CDN caching | Slightly higher latency on a true cold miss (extra hop) |
+| One region's load balancer saturated | Global LB shifts traffic to healthy regions via DNS/Anycast weight changes | Cross-region latency for users temporarily rerouted |
+| Sticky-session backend loses state on failover | Move session state out of the app server into a shared store (Redis) so any backend can serve any user | An extra network hop per request to fetch session state |
+| Health checks too shallow (server responds but app is broken) | Deep health checks that exercise a real code path (DB ping, not just TCP accept) | Health checks themselves add load; run them at a sane interval, not every request |
+
+**What happens when an entire region/data center dies.** This is the scenario that separates L4/L7 load balancing from true high availability. Anycast and global/DNS-based load balancing detect the region as unhealthy (via failed health checks propagated up from the regional LB) and stop advertising routes to it or stop returning its IPs in DNS; traffic reroutes to the next-nearest healthy region. The cost is real: users who were closest to the dead region now take a longer round trip to the next one, and that region's remaining capacity absorbs a traffic spike it wasn't necessarily provisioned for — which is why capacity planning for multi-region systems budgets for N-1 (or N-2) region failure, not 100% of regions being up 100% of the time.
+
+<Callout type="warn">
+A load balancer that only checks TCP-connect health will happily keep sending traffic to a server whose process is alive but whose database connection pool is exhausted — it "passes" the shallow check while failing every real request. Always mention application-level health checks, not just port-level, when this question comes up.
+</Callout>
+
+## Interview follow-ups
+
+- *"Why do you need both a CDN and a load balancer — isn't a CDN just a cache?"* — A CDN handles the "don't hit origin at all" case; a load balancer handles distributing the requests that *do* need to reach origin. They solve different problems and most systems need both.
+- *"L4 vs L7 — when would you pick one over the other?"* — L4 for raw throughput and non-HTTP protocols or as the outer DDoS-absorbing layer; L7 when routing needs to be content-aware (path, header, cookie-based).
+- *"How does a CDN decide what's cacheable?"* — `Cache-Control` headers from the origin; explain `max-age` vs `s-maxage` vs `stale-while-revalidate`, and that personalized/authenticated responses generally should not be cached at a shared edge without careful `Vary` handling.
+- *"What's a cache stampede and how does an origin shield fix it?"* — Many simultaneous edge misses for the same resource all hitting origin at once; an origin shield tier collapses them into a single origin request.
+- *"How do health checks avoid false positives/negatives?"* — Deep, application-level checks over shallow TCP checks; combine multiple signals (Cloudflare's Monitor Groups pattern) rather than one flaky probe flapping traffic on and off a healthy server.
+- *"Sticky sessions — good idea or bad idea?"* — Useful for in-memory session/cache locality, but creates an availability hazard on failover; prefer externalizing session state so any backend can serve any request, then you don't need stickiness at all.
+- *"An entire AWS region goes down. What happens to your users?"* — DNS/Anycast-based global LB reroutes to the next-nearest healthy region; name the latency and capacity cost explicitly rather than treating failover as free.
+
+Sources: [Load Balancing Reference Architecture — Cloudflare](https://developers.cloudflare.com/reference-architecture/architectures/load-balancing/) · [Load Balancing Monitor Groups: Multi-Service Health Checks — Cloudflare Blog](https://blog.cloudflare.com/load-balancing-monitor-groups-multi-service-health-checks-for-resilient/) · [Use Google Cloud Armor, load balancing, and Cloud CDN to deploy programmable global front ends — Google Cloud Architecture Center](https://cloud.google.com/architecture/deploy-programmable-gfe-cloud-armor-lb-cdn) · [How to Build Load Balancer Architecture — Oneuptime](https://oneuptime.com/blog/post/2026-01-30-load-balancer-architecture/view)

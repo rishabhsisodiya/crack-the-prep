@@ -1,0 +1,18 @@
+---
+import BaseLayout from '../layouts/BaseLayout.astro';
+import { u } from '../consts';
+---
+
+<BaseLayout title="Not found" noindex>
+  <section class="wrap nf">
+    <p class="eyebrow">404</p>
+    <h1>That page isn't here.</h1>
+    <p>It may have moved, or not been built yet.</p>
+    <p><a href={u('/')}>← Back to CrackThePrep</a></p>
+  </section>
+</BaseLayout>
+
+<style>
+  .nf { padding: 5rem 0; }
+  h1 { font-family: var(--font-display); font-size: clamp(2.4rem, 7vw, 4rem); letter-spacing: 0.03em; margin: 0.8rem 0; }
+</style>

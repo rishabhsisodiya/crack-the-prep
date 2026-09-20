@@ -1,0 +1,107 @@
+---
+title: "System Design — Unique ID Generator"
+track: "system-design"
+kind: "notes"
+order: 14
+slug: "unique-id-generator"
+updated: 2026-09-11
+description: "Designing a distributed unique ID generator: why auto-increment and UUIDs both fall short at scale, the Snowflake bit layout, and how Twitter, Discord, and Instagram actually run it."
+---
+
+import Callout from '../../components/Callout.astro';
+import Mermaid from '../../components/Mermaid.astro';
+
+Part of the [system design](/prep/system-design) series. See the [framework](/prep/system-design) and [building blocks](/prep/system-design/building-blocks) first if you haven't.
+
+## 1. Requirements
+
+**Functional**
+- Generate a unique ID for every new entity (tweet, message, order) across a fleet of stateless app servers.
+- IDs should be roughly time-sortable — newer entities get numerically larger IDs, so a default listing by ID is also a default listing by recency.
+
+**Non-functional**
+- No coordination between servers on the hot path — a shared counter or lock defeats the purpose of horizontal scaling.
+- High throughput per node (millions/sec is the usual bar) with no single point of failure.
+- Reasonably compact — a 64-bit integer is cheap to index and compare; a 128-bit UUID is 2x the storage and worse for B-tree locality.
+- Must survive clock issues (NTP adjustment, leap seconds, a node's clock skewing) without producing duplicates.
+
+## 2. Why the obvious answers don't work
+
+| Approach | Problem |
+|---|---|
+| DB auto-increment | Single point of coordination — doesn't scale horizontally, and a DB failover can duplicate or skip ids depending on replication mode |
+| UUID v4 (random) | Globally unique with no coordination, but not sortable by time, 128 bits (2x storage/index cost), and randomly ordered inserts fragment B-tree indexes on the primary key |
+| Central ID-issuing service | Simple, but now every ID request is a network round trip to a service that itself becomes a bottleneck and a single point of failure — though handing out **ranges** of ids at once (see below) recovers most of the throughput |
+
+<Callout type="tip">
+Naming Flickr's ticket-server approach (a central MySQL sequence handing out ID ranges/batches to callers, using `REPLACE INTO` with auto-increment) is a good aside if asked "what came before Snowflake" — it solves the coordination problem by batching, at the cost of a service that must stay available.
+</Callout>
+
+## 3. The Snowflake approach — where it sits
+
+<Mermaid caption="Each server generates IDs locally; no cross-server coordination on the request path" code={`flowchart LR
+  C1[Client] --> A1[App server / worker 1<br/>machine_id = 5]
+  C2[Client] --> A2[App server / worker 2<br/>machine_id = 6]
+  A1 -->|local clock + local counter| ID1[64-bit ID]
+  A2 -->|local clock + local counter| ID2[64-bit ID]
+  A1 -.registers machine_id via.-> ZK[(Coordination service<br/>e.g. ZooKeeper/etcd)]
+  A2 -.registers machine_id via.-> ZK
+`} />
+
+Each worker generates IDs entirely locally by combining its own clock reading, a fixed machine id, and a per-millisecond sequence counter — no request ever crosses the network to get an ID. The only coordination needed is a one-time (or infrequent) machine-id assignment, typically via ZooKeeper or etcd, so two workers never claim the same id.
+
+## 4. The 64-bit layout
+
+The classic Twitter Snowflake layout:
+
+| Bits | Field | Purpose |
+|---|---|---|
+| 1 | Sign bit | Always 0, keeps the id a positive signed 64-bit int (safe for languages/DBs without unsigned 64-bit types) |
+| 41 | Timestamp | Milliseconds since a custom epoch (not Unix epoch — using a recent custom epoch buys ~69 years of range instead of wasting decades already past) |
+| 10 | Machine/worker id | Up to 1,024 concurrently-running generator instances |
+| 12 | Sequence | Up to 4,096 ids per machine per millisecond before rolling over |
+
+That's roughly 4,096,000 ids/sec per machine at the ceiling, times up to 1,024 machines — far beyond what any single service needs, with headroom to spare.
+
+<Callout type="tip">
+Instagram's well-known variant reallocates those same 64 bits as 41 (timestamp) + 13 (shard id) + 10 (sequence) — swapping "machine id" for "database shard id" so the ID itself encodes which Postgres shard the row lives on, letting a lookup by id route directly to the right shard without an extra lookup table. That's the detail that shows you understand the layout is a design choice, not a fixed standard.
+</Callout>
+
+## 5. Deep dive — clock skew and duplicate ids
+
+This is the hard part, and the one interviewers probe hardest.
+
+**The failure mode.** The whole scheme assumes each machine's clock only moves forward. If NTP steps the clock backward (not just slows it, but jumps it back — which NTP does do under some correction scenarios), a worker could generate a timestamp equal to or earlier than one it already used, and if the sequence counter for that millisecond also happens to collide, you get a duplicate id — silent, and potentially violating a primary-key uniqueness constraint downstream.
+
+**Standard mitigations, layered:**
+- **Detect backward jumps explicitly**: on every id generation, compare the new timestamp to the last one used; if it's smaller, refuse to generate and either error out or block until the clock catches back up — never silently proceed.
+- **Prefer `slew` NTP correction over `step`** at the OS level so clocks are gradually adjusted rather than jumped — doesn't eliminate the risk but shrinks the window.
+- **Sequence exhaustion within a millisecond** (more common in practice than clock skew): if the 12-bit sequence counter overflows 4,096 within one millisecond, the worker busy-waits for the next millisecond tick rather than reusing the counter — a self-correcting backpressure rather than a failure.
+- **Monotonic clock source**: some implementations use a monotonic clock for the sequence/tick logic and only reconcile with wall-clock time loosely, since the property that actually matters (ids increase) doesn't require wall-clock accuracy, just monotonicity.
+
+## 6. What real systems do today
+
+- **Twitter/X** — the origin of the pattern; open-sourced the original Snowflake service, now largely superseded internally but the bit-layout convention it set is what "a Snowflake id" means industry-wide.
+- **Discord** — uses Snowflake-style ids for essentially everything (messages, users, guilds, channels), with a custom epoch set to the first moment of 2015 (Discord's own launch era) instead of the Unix epoch, maximizing the useful range of the 41 timestamp bits for the service's actual lifetime.
+- **Instagram** — the widely-cited sharded variant: 41 bits timestamp + 13 bits shard id + 10 bits sequence, generated inside a Postgres function so id generation piggybacks on the database transaction rather than requiring a separate service call, and the shard id embedded in the id itself doubles as routing information for which physical shard owns that row.
+- **Flickr (earlier era, still referenced)** — the "ticket server" predates Snowflake-style bit-packed ids: a central MySQL instance with `auto_increment` hands out id *ranges* using `REPLACE INTO`, letting callers batch-claim thousands of ids per round trip rather than needing a network call per id. Worth naming as the "what came before" answer.
+- **General industry convergence (2025–2026 write-ups)** — ULID and KSUID (128-bit, lexicographically sortable, string-encoded, no machine-id coordination needed at all) are increasingly cited as alternatives when the 64-bit budget and machine-id registration overhead of classic Snowflake aren't worth it — particularly in serverless/ephemeral-worker environments where registering a stable machine id via ZooKeeper is awkward.
+
+## 7. Scaling & failure
+
+- **Bottleneck: 1,024-machine-id ceiling reached** → fix: shrink the sequence bits and grow the machine-id bits (there's no law fixing the 41/10/12 split — Instagram already shows a different split is fine) or move to a scheme with a larger id (ULID's 128 bits removes the ceiling by using enough random bits that machine-id coordination isn't needed at all).
+- **Bottleneck: sequence overflow under extreme per-machine throughput** → fix: busy-wait to the next millisecond tick (self-limiting, no duplicate risk) or increase parallel worker processes per physical machine, each with its own machine id.
+- **What happens when the coordination service (ZooKeeper/etcd) that assigns machine ids dies**: a *running* generator is unaffected — it already has its machine id cached locally and keeps minting ids purely off its own clock and counter, no network dependency on the hot path. What breaks is **new** worker startup: a freshly deployed instance can't safely claim a machine id without confirming no other live worker already holds it, so a coordination-service outage blocks scale-up/redeploys of the ID-generating tier, not existing traffic.
+- **What happens on a leap second or an NTP correction event**: covered above — detect-and-refuse-to-regress is the standard guard; a naive implementation that trusts wall-clock time blindly is the actual production incident waiting to happen, which is why this is the deep-dive section and not a footnote.
+
+## Interview follow-ups
+
+- *"Why not just use a UUID?"* — 128 bits (2x storage/index cost), not time-sortable, random order fragments B-tree inserts; fine for pure uniqueness with no ordering need, wrong default for a primary key on a high-write table.
+- *"Why not a single auto-increment counter in the database?"* — Becomes the coordination bottleneck and single point of failure the moment you have more than one writer; defeats horizontal scaling.
+- *"Walk me through the 64-bit Snowflake layout and why each field is sized the way it is."* — 1 sign + 41 timestamp (~69 yrs from a custom epoch) + 10 machine (1,024 workers) + 12 sequence (4,096/ms/worker); note it's a convention, not a law — Instagram reshapes it.
+- *"What happens if a machine's clock jumps backward?"* — Risk of duplicate ids if unguarded; the fix is comparing against the last-used timestamp and refusing to generate rather than silently proceeding, plus preferring slew over step NTP correction.
+- *"How does a new worker safely get a machine id without colliding with a running one?"* — A coordination service (ZooKeeper/etcd) hands out and tracks machine-id leases; this is the one place the system does need coordination, just not on the per-id hot path.
+- *"Instagram embeds a shard id instead of a machine id — why?"* — Lets an id lookup route directly to the owning database shard without a separate lookup table, since the id already encodes it.
+- *"When would you reach for ULID/KSUID instead of Snowflake?"* — Serverless or highly ephemeral workers where registering a stable machine id is awkward; you trade the 64-bit compactness for zero-coordination uniqueness via enough random bits.
+
+Sources: [Unique id generation in distributed systems — The Trojan](https://apoorvtyagi.tech/generating-unique-ids-in-a-large-scale-distributed-environment) · [The Hidden Engineering Behind Unique ID Generation (Flickr Ticket Server and Twitter Snowflake) — Medium](https://medium.com/@darshangame777/the-hidden-engineering-behind-unique-id-generation-in-distributed-systems-understanding-flickrs-11504ac887e2) · [Designing Distributed ID Generators — Medium](https://medium.com/@abhi.venkata54/designing-distributed-id-generators-the-architecture-behind-unique-scalable-and-time-ordered-4b6f758a5467) · [Unique ID Generators - Snowflake, UUID, ULID for System Design — System Design School](https://systemdesignschool.io/domain-knowledge/unique-id-generators) · [System Design Interview: Scalable Unique ID Generator — Medium](https://medium.com/double-pointer/system-design-interview-scalable-unique-id-generator-twitter-snowflake-or-a-similar-service-18af22d74343)

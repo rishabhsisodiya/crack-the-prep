@@ -1,0 +1,19 @@
+---
+import BaseLayout from '../layouts/BaseLayout.astro';
+import Search from '../components/Search.astro';
+---
+
+<BaseLayout title="Search" description="Search all CrackThePrep notes and questions.">
+  <section class="wrap sp">
+    <p class="eyebrow">Search</p>
+    <h1>Search the notes</h1>
+    <p class="sub">Across every track — notes and question banks.</p>
+    <Search />
+  </section>
+</BaseLayout>
+
+<style>
+  .sp { padding: 3rem 0 5rem; max-width: 760px; }
+  h1 { font-family: var(--font-display); font-size: clamp(2.2rem, 6vw, 3.2rem); letter-spacing: 0.03em; margin: 0.6rem 0; }
+  .sub { color: var(--muted); margin-bottom: 1.8rem; }
+</style>
