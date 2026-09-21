@@ -1,0 +1,289 @@
+---
+/**
+ * Run / Edit / Reset controls for one solution approach. Sits directly after
+ * the approach's static <Code> block, which it swaps for a textarea when
+ * editing. Code runs in a Web Worker (public/runner/worker.js) with a time
+ * limit; edits persist per approach in localStorage.
+ */
+import { u } from '../consts';
+import { BUILD_ID } from '../lib/build.mjs';
+
+interface Props {
+  /** unique per approach, e.g. "array/contains-duplicate/1" — localStorage key */
+  id: string;
+  code: string;
+  spec: unknown;
+}
+
+const { id, code, spec } = Astro.props;
+const workerUrl = `${u('/runner/worker.js')}?v=${import.meta.env.PROD ? BUILD_ID : 'dev'}`;
+// JSON inside <script>: escape "<" so "</script>" in code cannot end the tag.
+const payload = JSON.stringify({ code, spec }).replace(/</g, '\\u003c');
+---
+
+<div class="runner" data-id={id} data-worker={workerUrl} hidden>
+  <script type="application/json" class="runner-data" set:html={payload} />
+  <div class="runner-bar">
+    <button type="button" class="rb rb-run" data-act="run">▶ Run</button>
+    <button type="button" class="rb" data-act="edit">✎ Edit</button>
+    <button type="button" class="rb" data-act="reset" hidden>↺ Reset</button>
+    <span class="runner-badge" hidden>edited</span>
+    <span class="runner-hint">Ctrl/⌘ + Enter to run</span>
+  </div>
+  <div class="runner-out" aria-live="polite" hidden></div>
+</div>
+
+<style is:global>
+  .runner { margin: 0.5rem 0 0.2rem; }
+  .runner-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 0.45rem; }
+  .rb {
+    font-family: var(--font-mono);
+    font-size: 0.7rem;
+    letter-spacing: 0.04em;
+    padding: 0.3rem 0.7rem;
+    background: var(--navy-card);
+    border: 1px solid var(--navy-line-2);
+    color: var(--text);
+    border-radius: 4px;
+    cursor: pointer;
+  }
+  .rb:hover:not(:disabled) { color: var(--cyan); border-color: var(--cyan); }
+  .rb:disabled { opacity: 0.6; cursor: progress; }
+  .rb-run { color: var(--green); border-color: rgba(6, 214, 160, 0.45); }
+  .runner-badge {
+    font-family: var(--font-mono);
+    font-size: 0.6rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--gold);
+    border: 1px solid currentColor;
+    border-radius: 999px;
+    padding: 0 0.45rem;
+  }
+  .runner-hint { margin-left: auto; font-family: var(--font-mono); font-size: 0.62rem; color: var(--muted); }
+  @media (hover: none) { .runner-hint { display: none; } }
+
+  .runner-editor {
+    display: block;
+    width: 100%;
+    min-height: 8rem;
+    margin: 0.4rem 0;
+    padding: 0.8rem 1rem;
+    font-family: var(--font-mono);
+    font-size: 0.8rem;
+    line-height: 1.55;
+    tab-size: 2;
+    color: var(--white);
+    background: #0d1117;
+    border: 1px solid var(--navy-line-2);
+    border-radius: 6px;
+    resize: vertical;
+    white-space: pre;
+    overflow-x: auto;
+  }
+  .runner-editor:focus { outline: 2px solid var(--cyan); outline-offset: 1px; }
+
+  .runner-out {
+    margin-top: 0.6rem;
+    border: 1px solid var(--navy-line);
+    border-radius: 6px;
+    background: rgba(0, 0, 0, 0.18);
+    font-size: 0.82rem;
+  }
+  .ro-sum { padding: 0.5rem 0.8rem; font-family: var(--font-mono); font-size: 0.78rem; font-weight: 700; }
+  .ro-sum.ok { color: var(--green); }
+  .ro-sum.bad { color: var(--danger); }
+  .ro-case { border-top: 1px solid var(--navy-line); }
+  .ro-case > summary { cursor: pointer; padding: 0.4rem 0.8rem; font-family: var(--font-mono); font-size: 0.74rem; }
+  .ro-case.ok > summary { color: var(--green); }
+  .ro-case.bad > summary { color: var(--danger); }
+  .ro-case pre, .ro-logs pre {
+    margin: 0 0.8rem 0.6rem;
+    padding: 0.5rem 0.7rem;
+    font-family: var(--font-mono);
+    font-size: 0.74rem;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    background: rgba(0, 180, 216, 0.06);
+    border-radius: 4px;
+    color: var(--text);
+  }
+  .ro-logs { border-top: 1px solid var(--navy-line); }
+  .ro-logs > p { margin: 0.4rem 0.8rem 0.3rem; font-family: var(--font-mono); font-size: 0.66rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); }
+</style>
+
+<script>
+  type Spec = { fn: string; kind?: string; cases: { args: unknown[] }[] };
+  type Result = { i: number; pass: boolean; error?: string; got?: string; expected: string; ms: number };
+  type Done = { type: 'done'; error?: string; results: Result[]; logs: string[] };
+
+  const CASE_LIMIT_MS = 2000;
+  const TOTAL_LIMIT_MS = 5000;
+  const STORE = 'crack-the-prep:code:';
+
+  const store = {
+    get: (k: string) => { try { return localStorage.getItem(STORE + k); } catch { return null; } },
+    set: (k: string, v: string) => { try { localStorage.setItem(STORE + k, v); } catch { /* storage blocked */ } },
+    del: (k: string) => { try { localStorage.removeItem(STORE + k); } catch { /* storage blocked */ } },
+  };
+
+  const show = (v: unknown) => {
+    let s: string;
+    try { s = JSON.stringify(v) ?? String(v); } catch { s = String(v); }
+    return s.length > 600 ? s.slice(0, 600) + '…' : s;
+  };
+
+  const el = <K extends keyof HTMLElementTagNameMap>(tag: K, cls?: string, text?: string) => {
+    const n = document.createElement(tag);
+    if (cls) n.className = cls;
+    if (text !== undefined) n.textContent = text;
+    return n;
+  };
+
+  /** Run code in a fresh worker; kill it if a case exceeds its time limit. */
+  function execute(workerUrl: string, code: string, spec: Spec): Promise<Done | { timeout: number }> {
+    return new Promise((resolve) => {
+      const w = new Worker(workerUrl);
+      let current = 0;
+      let caseTimer = 0;
+      const finish = (v: Done | { timeout: number }) => {
+        clearTimeout(caseTimer);
+        clearTimeout(totalTimer);
+        w.terminate();
+        resolve(v);
+      };
+      const armCase = () => {
+        clearTimeout(caseTimer);
+        caseTimer = window.setTimeout(() => finish({ timeout: current }), CASE_LIMIT_MS);
+      };
+      const totalTimer = window.setTimeout(() => finish({ timeout: current }), TOTAL_LIMIT_MS);
+      w.onmessage = (e) => {
+        if (e.data.type === 'case') { current = e.data.result.i + 1; armCase(); }
+        else if (e.data.type === 'done') finish(e.data);
+      };
+      w.onerror = (e) => {
+        e.preventDefault();
+        finish({ type: 'done', error: e.message || 'the runner failed to start', results: [], logs: [] });
+      };
+      armCase();
+      w.postMessage({ code, spec });
+    });
+  }
+
+  function render(out: HTMLElement, spec: Spec, res: Done | { timeout: number }) {
+    out.replaceChildren();
+    out.hidden = false;
+    if ('timeout' in res) {
+      out.append(el('div', 'ro-sum bad', `⏱ Time limit exceeded on case ${res.timeout + 1} — infinite loop, or too slow?`));
+      return;
+    }
+    if (res.error) {
+      out.append(el('div', 'ro-sum bad', `✗ ${res.error}`));
+    } else {
+      const passed = res.results.filter((r) => r.pass).length;
+      const ms = res.results.reduce((t, r) => t + r.ms, 0);
+      const all = passed === res.results.length;
+      out.append(el('div', `ro-sum ${all ? 'ok' : 'bad'}`, `${all ? '✓' : '✗'} ${passed}/${res.results.length} passed · ${ms.toFixed(1)} ms`));
+      let openedFailure = false;
+      for (const r of res.results) {
+        const d = el('details', `ro-case ${r.pass ? 'ok' : 'bad'}`);
+        if (!r.pass && !openedFailure) { d.open = true; openedFailure = true; }
+        d.append(el('summary', undefined, `${r.pass ? '✓' : '✗'} Case ${r.i + 1}`));
+        const args = spec.kind === 'design'
+          ? `constructor ${show((spec.cases[r.i].args as unknown[])[0])}\ncalls ${show((spec.cases[r.i].args as unknown[])[1])}`
+          : spec.cases[r.i].args.map(show).join(', ');
+        const lines = [`Input:    ${args}`, `Expected: ${r.expected}`];
+        lines.push(r.error ? `Error:    ${r.error}` : `Got:      ${r.got}`);
+        d.append(el('pre', undefined, lines.join('\n')));
+        out.append(d);
+      }
+    }
+    if (res.logs.length) {
+      const box = el('div', 'ro-logs');
+      box.append(el('p', undefined, 'Console'), el('pre', undefined, res.logs.join('\n')));
+      out.append(box);
+    }
+  }
+
+  function setup(root: HTMLElement) {
+    const { code: reference, spec } = JSON.parse(root.querySelector('.runner-data')!.textContent!) as { code: string; spec: Spec };
+    const id = root.dataset.id!;
+    const staticCode = root.previousElementSibling as HTMLElement | null; // expressive-code block
+    const btn = (act: string) => root.querySelector<HTMLButtonElement>(`[data-act="${act}"]`)!;
+    const runBtn = btn('run'), editBtn = btn('edit'), resetBtn = btn('reset');
+    const badge = root.querySelector<HTMLElement>('.runner-badge')!;
+    const out = root.querySelector<HTMLElement>('.runner-out')!;
+    let editor: HTMLTextAreaElement | null = null;
+    let saveTimer = 0;
+
+    const syncBadge = () => { badge.hidden = !editor || editor.value === reference; };
+
+    function openEditor(initial: string) {
+      if (editor) return;
+      editor = el('textarea', 'runner-editor');
+      editor.spellcheck = false;
+      editor.setAttribute('autocapitalize', 'off');
+      editor.setAttribute('aria-label', 'Edit solution code');
+      editor.value = initial;
+      editor.rows = Math.min(40, initial.split('\n').length + 1);
+      editor.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); run(); return; }
+        if (e.key === 'Tab' && !e.shiftKey) {
+          e.preventDefault();
+          const t = e.currentTarget as HTMLTextAreaElement;
+          t.setRangeText('  ', t.selectionStart, t.selectionEnd, 'end');
+          t.dispatchEvent(new Event('input'));
+        }
+      });
+      editor.addEventListener('input', () => {
+        syncBadge();
+        clearTimeout(saveTimer);
+        saveTimer = window.setTimeout(() => {
+          if (!editor) return;
+          if (editor.value === reference) store.del(id);
+          else store.set(id, editor.value);
+        }, 300);
+      });
+      if (staticCode) { staticCode.hidden = true; staticCode.before(editor); }
+      else root.before(editor);
+      editBtn.hidden = true;
+      resetBtn.hidden = false;
+      syncBadge();
+    }
+
+    async function run() {
+      runBtn.disabled = true;
+      runBtn.textContent = 'Running…';
+      try {
+        const res = await execute(root.dataset.worker!, editor ? editor.value : reference, spec);
+        render(out, spec, res);
+      } finally {
+        runBtn.disabled = false;
+        runBtn.textContent = '▶ Run';
+      }
+    }
+
+    runBtn.addEventListener('click', run);
+    editBtn.addEventListener('click', () => { openEditor(store.get(id) ?? reference); editor!.focus(); });
+    resetBtn.addEventListener('click', () => {
+      clearTimeout(saveTimer);
+      store.del(id);
+      editor?.remove();
+      editor = null;
+      if (staticCode) staticCode.hidden = false;
+      editBtn.hidden = false;
+      resetBtn.hidden = true;
+      out.hidden = true;
+      syncBadge();
+    });
+
+    // Returning visitor: reopen their saved edit.
+    const saved = store.get(id);
+    if (saved !== null && saved !== reference) openEditor(saved);
+    root.hidden = false;
+  }
+
+  if (typeof Worker !== 'undefined') {
+    document.querySelectorAll<HTMLElement>('.runner').forEach(setup);
+  }
+</script>

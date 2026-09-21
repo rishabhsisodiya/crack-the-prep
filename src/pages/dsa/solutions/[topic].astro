@@ -3,6 +3,9 @@ import { Code } from 'astro-expressive-code/components';
 import PrepLayout from '../../../layouts/PrepLayout.astro';
 import { solutions } from '../../../data/dsa-solutions.mjs';
 import { statements } from '../../../data/dsa-statements.mjs';
+import { tests } from '../../../data/dsa-tests.mjs';
+import { specFor } from '../../../lib/runner-spec.mjs';
+import CodeRunner from '../../../components/CodeRunner.astro';
 import { u, kebab } from '../../../consts';
 
 // distinct topics, first-seen order
@@ -85,6 +88,9 @@ const next = nextTopic ? { href: u(`/dsa/solutions/${kebab(nextTopic)}`), label:
               </p>
               <p class="idea">{a.idea}</p>
               <Code code={a.code} lang="js" />
+              {specFor(tests[s.problem], i, a.code) && (
+                <CodeRunner id={`${kebab(topic)}/${kebab(s.problem)}/${i}`} code={a.code} spec={specFor(tests[s.problem], i, a.code)} />
+              )}
               {a.note && <p class="note">{a.note}</p>}
             </div>
           ))}

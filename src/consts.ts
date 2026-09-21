@@ -90,13 +90,8 @@ export function u(path = '/'): string {
   return `${base}${p}`;
 }
 
-export const kebab = (s: string) =>
-  s
-    .toLowerCase()
-    .replace(/`[^`]*`/g, '')
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/(^-|-$)/g, '')
-    .slice(0, 60) || 'section';
+export { kebab } from './lib/slug.mjs';
+import { kebab } from './lib/slug.mjs';
 
 /** URL segment for a notes entry: explicit frontmatter slug, else NN-title-kebab */
 export function noteSlug(data: { slug?: string; order?: number; title: string }): string {
