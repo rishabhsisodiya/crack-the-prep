@@ -149,6 +149,49 @@
     return nodes.map((n) => [n.val, n.random ? (index.has(n.random) ? index.get(n.random) : 'foreign node') : null]);
   }
 
+  // LeetCode graph: adjacency[i] lists the neighbour values of node i + 1.
+  // Input nodes carry a hidden marker so the output check can spot a node that
+  // was reused instead of cloned.
+  const ORIGINAL = typeof Symbol === 'function' ? Symbol('original') : '__original';
+
+  function toGraph(adjacency) {
+    if (!adjacency.length) return null;
+    const nodes = adjacency.map((_, i) => {
+      const n = { val: i + 1, neighbors: [] };
+      Object.defineProperty(n, ORIGINAL, { value: true });
+      return n;
+    });
+    adjacency.forEach((nbs, i) => { nodes[i].neighbors = nbs.map((v) => nodes[v - 1]); });
+    return nodes[0];
+  }
+
+  function fromGraph(start) {
+    if (!start) return [];
+    const seen = new Map([[start.val, start]]), q = [start];
+    for (let h = 0; h < q.length; h++) {
+      if (q[h][ORIGINAL]) throw new Error('node ' + q[h].val + ' is an original node, not a copy');
+      for (const nb of q[h].neighbors) if (!seen.has(nb.val)) { seen.set(nb.val, nb); q.push(nb); }
+      if (q.length > MAX_NODES) throw new Error('graph has more than ' + MAX_NODES + ' nodes');
+    }
+    const out = [];
+    for (let v = 1; v <= seen.size; v++) {
+      if (!seen.has(v)) throw new Error('node values are not 1..' + seen.size);
+      out.push(seen.get(v).neighbors.map((nb) => nb.val));
+    }
+    return out;
+  }
+
+  function findTreeNode(rootNode, val) {
+    const st = rootNode ? [rootNode] : [];
+    while (st.length) {
+      const n = st.pop();
+      if (n.val === val) return n;
+      if (n.left) st.push(n.left);
+      if (n.right) st.push(n.right);
+    }
+    throw new Error('test setup: value ' + val + ' is not in the tree');
+  }
+
   // Nodes are recognised by shape, not class: solutions may build plain objects.
   const isList = (v) => v === null || (typeof v === 'object' && 'val' in v && 'next' in v);
   const isTree = (v) => v === null || (typeof v === 'object' && 'val' in v && ('left' in v || 'right' in v));
@@ -161,6 +204,10 @@
     'cycle-list': (v) => [toCycleList(v)],
     'y-lists': (v) => toYLists(v),
     'random-list': (v) => [toRandomList(v)],
+    'list-array': (v) => [v.map(toList)],
+    graph: (v) => [toGraph(v)],
+    // 'tree-ref' is resolved in runCase: it needs the preceding tree argument.
+    'tree-ref': (v) => [v],
   };
   const FROM = {
     raw: (v) => v,
@@ -169,6 +216,7 @@
     tree: (v) => (isTree(v) ? fromTree(v) : v),
     'random-list': (v) => (isList(v) ? fromRandomList(v) : v),
     'node-val': (v) => (v && typeof v === 'object' && 'val' in v ? v.val : v),
+    graph: (v) => (v === null || (typeof v === 'object' && 'neighbors' in v) ? fromGraph(v) : v),
   };
 
   // ---------------------------------------------------------------- comparison
@@ -252,7 +300,14 @@
     if (spec.kind === 'design') return runDesign(fns[spec.fn], args);
     const input = spec.input || [];
     const callArgs = [];
-    args.forEach((a, i) => callArgs.push(...TO[input[i] || 'raw'](a)));
+    let lastTree = null;
+    args.forEach((a, i) => {
+      const kind = input[i] || 'raw';
+      if (kind === 'tree-ref') { callArgs.push(findTreeNode(lastTree, a)); return; }
+      const converted = TO[kind](a);
+      if (kind === 'tree') lastTree = converted[0];
+      callArgs.push(...converted);
+    });
     let ret = fns[spec.fn](...callArgs);
     if (spec.check === 'arg0') return normalise(FROM[input[0] || 'raw'](callArgs[0]));
     if (spec.after) ret = fns[spec.after](ret); // e.g. decode(encode(x))
