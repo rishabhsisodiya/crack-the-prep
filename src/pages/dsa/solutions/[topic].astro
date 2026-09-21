@@ -2,6 +2,7 @@
 import { Code } from 'astro-expressive-code/components';
 import PrepLayout from '../../../layouts/PrepLayout.astro';
 import { solutions } from '../../../data/dsa-solutions.mjs';
+import { statements } from '../../../data/dsa-statements.mjs';
 import { u, kebab } from '../../../consts';
 
 // distinct topics, first-seen order
@@ -59,6 +60,19 @@ const next = nextTopic ? { href: u(`/dsa/solutions/${kebab(nextTopic)}`), label:
           <span class="n">{s.approaches.length} {s.approaches.length === 1 ? 'approach' : 'approaches'}</span>
         </summary>
         <div class="body">
+          {statements[s.problem] && (
+            <div class="problem">
+              <h3>Problem</h3>
+              {statements[s.problem].text.split('\n\n').map((para) => <p>{para}</p>)}
+              {statements[s.problem].ex?.map((e, i) => (
+                <div class="ex">
+                  <p class="ex-h">Example {i + 1}</p>
+                  <pre><b>Input:</b>  {e.in}{'\n'}<b>Output:</b> {e.out}</pre>
+                  {e.why && <p class="ex-why">{e.why}</p>}
+                </div>
+              ))}
+            </div>
+          )}
           {s.also && s.also.length > 0 && (
             <p class="also">Also asked as: {s.also.join(' · ')}</p>
           )}
@@ -138,6 +152,29 @@ const next = nextTopic ? { href: u(`/dsa/solutions/${kebab(nextTopic)}`), label:
   .diff--hard { color: var(--danger); }
 
   .body { padding: 0.6rem 1.1rem 1rem; }
+
+  .problem {
+    margin: 0.4rem 0 1.2rem;
+    padding: 0.2rem 0 1rem;
+    border-bottom: 1px dashed var(--navy-line-2);
+  }
+  .problem h3 { margin-top: 0.6rem; }
+  .problem p { margin: 0.5rem 0; }
+  .ex { margin: 0.7rem 0 0; }
+  .ex-h { font-family: var(--font-mono); font-size: 0.7rem; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); margin: 0 0 0.3rem !important; }
+  .ex pre {
+    font-family: var(--font-mono);
+    font-size: 0.8rem;
+    background: rgba(0, 180, 216, 0.06);
+    border: 1px solid var(--navy-line);
+    border-radius: 6px;
+    padding: 0.55rem 0.8rem;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    margin: 0;
+  }
+  .ex pre b { color: var(--cyan); font-weight: 700; }
+  .ex-why { font-size: 0.88rem; color: var(--muted); }
   .also { font-size: 0.8rem; color: var(--muted); margin: 0.4rem 0 1rem; }
 
   .approach { margin: 1.4rem 0; }
