@@ -3686,7 +3686,7 @@ function binarySearchAnswer(lo, hi, feasible) {
     if (a[mid] > a[hi]) lo = mid + 1;
     else hi = mid;
   }
-  return lo; // index of the minimum
+  return a[lo]; // lo is the rotation (pivot) index
 }`,
       },
     ],
