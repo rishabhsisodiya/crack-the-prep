@@ -1,9 +1,11 @@
 ---
 import PrepLayout from '../../layouts/PrepLayout.astro';
 import dsa from '../../data/dsa.json';
+import core from '../../data/dsa-core.json';
 import { solutions } from '../../data/dsa-solutions.mjs';
 import { u } from '../../consts';
 
+const coreProblems = core.reduce((n, g) => n + g.problems.length, 0);
 const totalProblems = dsa.reduce((n, g) => n + g.problems.length, 0);
 const solvedCount = solutions.length;
 const approachCount = solutions.reduce((n, s) => n + s.approaches.length, 0);
@@ -22,7 +24,12 @@ const cards = [
   {
     href: u('/dsa/patterns'),
     title: 'Patterns',
-    blurb: 'The dozen recurring patterns — the trigger that tells you which applies, the approach, complexity and reference code.',
+    blurb: 'Two dozen recurring patterns — the trigger that tells you which applies, the approach, complexity and reference code.',
+  },
+  {
+    href: u('/dsa/core'),
+    title: 'Interview Core',
+    blurb: `${coreProblems} high-frequency interview problems grouped by pattern — the list to do first when time is short.`,
   },
   {
     href: u('/dsa/checklist'),

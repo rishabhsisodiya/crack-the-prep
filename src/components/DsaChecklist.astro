@@ -1,0 +1,205 @@
+---
+// Tickable DSA problem list, grouped by topic. Progress lives in localStorage
+// under `storageKey`, so each list keeps its own state.
+import { solutions } from '../data/dsa-solutions.mjs';
+import { u } from '../consts';
+
+interface Problem { name: string; important?: boolean; level?: 'E' | 'M' | 'H' }
+interface Group { topic: string; pattern?: string; problems: Problem[] }
+interface Props { groups: Group[]; storageKey: string }
+
+const { groups, storageKey } = Astro.props;
+const total = groups.reduce((n, g) => n + g.problems.length, 0);
+const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
+const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, '');
+const LEVEL = { E: 'Easy', M: 'Medium', H: 'Hard' } as const;
+
+const solvedBy = new Map<string, string>();
+for (const s of solutions as { problem: string; topic: string; also?: string[] }[]) {
+  const link = u(`/dsa/solutions/${slug(s.topic)}#${slug(s.problem)}`);
+  solvedBy.set(norm(s.problem), link);
+  for (const a of s.also ?? []) solvedBy.set(norm(a), link);
+}
+---
+
+<div class="dsa-checklist" data-key={storageKey}>
+  <p class="reviewed">
+    <span class="dsa-count">0</span> / {total} done
+    <button type="button" class="reset">reset</button>
+  </p>
+
+  <nav class="topic-jump" aria-label="Topics">
+    {groups.map((g) => <a href={`#${slug(g.topic)}`}>{g.topic}</a>)}
+  </nav>
+
+  <div class="groups">
+    {groups.map((g) => (
+      <section class="group" id={slug(g.topic)}>
+        <h2>
+          {g.topic} <span class="gcount" data-topic={slug(g.topic)}>0/{g.problems.length}</span>
+          {g.pattern && <a class="patlink" href={u(`/dsa/patterns#${g.pattern}`)}>pattern →</a>}
+        </h2>
+        <ul>
+          {g.problems.map((p) => {
+            const id = `${slug(g.topic)}::${slug(p.name)}`;
+            const sol = solvedBy.get(norm(p.name));
+            return (
+              <li>
+                <label>
+                  <input type="checkbox" data-id={id} data-topic={slug(g.topic)} />
+                  <span>
+                    {p.name}
+                    {p.level && <i class={`lvl lvl-${p.level}`}>{LEVEL[p.level]}</i>}
+                    {p.important && <b class="imp" title="Marked important in the source list"> ★</b>}
+                    {sol && <a class="soltag" href={sol}>◆ solutions</a>}
+                  </span>
+                </label>
+              </li>
+            );
+          })}
+        </ul>
+      </section>
+    ))}
+  </div>
+</div>
+
+<style>
+  .reviewed { font-family: var(--font-mono); font-size: 0.8rem; color: var(--muted); }
+  .reset {
+    margin-left: 0.6rem;
+    background: none;
+    border: 1px solid var(--navy-line);
+    color: var(--muted);
+    font: inherit;
+    font-size: 0.7rem;
+    padding: 0.1rem 0.5rem;
+    border-radius: 4px;
+    cursor: pointer;
+  }
+  .reset:hover { color: var(--danger); border-color: var(--danger); }
+
+  .topic-jump { display: flex; flex-wrap: wrap; gap: 0.4rem; margin: 1.2rem 0 2.5rem; }
+  .topic-jump a {
+    font-family: var(--font-mono);
+    font-size: 0.68rem;
+    letter-spacing: 0.04em;
+    padding: 0.25rem 0.6rem;
+    border: 1px solid var(--navy-line);
+    border-radius: 4px;
+    color: var(--muted);
+  }
+  .topic-jump a:hover { color: var(--cyan); border-color: var(--navy-line-2); }
+
+  .group { margin: 2.5rem 0; scroll-margin-top: 5rem; }
+  .group h2 {
+    font-family: var(--font-display);
+    font-size: 1.5rem;
+    letter-spacing: 0.05em;
+    color: var(--white);
+    border-bottom: 1px solid var(--navy-line);
+    padding-bottom: 0.4rem;
+    display: flex;
+    align-items: baseline;
+    gap: 0.7rem;
+  }
+  .gcount { font-family: var(--font-mono); font-size: 0.72rem; color: var(--muted); }
+  .group ul { list-style: none; margin: 0.8rem 0 0; padding: 0; }
+  .group li { margin: 0; }
+  .group label {
+    display: flex;
+    gap: 0.7rem;
+    align-items: flex-start;
+    padding: 0.4rem 0.5rem;
+    border-radius: 5px;
+    cursor: pointer;
+    font-size: 0.92rem;
+  }
+  .group label:hover { background: rgba(0, 180, 216, 0.06); }
+  .group input { margin-top: 0.35rem; accent-color: var(--cyan); flex-shrink: 0; }
+  .group input:checked + span { color: var(--muted); text-decoration: line-through; }
+  .imp { color: var(--gold); font-size: 0.8em; }
+
+  .soltag {
+    display: inline-block;
+    margin-left: 0.5rem;
+    font-family: var(--font-mono);
+    font-size: 0.62rem;
+    letter-spacing: 0.04em;
+    color: var(--cyan);
+    border: 1px solid var(--navy-line-2);
+    border-radius: 3px;
+    padding: 0 0.35rem;
+    text-decoration: none;
+    vertical-align: middle;
+  }
+  .soltag:hover { background: rgba(0, 180, 216, 0.12); }
+  .group input:checked + span .soltag { color: var(--muted); text-decoration: none; }
+</style>
+<style>
+  .patlink { margin-left: auto; font-family: var(--font-mono); font-size: 0.68rem; letter-spacing: 0.04em; }
+  .lvl {
+    margin-left: 0.5rem;
+    font-family: var(--font-mono);
+    font-style: normal;
+    font-size: 0.62rem;
+    letter-spacing: 0.04em;
+    vertical-align: middle;
+  }
+  .lvl-E { color: var(--green); }
+  .lvl-M { color: var(--gold); }
+  .lvl-H { color: var(--danger); }
+</style>
+
+<script>
+  const root = document.querySelector<HTMLElement>('.dsa-checklist')!;
+  const KEY = root.dataset.key!;
+  const load = (): Record<string, true> => {
+    try { return JSON.parse(localStorage.getItem(KEY) || '{}'); } catch { return {}; }
+  };
+  const save = (s: Record<string, true>) => {
+    try { localStorage.setItem(KEY, JSON.stringify(s)); } catch { /* ignore */ }
+  };
+
+  const boxes = [...root.querySelectorAll<HTMLInputElement>('.group input[type=checkbox]')];
+  const countEl = root.querySelector('.dsa-count');
+  const groupCounts = new Map<string, HTMLElement>();
+  root.querySelectorAll<HTMLElement>('.gcount').forEach((el) => groupCounts.set(el.dataset.topic!, el));
+
+  let state = load();
+
+  function refresh() {
+    let done = 0;
+    const perTopic = new Map<string, [number, number]>();
+    for (const b of boxes) {
+      const t = b.dataset.topic!;
+      const [d, tot] = perTopic.get(t) ?? [0, 0];
+      const isDone = !!state[b.dataset.id!];
+      b.checked = isDone;
+      perTopic.set(t, [d + (isDone ? 1 : 0), tot + 1]);
+      if (isDone) done++;
+    }
+    if (countEl) countEl.textContent = String(done);
+    for (const [t, el] of groupCounts) {
+      const [d, tot] = perTopic.get(t) ?? [0, 0];
+      el.textContent = `${d}/${tot}`;
+    }
+  }
+
+  boxes.forEach((b) =>
+    b.addEventListener('change', () => {
+      if (b.checked) state[b.dataset.id!] = true;
+      else delete state[b.dataset.id!];
+      save(state);
+      refresh();
+    }),
+  );
+
+  root.querySelector('.reset')?.addEventListener('click', () => {
+    if (!confirm('Clear progress for this list?')) return;
+    state = {};
+    save(state);
+    refresh();
+  });
+
+  refresh();
+</script>

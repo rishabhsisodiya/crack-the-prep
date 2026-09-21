@@ -1,0 +1,36 @@
+---
+import PrepLayout from '../../layouts/PrepLayout.astro';
+import DsaChecklist from '../../components/DsaChecklist.astro';
+import core from '../../data/dsa-core.json';
+import { u } from '../../consts';
+
+const total = core.reduce((n, g) => n + g.problems.length, 0);
+---
+
+<PrepLayout
+  track="dsa"
+  title="DSA Interview Core"
+  description={`${total} high-frequency coding-interview problems grouped by pattern, each group linked to the pattern that solves it. Progress is saved in your browser.`}
+>
+  <div class="prose">
+    <nav class="crumbs"><a href={u('/dsa')}>DSA</a> <span aria-hidden="true">/</span> Interview Core</nav>
+    <h1>Interview Core</h1>
+    <p class="lede">
+      {total} problems that show up again and again in product-company coding rounds, grouped by the
+      <a href={u('/dsa/patterns')}>pattern</a> that cracks them. Read the pattern, solve the group, move on.
+      Progress is stored in your browser only.
+    </p>
+    <p class="solcta">
+      Work top to bottom inside a group — Easy, then Medium, then Hard. For more practice, use the
+      <a href={u('/dsa/checklist')}>full checklist</a>.
+    </p>
+  </div>
+
+  <DsaChecklist groups={core as any} storageKey="crack-the-prep:dsa-core" />
+</PrepLayout>
+<style>
+  .crumbs { font-family: var(--font-mono); font-size: 0.72rem; color: var(--muted); display: flex; gap: 0.5rem; }
+  .lede { font-size: 1.05rem; margin: 0.4rem 0 0.8rem; }
+  .solcta { font-size: 0.9rem; color: var(--text); margin: 0.9rem 0 0; }
+  .solcta a { font-family: var(--font-mono); font-size: 0.82rem; }
+</style>

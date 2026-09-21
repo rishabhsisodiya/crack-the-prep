@@ -62,12 +62,13 @@ export const TRACKS: Track[] = [
   {
     slug: 'dsa',
     title: 'DSA',
-    blurb: 'Theory, patterns, a 450-problem practice checklist, and worked solutions.',
+    blurb: 'Theory, two dozen patterns, a curated interview-core list, a 450-problem checklist, and worked solutions.',
     badge: '∑',
     sections: [
       { label: 'Algorithms & Big-O', path: 'algorithms' },
       { label: 'Data Structures', path: 'data-structures' },
       { label: 'Patterns', path: 'patterns' },
+      { label: 'Interview core', path: 'core' },
       { label: 'Practice checklist', path: 'checklist' },
       { label: 'Worked solutions', path: 'solutions' },
     ],

@@ -1,19 +1,10 @@
 ---
 import PrepLayout from '../../layouts/PrepLayout.astro';
+import DsaChecklist from '../../components/DsaChecklist.astro';
 import dsa from '../../data/dsa.json';
-import { solutions } from '../../data/dsa-solutions.mjs';
 import { u } from '../../consts';
 
 const total = dsa.reduce((n, g) => n + g.problems.length, 0);
-const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
-const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, '');
-
-const solvedBy = new Map<string, string>();
-for (const s of solutions as { problem: string; topic: string; also?: string[] }[]) {
-  const link = u(`/dsa/solutions/${slug(s.topic)}#${slug(s.problem)}`);
-  solvedBy.set(norm(s.problem), link);
-  for (const a of s.also ?? []) solvedBy.set(norm(a), link);
-}
 ---
 
 <PrepLayout
@@ -25,12 +16,9 @@ for (const s of solutions as { problem: string; topic: string; also?: string[] }
     <nav class="crumbs"><a href={u('/dsa')}>DSA</a> <span aria-hidden="true">/</span> Checklist</nav>
     <h1>Practice Checklist</h1>
     <p class="lede">
-      {total} problems across {dsa.length} topics — the widely-used interview practice set.
-      Tick them off as you solve; progress is stored in your browser only.
-    </p>
-    <p class="reviewed">
-      <span id="dsa-count">0</span> / {total} done
-      <button type="button" id="dsa-reset" class="reset">reset</button>
+      {total} problems across {dsa.length} topics — a broad, exhaustive practice set for building fundamentals.
+      Short on time? Start with the <a href={u('/dsa/core')}>Interview Core</a> list instead.
+      Progress is stored in your browser only.
     </p>
     <p class="solcta">
       <a href={u('/dsa/solutions')}>→ Worked solutions</a>
@@ -38,163 +26,12 @@ for (const s of solutions as { problem: string; topic: string; also?: string[] }
     </p>
   </div>
 
-  <nav class="topic-jump" aria-label="Topics">
-    {dsa.map((g) => <a href={`#${slug(g.topic)}`}>{g.topic}</a>)}
-  </nav>
-
-  <div class="groups">
-    {dsa.map((g) => (
-      <section class="group" id={slug(g.topic)}>
-        <h2>{g.topic} <span class="gcount" data-topic={slug(g.topic)}>0/{g.problems.length}</span></h2>
-        <ul>
-          {g.problems.map((p) => {
-            const id = `${slug(g.topic)}::${slug(p.name)}`;
-            const sol = solvedBy.get(norm(p.name));
-            return (
-              <li>
-                <label>
-                  <input type="checkbox" data-id={id} data-topic={slug(g.topic)} />
-                  <span>
-                    {p.name}
-                    {p.important && <b class="imp" title="Marked important in the source list"> ★</b>}
-                    {sol && <a class="soltag" href={sol}>◆ solutions</a>}
-                  </span>
-                </label>
-              </li>
-            );
-          })}
-        </ul>
-      </section>
-    ))}
-  </div>
+  <DsaChecklist groups={dsa} storageKey="crack-the-prep:dsa" />
 </PrepLayout>
 
 <style>
   .crumbs { font-family: var(--font-mono); font-size: 0.72rem; color: var(--muted); display: flex; gap: 0.5rem; }
   .lede { font-size: 1.05rem; margin: 0.4rem 0 0.8rem; }
-  .reviewed { font-family: var(--font-mono); font-size: 0.8rem; color: var(--muted); }
-  .reset {
-    margin-left: 0.6rem;
-    background: none;
-    border: 1px solid var(--navy-line);
-    color: var(--muted);
-    font: inherit;
-    font-size: 0.7rem;
-    padding: 0.1rem 0.5rem;
-    border-radius: 4px;
-    cursor: pointer;
-  }
-  .reset:hover { color: var(--danger); border-color: var(--danger); }
-
-  .topic-jump { display: flex; flex-wrap: wrap; gap: 0.4rem; margin: 1.2rem 0 2.5rem; }
-  .topic-jump a {
-    font-family: var(--font-mono);
-    font-size: 0.68rem;
-    letter-spacing: 0.04em;
-    padding: 0.25rem 0.6rem;
-    border: 1px solid var(--navy-line);
-    border-radius: 4px;
-    color: var(--muted);
-  }
-  .topic-jump a:hover { color: var(--cyan); border-color: var(--navy-line-2); }
-
-  .group { margin: 2.5rem 0; scroll-margin-top: 5rem; }
-  .group h2 {
-    font-family: var(--font-display);
-    font-size: 1.5rem;
-    letter-spacing: 0.05em;
-    color: var(--white);
-    border-bottom: 1px solid var(--navy-line);
-    padding-bottom: 0.4rem;
-    display: flex;
-    align-items: baseline;
-    gap: 0.7rem;
-  }
-  .gcount { font-family: var(--font-mono); font-size: 0.72rem; color: var(--muted); }
-  .group ul { list-style: none; margin: 0.8rem 0 0; padding: 0; }
-  .group li { margin: 0; }
-  .group label {
-    display: flex;
-    gap: 0.7rem;
-    align-items: flex-start;
-    padding: 0.4rem 0.5rem;
-    border-radius: 5px;
-    cursor: pointer;
-    font-size: 0.92rem;
-  }
-  .group label:hover { background: rgba(0, 180, 216, 0.06); }
-  .group input { margin-top: 0.35rem; accent-color: var(--cyan); flex-shrink: 0; }
-  .group input:checked + span { color: var(--muted); text-decoration: line-through; }
-  .imp { color: var(--gold); font-size: 0.8em; }
-
   .solcta { font-size: 0.9rem; color: var(--text); margin: 0.9rem 0 0; }
   .solcta a { font-family: var(--font-mono); font-size: 0.82rem; }
-  .soltag {
-    display: inline-block;
-    margin-left: 0.5rem;
-    font-family: var(--font-mono);
-    font-size: 0.62rem;
-    letter-spacing: 0.04em;
-    color: var(--cyan);
-    border: 1px solid var(--navy-line-2);
-    border-radius: 3px;
-    padding: 0 0.35rem;
-    text-decoration: none;
-    vertical-align: middle;
-  }
-  .soltag:hover { background: rgba(0, 180, 216, 0.12); }
-  .group input:checked + span .soltag { color: var(--muted); text-decoration: none; }
 </style>
-
-<script>
-  const KEY = 'crack-the-prep:dsa';
-  const load = (): Record<string, true> => {
-    try { return JSON.parse(localStorage.getItem(KEY) || '{}'); } catch { return {}; }
-  };
-  const save = (s: Record<string, true>) => {
-    try { localStorage.setItem(KEY, JSON.stringify(s)); } catch { /* ignore */ }
-  };
-
-  const boxes = [...document.querySelectorAll<HTMLInputElement>('.group input[type=checkbox]')];
-  const countEl = document.getElementById('dsa-count');
-  const groupCounts = new Map<string, HTMLElement>();
-  document.querySelectorAll<HTMLElement>('.gcount').forEach((el) => groupCounts.set(el.dataset.topic!, el));
-
-  let state = load();
-
-  function refresh() {
-    let done = 0;
-    const perTopic = new Map<string, [number, number]>();
-    for (const b of boxes) {
-      const t = b.dataset.topic!;
-      const [d, tot] = perTopic.get(t) ?? [0, 0];
-      const isDone = !!state[b.dataset.id!];
-      b.checked = isDone;
-      perTopic.set(t, [d + (isDone ? 1 : 0), tot + 1]);
-      if (isDone) done++;
-    }
-    if (countEl) countEl.textContent = String(done);
-    for (const [t, el] of groupCounts) {
-      const [d, tot] = perTopic.get(t) ?? [0, 0];
-      el.textContent = `${d}/${tot}`;
-    }
-  }
-
-  boxes.forEach((b) =>
-    b.addEventListener('change', () => {
-      if (b.checked) state[b.dataset.id!] = true;
-      else delete state[b.dataset.id!];
-      save(state);
-      refresh();
-    }),
-  );
-
-  document.getElementById('dsa-reset')?.addEventListener('click', () => {
-    if (!confirm('Clear all DSA progress?')) return;
-    state = {};
-    save(state);
-    refresh();
-  });
-
-  refresh();
-</script>

@@ -1,0 +1,950 @@
+[
+  {
+    "topic": "Hashing",
+    "pattern": "hashing",
+    "problems": [
+      {
+        "name": "Two Sum",
+        "level": "E"
+      },
+      {
+        "name": "Contains Duplicate",
+        "level": "E"
+      },
+      {
+        "name": "Valid Anagram",
+        "level": "E"
+      },
+      {
+        "name": "Group Anagrams",
+        "level": "M"
+      },
+      {
+        "name": "Top K Frequent Elements",
+        "level": "M"
+      },
+      {
+        "name": "Longest Consecutive Sequence",
+        "level": "M"
+      },
+      {
+        "name": "Isomorphic Strings",
+        "level": "E"
+      },
+      {
+        "name": "First Unique Character in a String",
+        "level": "E"
+      },
+      {
+        "name": "Encode and Decode Strings",
+        "level": "M"
+      },
+      {
+        "name": "Valid Sudoku",
+        "level": "M"
+      }
+    ]
+  },
+  {
+    "topic": "Prefix sum",
+    "pattern": "prefix-sum",
+    "problems": [
+      {
+        "name": "Range Sum Query – Immutable",
+        "level": "E"
+      },
+      {
+        "name": "Subarray Sum Equals K",
+        "level": "M"
+      },
+      {
+        "name": "Product of Array Except Self",
+        "level": "M"
+      },
+      {
+        "name": "Continuous Subarray Sum",
+        "level": "M"
+      },
+      {
+        "name": "Contiguous Array (equal 0s and 1s)",
+        "level": "M"
+      },
+      {
+        "name": "Subarray Sums Divisible by K",
+        "level": "M"
+      },
+      {
+        "name": "Range Sum Query 2D – Immutable",
+        "level": "M"
+      }
+    ]
+  },
+  {
+    "topic": "Two pointers",
+    "pattern": "two-pointers",
+    "problems": [
+      {
+        "name": "Valid Palindrome",
+        "level": "E"
+      },
+      {
+        "name": "Two Sum II – Input Array Is Sorted",
+        "level": "M"
+      },
+      {
+        "name": "3Sum",
+        "level": "M"
+      },
+      {
+        "name": "Container With Most Water",
+        "level": "M"
+      },
+      {
+        "name": "Sort Colors (Dutch National Flag)",
+        "level": "M"
+      },
+      {
+        "name": "Remove Duplicates from Sorted Array",
+        "level": "E"
+      },
+      {
+        "name": "Move Zeroes",
+        "level": "E"
+      },
+      {
+        "name": "Trapping Rain Water",
+        "level": "H"
+      }
+    ]
+  },
+  {
+    "topic": "Cyclic sort",
+    "pattern": "cyclic-sort--index-marking",
+    "problems": [
+      {
+        "name": "Missing Number",
+        "level": "E"
+      },
+      {
+        "name": "Find All Numbers Disappeared in an Array",
+        "level": "E"
+      },
+      {
+        "name": "Find the Duplicate Number",
+        "level": "M"
+      },
+      {
+        "name": "Find All Duplicates in an Array",
+        "level": "M"
+      },
+      {
+        "name": "Set Mismatch (repeating and missing)",
+        "level": "E"
+      },
+      {
+        "name": "First Missing Positive",
+        "level": "H"
+      }
+    ]
+  },
+  {
+    "topic": "Sliding window",
+    "pattern": "sliding-window",
+    "problems": [
+      {
+        "name": "Best Time to Buy and Sell Stock",
+        "level": "E"
+      },
+      {
+        "name": "Longest Substring Without Repeating Characters",
+        "level": "M"
+      },
+      {
+        "name": "Longest Repeating Character Replacement",
+        "level": "M"
+      },
+      {
+        "name": "Permutation in String",
+        "level": "M"
+      },
+      {
+        "name": "Max Consecutive Ones III",
+        "level": "M"
+      },
+      {
+        "name": "Fruit Into Baskets (at most k distinct)",
+        "level": "M"
+      },
+      {
+        "name": "Minimum Size Subarray Sum",
+        "level": "M"
+      },
+      {
+        "name": "Minimum Window Substring",
+        "level": "H"
+      }
+    ]
+  },
+  {
+    "topic": "Binary search",
+    "pattern": "binary-search",
+    "problems": [
+      {
+        "name": "Binary Search",
+        "level": "E"
+      },
+      {
+        "name": "Find First and Last Position of Element",
+        "level": "M"
+      },
+      {
+        "name": "Search in Rotated Sorted Array",
+        "level": "M"
+      },
+      {
+        "name": "Find Minimum in Rotated Sorted Array",
+        "level": "M"
+      },
+      {
+        "name": "Search a 2D Matrix",
+        "level": "M"
+      },
+      {
+        "name": "Find Peak Element",
+        "level": "M"
+      },
+      {
+        "name": "Time Based Key-Value Store",
+        "level": "M"
+      },
+      {
+        "name": "Median of Two Sorted Arrays",
+        "level": "H"
+      }
+    ]
+  },
+  {
+    "topic": "Binary search on the answer",
+    "pattern": "binary-search-on-the-answer",
+    "problems": [
+      {
+        "name": "Koko Eating Bananas",
+        "level": "M"
+      },
+      {
+        "name": "Capacity To Ship Packages Within D Days",
+        "level": "M"
+      },
+      {
+        "name": "Aggressive Cows (magnetic force between balls)",
+        "level": "M"
+      },
+      {
+        "name": "Split Array Largest Sum (book allocation)",
+        "level": "H"
+      },
+      {
+        "name": "Minimum Number of Days to Make m Bouquets",
+        "level": "M"
+      }
+    ]
+  },
+  {
+    "topic": "Stack and monotonic stack",
+    "pattern": "stack",
+    "problems": [
+      {
+        "name": "Valid Parentheses",
+        "level": "E"
+      },
+      {
+        "name": "Min Stack",
+        "level": "M"
+      },
+      {
+        "name": "Evaluate Reverse Polish Notation",
+        "level": "M"
+      },
+      {
+        "name": "Daily Temperatures",
+        "level": "M"
+      },
+      {
+        "name": "Next Greater Element II",
+        "level": "M"
+      },
+      {
+        "name": "Decode String",
+        "level": "M"
+      },
+      {
+        "name": "Asteroid Collision",
+        "level": "M"
+      },
+      {
+        "name": "Online Stock Span",
+        "level": "M"
+      },
+      {
+        "name": "Largest Rectangle in Histogram",
+        "level": "H"
+      },
+      {
+        "name": "Basic Calculator II",
+        "level": "M"
+      }
+    ]
+  },
+  {
+    "topic": "Monotonic deque",
+    "pattern": "monotonic-deque",
+    "problems": [
+      {
+        "name": "Sliding Window Maximum",
+        "level": "H"
+      },
+      {
+        "name": "First Negative Integer in Every Window of Size k",
+        "level": "E"
+      },
+      {
+        "name": "Shortest Subarray with Sum at Least K",
+        "level": "H"
+      }
+    ]
+  },
+  {
+    "topic": "Linked list",
+    "pattern": "linked-list-in-place-reversal",
+    "problems": [
+      {
+        "name": "Reverse Linked List",
+        "level": "E"
+      },
+      {
+        "name": "Merge Two Sorted Lists",
+        "level": "E"
+      },
+      {
+        "name": "Linked List Cycle",
+        "level": "E"
+      },
+      {
+        "name": "Linked List Cycle II (start of the loop)",
+        "level": "M"
+      },
+      {
+        "name": "Middle of the Linked List",
+        "level": "E"
+      },
+      {
+        "name": "Remove Nth Node From End of List",
+        "level": "M"
+      },
+      {
+        "name": "Palindrome Linked List",
+        "level": "E"
+      },
+      {
+        "name": "Reorder List",
+        "level": "M"
+      },
+      {
+        "name": "Add Two Numbers",
+        "level": "M"
+      },
+      {
+        "name": "Intersection of Two Linked Lists",
+        "level": "E"
+      },
+      {
+        "name": "Copy List with Random Pointer",
+        "level": "M"
+      },
+      {
+        "name": "Reverse Nodes in k-Group",
+        "level": "H"
+      }
+    ]
+  },
+  {
+    "topic": "Trees",
+    "pattern": "trees--bfs-and-dfs",
+    "problems": [
+      {
+        "name": "Maximum Depth of Binary Tree",
+        "level": "E"
+      },
+      {
+        "name": "Invert Binary Tree",
+        "level": "E"
+      },
+      {
+        "name": "Same Tree",
+        "level": "E"
+      },
+      {
+        "name": "Diameter of Binary Tree",
+        "level": "E"
+      },
+      {
+        "name": "Balanced Binary Tree",
+        "level": "E"
+      },
+      {
+        "name": "Binary Tree Level Order Traversal",
+        "level": "M"
+      },
+      {
+        "name": "Binary Tree Right Side View",
+        "level": "M"
+      },
+      {
+        "name": "Binary Tree Zigzag Level Order Traversal",
+        "level": "M"
+      },
+      {
+        "name": "Lowest Common Ancestor of a Binary Tree",
+        "level": "M"
+      },
+      {
+        "name": "Path Sum II",
+        "level": "M"
+      },
+      {
+        "name": "Path Sum III (k-sum paths)",
+        "level": "M"
+      },
+      {
+        "name": "Construct Binary Tree from Preorder and Inorder",
+        "level": "M"
+      },
+      {
+        "name": "Count Good Nodes in Binary Tree",
+        "level": "M"
+      },
+      {
+        "name": "Vertical Order Traversal (top / bottom view)",
+        "level": "H"
+      },
+      {
+        "name": "Binary Tree Maximum Path Sum",
+        "level": "H"
+      },
+      {
+        "name": "Serialize and Deserialize Binary Tree",
+        "level": "H"
+      }
+    ]
+  },
+  {
+    "topic": "Binary search trees",
+    "pattern": "trees--bfs-and-dfs",
+    "problems": [
+      {
+        "name": "Validate Binary Search Tree",
+        "level": "M"
+      },
+      {
+        "name": "Kth Smallest Element in a BST",
+        "level": "M"
+      },
+      {
+        "name": "Lowest Common Ancestor of a BST",
+        "level": "M"
+      },
+      {
+        "name": "Delete Node in a BST",
+        "level": "M"
+      },
+      {
+        "name": "Convert Sorted Array to BST",
+        "level": "E"
+      }
+    ]
+  },
+  {
+    "topic": "Heap, top-K and K-way merge",
+    "pattern": "top-k-k-way-merge-and-two-heaps",
+    "problems": [
+      {
+        "name": "Kth Largest Element in an Array",
+        "level": "M"
+      },
+      {
+        "name": "K Closest Points to Origin",
+        "level": "M"
+      },
+      {
+        "name": "Last Stone Weight",
+        "level": "E"
+      },
+      {
+        "name": "Task Scheduler",
+        "level": "M"
+      },
+      {
+        "name": "Reorganize String",
+        "level": "M"
+      },
+      {
+        "name": "Merge k Sorted Lists",
+        "level": "H"
+      },
+      {
+        "name": "Kth Smallest Element in a Sorted Matrix",
+        "level": "M"
+      },
+      {
+        "name": "Find Median from Data Stream",
+        "level": "H"
+      },
+      {
+        "name": "Smallest Range Covering Elements from K Lists",
+        "level": "H"
+      }
+    ]
+  },
+  {
+    "topic": "Graphs – BFS / DFS",
+    "pattern": "graphs",
+    "problems": [
+      {
+        "name": "Number of Islands",
+        "level": "M"
+      },
+      {
+        "name": "Flood Fill",
+        "level": "E"
+      },
+      {
+        "name": "Max Area of Island",
+        "level": "M"
+      },
+      {
+        "name": "Clone Graph",
+        "level": "M"
+      },
+      {
+        "name": "Rotting Oranges",
+        "level": "M"
+      },
+      {
+        "name": "Pacific Atlantic Water Flow",
+        "level": "M"
+      },
+      {
+        "name": "Surrounded Regions",
+        "level": "M"
+      },
+      {
+        "name": "01 Matrix (distance to nearest 0)",
+        "level": "M"
+      },
+      {
+        "name": "Is Graph Bipartite?",
+        "level": "M"
+      },
+      {
+        "name": "Word Ladder",
+        "level": "H"
+      }
+    ]
+  },
+  {
+    "topic": "Topological sort",
+    "pattern": "topological-sort",
+    "problems": [
+      {
+        "name": "Course Schedule",
+        "level": "M"
+      },
+      {
+        "name": "Course Schedule II",
+        "level": "M"
+      },
+      {
+        "name": "Alien Dictionary",
+        "level": "H"
+      },
+      {
+        "name": "Minimum Height Trees",
+        "level": "M"
+      }
+    ]
+  },
+  {
+    "topic": "Union-Find",
+    "pattern": "union-find-disjoint-set",
+    "problems": [
+      {
+        "name": "Number of Connected Components in an Undirected Graph",
+        "level": "M"
+      },
+      {
+        "name": "Redundant Connection",
+        "level": "M"
+      },
+      {
+        "name": "Graph Valid Tree",
+        "level": "M"
+      },
+      {
+        "name": "Accounts Merge",
+        "level": "M"
+      },
+      {
+        "name": "Number of Provinces",
+        "level": "M"
+      }
+    ]
+  },
+  {
+    "topic": "Shortest paths",
+    "pattern": "graphs",
+    "problems": [
+      {
+        "name": "Network Delay Time (Dijkstra)",
+        "level": "M"
+      },
+      {
+        "name": "Cheapest Flights Within K Stops",
+        "level": "M"
+      },
+      {
+        "name": "Path With Minimum Effort",
+        "level": "M"
+      },
+      {
+        "name": "Min Cost to Connect All Points (Prim / Kruskal)",
+        "level": "M"
+      }
+    ]
+  },
+  {
+    "topic": "Trie",
+    "pattern": "trie",
+    "problems": [
+      {
+        "name": "Implement Trie (Prefix Tree)",
+        "level": "M"
+      },
+      {
+        "name": "Design Add and Search Words Data Structure",
+        "level": "M"
+      },
+      {
+        "name": "Word Search II",
+        "level": "H"
+      },
+      {
+        "name": "Longest Word in Dictionary",
+        "level": "M"
+      }
+    ]
+  },
+  {
+    "topic": "Backtracking",
+    "pattern": "backtracking",
+    "problems": [
+      {
+        "name": "Subsets",
+        "level": "M"
+      },
+      {
+        "name": "Subsets II",
+        "level": "M"
+      },
+      {
+        "name": "Permutations",
+        "level": "M"
+      },
+      {
+        "name": "Combination Sum",
+        "level": "M"
+      },
+      {
+        "name": "Combination Sum II",
+        "level": "M"
+      },
+      {
+        "name": "Letter Combinations of a Phone Number",
+        "level": "M"
+      },
+      {
+        "name": "Generate Parentheses",
+        "level": "M"
+      },
+      {
+        "name": "Word Search",
+        "level": "M"
+      },
+      {
+        "name": "Palindrome Partitioning",
+        "level": "M"
+      },
+      {
+        "name": "N-Queens",
+        "level": "H"
+      },
+      {
+        "name": "Sudoku Solver",
+        "level": "H"
+      }
+    ]
+  },
+  {
+    "topic": "1-D dynamic programming",
+    "pattern": "dynamic-programming",
+    "problems": [
+      {
+        "name": "Climbing Stairs",
+        "level": "E"
+      },
+      {
+        "name": "House Robber",
+        "level": "M"
+      },
+      {
+        "name": "House Robber II",
+        "level": "M"
+      },
+      {
+        "name": "Coin Change",
+        "level": "M"
+      },
+      {
+        "name": "Coin Change II",
+        "level": "M"
+      },
+      {
+        "name": "Decode Ways",
+        "level": "M"
+      },
+      {
+        "name": "Word Break",
+        "level": "M"
+      },
+      {
+        "name": "Longest Increasing Subsequence",
+        "level": "M"
+      },
+      {
+        "name": "Maximum Product Subarray",
+        "level": "M"
+      },
+      {
+        "name": "Partition Equal Subset Sum",
+        "level": "M"
+      },
+      {
+        "name": "Best Time to Buy and Sell Stock with Cooldown",
+        "level": "M"
+      }
+    ]
+  },
+  {
+    "topic": "2-D dynamic programming",
+    "pattern": "dynamic-programming",
+    "problems": [
+      {
+        "name": "Unique Paths",
+        "level": "M"
+      },
+      {
+        "name": "Minimum Path Sum",
+        "level": "M"
+      },
+      {
+        "name": "Longest Common Subsequence",
+        "level": "M"
+      },
+      {
+        "name": "Longest Palindromic Substring",
+        "level": "M"
+      },
+      {
+        "name": "Palindromic Substrings",
+        "level": "M"
+      },
+      {
+        "name": "Edit Distance",
+        "level": "M"
+      },
+      {
+        "name": "Target Sum",
+        "level": "M"
+      },
+      {
+        "name": "Interleaving String",
+        "level": "M"
+      },
+      {
+        "name": "Maximal Square",
+        "level": "M"
+      },
+      {
+        "name": "0/1 Knapsack",
+        "level": "M"
+      },
+      {
+        "name": "Burst Balloons",
+        "level": "H"
+      },
+      {
+        "name": "Regular Expression Matching",
+        "level": "H"
+      }
+    ]
+  },
+  {
+    "topic": "Greedy",
+    "pattern": "greedy",
+    "problems": [
+      {
+        "name": "Maximum Subarray (Kadane)",
+        "level": "M"
+      },
+      {
+        "name": "Jump Game",
+        "level": "M"
+      },
+      {
+        "name": "Jump Game II",
+        "level": "M"
+      },
+      {
+        "name": "Gas Station",
+        "level": "M"
+      },
+      {
+        "name": "Partition Labels",
+        "level": "M"
+      },
+      {
+        "name": "Hand of Straights",
+        "level": "M"
+      },
+      {
+        "name": "Minimum Platforms",
+        "level": "M"
+      },
+      {
+        "name": "Candy",
+        "level": "H"
+      }
+    ]
+  },
+  {
+    "topic": "Intervals",
+    "pattern": "intervals",
+    "problems": [
+      {
+        "name": "Merge Intervals",
+        "level": "M"
+      },
+      {
+        "name": "Insert Interval",
+        "level": "M"
+      },
+      {
+        "name": "Non-overlapping Intervals",
+        "level": "M"
+      },
+      {
+        "name": "Meeting Rooms",
+        "level": "E"
+      },
+      {
+        "name": "Meeting Rooms II",
+        "level": "M"
+      },
+      {
+        "name": "Minimum Number of Arrows to Burst Balloons",
+        "level": "M"
+      }
+    ]
+  },
+  {
+    "topic": "Bit manipulation",
+    "pattern": "bit-manipulation",
+    "problems": [
+      {
+        "name": "Single Number",
+        "level": "E"
+      },
+      {
+        "name": "Number of 1 Bits",
+        "level": "E"
+      },
+      {
+        "name": "Counting Bits",
+        "level": "E"
+      },
+      {
+        "name": "Reverse Bits",
+        "level": "E"
+      },
+      {
+        "name": "Sum of Two Integers (no + or -)",
+        "level": "M"
+      },
+      {
+        "name": "Single Number III (two non-repeating)",
+        "level": "M"
+      }
+    ]
+  },
+  {
+    "topic": "Matrix",
+    "pattern": "matrix-traversal",
+    "problems": [
+      {
+        "name": "Spiral Matrix",
+        "level": "M"
+      },
+      {
+        "name": "Rotate Image",
+        "level": "M"
+      },
+      {
+        "name": "Set Matrix Zeroes",
+        "level": "M"
+      },
+      {
+        "name": "Search a 2D Matrix II",
+        "level": "M"
+      },
+      {
+        "name": "Game of Life",
+        "level": "M"
+      }
+    ]
+  },
+  {
+    "topic": "Design",
+    "pattern": "",
+    "problems": [
+      {
+        "name": "LRU Cache",
+        "level": "M"
+      },
+      {
+        "name": "Implement Queue using Stacks",
+        "level": "E"
+      },
+      {
+        "name": "Design Hit Counter",
+        "level": "M"
+      },
+      {
+        "name": "Insert Delete GetRandom O(1)",
+        "level": "M"
+      },
+      {
+        "name": "LFU Cache",
+        "level": "H"
+      }
+    ]
+  }
+]

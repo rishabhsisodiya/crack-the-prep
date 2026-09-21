@@ -5,8 +5,8 @@ track: "dsa"
 kind: "notes"
 order: 3
 slug: "patterns"
-description: "The dozen patterns that cover most interview coding problems: the trigger that tells you which one applies, the approach, complexity, and reference code."
-updated: 2026-09-02
+description: "The two dozen patterns that cover most interview coding problems: the trigger that tells you which one applies, the approach, complexity, and reference code."
+updated: 2026-09-21
 ---
 
 import Callout from '../../components/Callout.astro';
@@ -48,6 +48,25 @@ function twoSum(nums, target) {
 
 O(n) time, O(n) space. Related: group anagrams (key by sorted string), subarray sum equals k (prefix-sum counts in a map).
 
+## Prefix sum
+
+**Trigger:** "sum of a subarray / range", "subarray with sum k", counts over ranges, or a sliding window that breaks because values can be **negative**. `prefix[j] - prefix[i]` is the sum of `(i, j]`.
+
+```js
+function subarraySumK(nums, k) {
+  const count = new Map([[0, 1]]); // prefix sum -> times seen
+  let sum = 0, res = 0;
+  for (const x of nums) {
+    sum += x;
+    res += count.get(sum - k) ?? 0; // earlier prefix that leaves exactly k
+    count.set(sum, (count.get(sum) ?? 0) + 1);
+  }
+  return res;
+}
+```
+
+O(n) time, O(n) space. Seed the map with `0 → 1` so subarrays starting at index 0 count. Also: zero-sum subarray, product of array except self (prefix and suffix products), range sum query, 2-D prefix sums for submatrix sums.
+
 ## Two pointers
 
 **Trigger:** a sorted array, or comparing from both ends; find a pair or triplet, reverse in place, partition, dedupe.
@@ -65,6 +84,27 @@ function pairSumSorted(a, target) {
 ```
 
 O(n) after an O(n log n) sort. Three-sum: fix one element, two-pointer the rest, skip duplicates.
+
+## Cyclic sort / index marking
+
+**Trigger:** an array of `n` numbers in the range `1..n` (or `0..n`) — find the missing, duplicate, or first missing positive in O(1) extra space. Each value has a "home" index.
+
+```js
+function firstMissingPositive(nums) {
+  const n = nums.length;
+  for (let i = 0; i < n; i++) {
+    // keep swapping nums[i] to its home (value v lives at index v - 1)
+    while (nums[i] > 0 && nums[i] <= n && nums[nums[i] - 1] !== nums[i]) {
+      const j = nums[i] - 1;
+      [nums[i], nums[j]] = [nums[j], nums[i]];
+    }
+  }
+  for (let i = 0; i < n; i++) if (nums[i] !== i + 1) return i + 1;
+  return n + 1;
+}
+```
+
+O(n) — every swap places one value permanently. Alternative when you may mutate: flip `nums[v - 1]` negative to mark `v` as seen. Also: find all duplicates, set mismatch (repeating and missing), missing number (or XOR / sum formula).
 
 ## Sliding window
 
@@ -104,6 +144,19 @@ function lowerBound(lo, hi, pred) {
 
 O(log n), times an O(n) check when searching the answer space. Keep one template; define the predicate carefully; use the shift or `Math.floor` to avoid mid overflow.
 
+### Binary search on the answer
+
+When the question asks for the **minimum maximum** or **maximum minimum** of something (capacity, speed, pages, distance) and "can we do it with X?" is monotonic in X, binary-search X and write a greedy O(n) feasibility check.
+
+```js
+function minEatingSpeed(piles, h) {
+  const canFinish = (k) => piles.reduce((t, p) => t + Math.ceil(p / k), 0) <= h;
+  return lowerBound(1, Math.max(...piles), canFinish);
+}
+```
+
+O(n log range). Same shape: ship packages within D days, split array largest sum, book allocation, painter's partition, aggressive cows (maximise the minimum gap — flip the predicate), median of two sorted arrays (search the partition).
+
 ## Stack
 
 **Trigger:** matching pairs, "most recent unresolved thing", or "next greater / smaller element" (a monotonic stack).
@@ -124,6 +177,25 @@ function nextGreater(nums) {
 
 O(n) — each index is pushed and popped once.
 
+## Monotonic deque
+
+**Trigger:** max or min of **every window of size k**, or DP where you need the best value over a sliding range. A deque of indices whose values stay monotonic; the front is always the answer for the current window.
+
+```js
+function maxSlidingWindow(nums, k) {
+  const dq = [], res = []; // indices, values decreasing
+  for (let i = 0; i < nums.length; i++) {
+    if (dq.length && dq[0] <= i - k) dq.shift();            // out of window
+    while (dq.length && nums[dq[dq.length - 1]] <= nums[i]) dq.pop(); // dominated
+    dq.push(i);
+    if (i >= k - 1) res.push(nums[dq[0]]);
+  }
+  return res;
+}
+```
+
+O(n) amortised (use a real deque or a head index in production; `shift` is O(n) in JS). The monotonic stack above covers next greater / smaller, largest rectangle in a histogram, daily temperatures, stock span, and trapping rain water.
+
 ## Fast and slow pointers
 
 **Trigger:** linked-list cycle detection, finding the middle, reordering.
@@ -141,6 +213,25 @@ function hasCycle(head) {
 ```
 
 O(n) time, O(1) space. The middle is `slow` when `fast` reaches the end. Use a dummy head node for insert- or delete-heavy problems.
+
+## Linked list in-place reversal
+
+**Trigger:** reverse the whole list, a sub-range, or every group of k; palindrome check; reorder list. Three pointers — `prev`, `curr`, `next` — and a dummy head when the head can change.
+
+```js
+function reverseList(head) {
+  let prev = null, curr = head;
+  while (curr) {
+    const next = curr.next;
+    curr.next = prev;
+    prev = curr;
+    curr = next;
+  }
+  return prev;
+}
+```
+
+O(n) time, O(1) space. Reverse in groups of k: check k nodes exist, reverse them, reconnect the previous group's tail. Palindrome: find the middle (fast/slow), reverse the second half, compare. Reorder list: middle + reverse + merge alternately.
 
 ## Trees — BFS and DFS
 
@@ -188,6 +279,81 @@ function numIslands(grid) {
 
 O(V + E).
 
+## Topological sort
+
+**Trigger:** dependencies, prerequisites, build order, "can all tasks finish?", ordering derived from comparisons (alien dictionary). Only exists for a DAG — if you cannot order every node, there is a cycle.
+
+```js
+function courseOrder(n, prereqs) {           // prereqs: [course, needs]
+  const adj = Array.from({ length: n }, () => []);
+  const indeg = Array(n).fill(0);
+  for (const [c, p] of prereqs) { adj[p].push(c); indeg[c]++; }
+  const q = [], order = [];
+  for (let i = 0; i < n; i++) if (indeg[i] === 0) q.push(i);
+  for (let h = 0; h < q.length; h++) {
+    const u = q[h];
+    order.push(u);
+    for (const v of adj[u]) if (--indeg[v] === 0) q.push(v);
+  }
+  return order.length === n ? order : []; // [] means a cycle
+}
+```
+
+O(V + E) (Kahn's algorithm). DFS alternative: post-order, then reverse; three colours detect a cycle. Also: minimum time per job in a DAG (process in topological order), longest path in a DAG.
+
+
+## Union-Find (disjoint set)
+
+**Trigger:** "are these connected?", number of components as edges arrive, redundant connection, grouping equivalent items (accounts merge, similar strings), Kruskal's MST.
+
+```js
+class DSU {
+  constructor(n) { this.parent = [...Array(n).keys()]; this.size = Array(n).fill(1); }
+  find(x) {
+    while (this.parent[x] !== x) {
+      this.parent[x] = this.parent[this.parent[x]]; // path halving
+      x = this.parent[x];
+    }
+    return x;
+  }
+  union(a, b) {
+    let ra = this.find(a), rb = this.find(b);
+    if (ra === rb) return false;                    // already connected → cycle
+    if (this.size[ra] < this.size[rb]) [ra, rb] = [rb, ra];
+    this.parent[rb] = ra;
+    this.size[ra] += this.size[rb];
+    return true;
+  }
+}
+```
+
+Near O(1) per operation with path compression and union by size. Prefer it over DFS when edges arrive over time or you only need connectivity, not paths.
+
+
+## Trie
+
+**Trigger:** many prefix queries, autocomplete, "word starts with", searching many words in a grid at once (word search II), shortest unique prefix, maximum XOR of two numbers (a bit trie).
+
+```js
+class Trie {
+  constructor() { this.root = {}; }
+  insert(word) {
+    let node = this.root;
+    for (const ch of word) node = node[ch] ??= {};
+    node.end = true;
+  }
+  #walk(s) {
+    let node = this.root;
+    for (const ch of s) if (!(node = node[ch])) return null;
+    return node;
+  }
+  search(word) { return !!this.#walk(word)?.end; }
+  startsWith(prefix) { return this.#walk(prefix) !== null; }
+}
+```
+
+O(L) per operation for a word of length L; space is total characters stored. For word search II, build a trie of the words and DFS the grid once, pruning when no child matches.
+
 ## Heap / priority queue
 
 **Trigger:** "k largest or smallest", "kth", streaming order statistics. JavaScript has no built-in heap — carry a small class or keep a sorted array for tiny k.
@@ -198,6 +364,43 @@ O(V + E).
 ```
 
 Top-k is O(n log k).
+
+## Top-K, K-way merge and two heaps
+
+Three recurring heap shapes — recognise which one before coding:
+
+- **Top-K** — "k largest / most frequent / closest": a **min-heap of size k** (pop when size exceeds k). O(n log k). For a one-off query, quickselect is O(n) average; for frequencies, bucket sort by count is O(n).
+- **K-way merge** — "merge k sorted lists / arrays", "kth smallest in a sorted matrix", "smallest range covering k lists": push the head of each list, pop the smallest, push its successor. O(N log k).
+- **Two heaps** — "running median", "sliding window median": a max-heap for the lower half, a min-heap for the upper half; rebalance so sizes differ by at most one. O(log n) per insert.
+
+```js
+class MinHeap {
+  constructor(cmp = (a, b) => a - b) { this.a = []; this.cmp = cmp; }
+  get size() { return this.a.length; }
+  peek() { return this.a[0]; }
+  push(x) {
+    const a = this.a; a.push(x);
+    for (let i = a.length - 1, p; i > 0 && this.cmp(a[i], a[p = (i - 1) >> 1]) < 0; i = p)
+      [a[i], a[p]] = [a[p], a[i]];
+  }
+  pop() {
+    const a = this.a, top = a[0], last = a.pop();
+    if (a.length) {
+      a[0] = last;
+      for (let i = 0; ;) {
+        const l = 2 * i + 1, r = l + 1; let m = i;
+        if (l < a.length && this.cmp(a[l], a[m]) < 0) m = l;
+        if (r < a.length && this.cmp(a[r], a[m]) < 0) m = r;
+        if (m === i) break;
+        [a[i], a[m]] = [a[m], a[i]]; i = m;
+      }
+    }
+    return top;
+  }
+}
+```
+
+Carry this class into JavaScript interviews — pass a comparator to get a max-heap or to order `[value, listIndex]` pairs.
 
 ## Backtracking
 
@@ -240,6 +443,23 @@ function coinChange(coins, amount) {
 
 O(amount × coins). House robber: `dp[i] = max(dp[i-1], dp[i-2] + nums[i])`, reducible to two variables.
 
+## Greedy
+
+**Trigger:** a locally best choice that never needs undoing — scheduling the most non-overlapping activities, jump game, gas station, minimum platforms, assign cookies, task scheduler. Usually "sort by something, then sweep".
+
+```js
+function canJump(nums) {
+  let reach = 0;
+  for (let i = 0; i < nums.length; i++) {
+    if (i > reach) return false;   // stuck before i
+    reach = Math.max(reach, i + nums[i]);
+  }
+  return true;
+}
+```
+
+O(n), or O(n log n) with a sort. **Justify it** — interviewers ask "why is greedy correct?". Use an exchange argument: swapping any optimal solution's choice for the greedy one never makes it worse. If you cannot argue that, it is probably DP (coin change with arbitrary coins is the classic trap).
+
 ## Intervals
 
 **Trigger:** overlapping ranges, scheduling, "can attend all", "rooms needed". Almost always: sort by start first.
@@ -259,6 +479,41 @@ function merge(intervals) {
 
 O(n log n). Minimum meeting rooms: sort starts and ends separately and sweep, or use a min-heap of end times.
 
+## Bit manipulation
+
+**Trigger:** "every element appears twice except one", O(1)-space tricks, power of two, subsets of a small set (n ≤ 20), toggling flags.
+
+```js
+const singleNumber = (nums) => nums.reduce((x, n) => x ^ n, 0); // a ^ a = 0, a ^ 0 = a
+const isPowerOfTwo = (n) => n > 0 && (n & (n - 1)) === 0;
+function countBits(n) { let c = 0; while (n) { n &= n - 1; c++; } return c; } // Kernighan
+```
+
+Know: `x & (x - 1)` clears the lowest set bit, `x & -x` isolates it, `1 << i` builds a mask, and enumerating `mask` from `0` to `(1 << n) - 1` walks every subset. JavaScript bitwise operators work on 32-bit signed integers — use `>>> 0` for unsigned, and BigInt beyond 32 bits.
+
+
+## Matrix traversal
+
+**Trigger:** 2-D grids — spiral order, rotate by 90°, set matrix zeroes, search a sorted matrix, and grid-as-graph problems (islands, rotting oranges, shortest path in a maze).
+
+```js
+function spiralOrder(m) {
+  const res = [];
+  let top = 0, bottom = m.length - 1, left = 0, right = m[0].length - 1;
+  while (top <= bottom && left <= right) {
+    for (let c = left; c <= right; c++) res.push(m[top][c]);
+    top++;
+    for (let r = top; r <= bottom; r++) res.push(m[r][right]);
+    right--;
+    if (top <= bottom) { for (let c = right; c >= left; c--) res.push(m[bottom][c]); bottom--; }
+    if (left <= right) { for (let r = bottom; r >= top; r--) res.push(m[r][left]); left++; }
+  }
+  return res;
+}
+```
+
+O(R × C). Rotate 90° clockwise in place: transpose, then reverse each row. Sorted rows and columns: start at the top-right corner and step left or down (O(R + C)). For grid BFS/DFS, keep a `dirs = [[1,0],[-1,0],[0,1],[0,-1]]` array; multi-source BFS (all rotten oranges in the queue at once) gives distances from the nearest source.
+
 ## When you do not recognise the problem
 
-Look for structure: sorted implies binary search or two pointers; contiguous implies sliding window; "seen before" implies a hash; a tree or graph implies BFS or DFS; optimal over choices with overlap implies DP; "k of something" implies a heap. Pick the most promising, sketch it in words, get a nod, then code.
+Look for structure: sorted implies binary search or two pointers; contiguous implies sliding window; "seen before" implies a hash; a tree or graph implies BFS or DFS; optimal over choices with overlap implies DP; "k of something" implies a heap; dependencies imply topological sort; "connected as edges arrive" implies union-find; many prefixes imply a trie; values in `1..n` imply cyclic sort; "minimise the maximum" implies binary search on the answer; range sums with negatives imply prefix sums. Pick the most promising, sketch it in words, get a nod, then code.
