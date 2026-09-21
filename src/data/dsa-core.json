@@ -17,7 +17,8 @@
       },
       {
         "name": "Group Anagrams",
-        "level": "M"
+        "level": "M",
+        "solution": "Group all anagrams together"
       },
       {
         "name": "Top K Frequent Elements",
@@ -25,11 +26,13 @@
       },
       {
         "name": "Longest Consecutive Sequence",
-        "level": "M"
+        "level": "M",
+        "solution": "Longest consecutive subsequence"
       },
       {
         "name": "Isomorphic Strings",
-        "level": "E"
+        "level": "E",
+        "solution": "Check if two strings are isomorphic"
       },
       {
         "name": "First Unique Character in a String",
@@ -59,7 +62,8 @@
       },
       {
         "name": "Product of Array Except Self",
-        "level": "M"
+        "level": "M",
+        "solution": "Product array puzzle (product of all except self)"
       },
       {
         "name": "Continuous Subarray Sum",
@@ -101,7 +105,8 @@
       },
       {
         "name": "Sort Colors (Dutch National Flag)",
-        "level": "M"
+        "level": "M",
+        "solution": "Sort an array of 0s, 1s and 2s"
       },
       {
         "name": "Remove Duplicates from Sorted Array",
@@ -113,7 +118,8 @@
       },
       {
         "name": "Trapping Rain Water",
-        "level": "H"
+        "level": "H",
+        "solution": "Trapping Rain water problem"
       }
     ]
   },
@@ -139,7 +145,8 @@
       },
       {
         "name": "Set Mismatch (repeating and missing)",
-        "level": "E"
+        "level": "E",
+        "solution": "Find the repeating and the missing number"
       },
       {
         "name": "First Missing Positive",
@@ -177,7 +184,8 @@
       },
       {
         "name": "Minimum Size Subarray Sum",
-        "level": "M"
+        "level": "M",
+        "solution": "Smallest subarray with sum greater than a given value"
       },
       {
         "name": "Minimum Window Substring",
@@ -195,19 +203,23 @@
       },
       {
         "name": "Find First and Last Position of Element",
-        "level": "M"
+        "level": "M",
+        "solution": "Find first and last positions of an element in a sorted array"
       },
       {
         "name": "Search in Rotated Sorted Array",
-        "level": "M"
+        "level": "M",
+        "solution": "Search in a rotated sorted array"
       },
       {
         "name": "Find Minimum in Rotated Sorted Array",
-        "level": "M"
+        "level": "M",
+        "solution": "Find pivot (minimum) in a rotated sorted array"
       },
       {
         "name": "Search a 2D Matrix",
-        "level": "M"
+        "level": "M",
+        "solution": "Search an element in a matrix"
       },
       {
         "name": "Find Peak Element",
@@ -237,11 +249,13 @@
       },
       {
         "name": "Aggressive Cows (magnetic force between balls)",
-        "level": "M"
+        "level": "M",
+        "solution": "Binary search on the answer — Aggressive Cows, Book Allocation, Painter’s Partition, EKO, ROTI-Prata"
       },
       {
         "name": "Split Array Largest Sum (book allocation)",
-        "level": "H"
+        "level": "H",
+        "solution": "Binary search on the answer — Aggressive Cows, Book Allocation, Painter’s Partition, EKO, ROTI-Prata"
       },
       {
         "name": "Minimum Number of Days to Make m Bouquets",
@@ -263,7 +277,8 @@
       },
       {
         "name": "Evaluate Reverse Polish Notation",
-        "level": "M"
+        "level": "M",
+        "solution": "Evaluate a postfix expression"
       },
       {
         "name": "Daily Temperatures",
@@ -287,11 +302,13 @@
       },
       {
         "name": "Largest Rectangle in Histogram",
-        "level": "H"
+        "level": "H",
+        "solution": "Largest rectangular area in a histogram"
       },
       {
         "name": "Basic Calculator II",
-        "level": "M"
+        "level": "M",
+        "solution": "Evaluate an infix arithmetic expression"
       }
     ]
   },
@@ -301,7 +318,8 @@
     "problems": [
       {
         "name": "Sliding Window Maximum",
-        "level": "H"
+        "level": "H",
+        "solution": "Maximum of all subarrays of size k (sliding window maximum)"
       },
       {
         "name": "First Negative Integer in Every Window of Size k",
@@ -319,7 +337,8 @@
     "problems": [
       {
         "name": "Reverse Linked List",
-        "level": "E"
+        "level": "E",
+        "solution": "Reverse a linked list"
       },
       {
         "name": "Merge Two Sorted Lists",
@@ -327,23 +346,28 @@
       },
       {
         "name": "Linked List Cycle",
-        "level": "E"
+        "level": "E",
+        "solution": "Detect Loop in linked list"
       },
       {
         "name": "Linked List Cycle II (start of the loop)",
-        "level": "M"
+        "level": "M",
+        "solution": "Delete the loop in a linked list"
       },
       {
         "name": "Middle of the Linked List",
-        "level": "E"
+        "level": "E",
+        "solution": "Find the middle element of a linked list"
       },
       {
         "name": "Remove Nth Node From End of List",
-        "level": "M"
+        "level": "M",
+        "solution": "Remove Nth node from end of Linked List"
       },
       {
         "name": "Palindrome Linked List",
-        "level": "E"
+        "level": "E",
+        "solution": "Check whether a singly linked list is a palindrome"
       },
       {
         "name": "Reorder List",
@@ -351,19 +375,23 @@
       },
       {
         "name": "Add Two Numbers",
-        "level": "M"
+        "level": "M",
+        "solution": "Add two numbers represented by linked lists"
       },
       {
         "name": "Intersection of Two Linked Lists",
-        "level": "E"
+        "level": "E",
+        "solution": "Intersection point of two linked lists (shared node)"
       },
       {
         "name": "Copy List with Random Pointer",
-        "level": "M"
+        "level": "M",
+        "solution": "Clone a linked list with next and random pointers"
       },
       {
         "name": "Reverse Nodes in k-Group",
-        "level": "H"
+        "level": "H",
+        "solution": "Reverse a linked list in groups of size k"
       }
     ]
   },
@@ -373,11 +401,13 @@
     "problems": [
       {
         "name": "Maximum Depth of Binary Tree",
-        "level": "E"
+        "level": "E",
+        "solution": "Height, balance check, and mirror of a tree"
       },
       {
         "name": "Invert Binary Tree",
-        "level": "E"
+        "level": "E",
+        "solution": "Height, balance check, and mirror of a tree"
       },
       {
         "name": "Same Tree",
@@ -385,27 +415,33 @@
       },
       {
         "name": "Diameter of Binary Tree",
-        "level": "E"
+        "level": "E",
+        "solution": "Diameter of a Binary Tree"
       },
       {
         "name": "Balanced Binary Tree",
-        "level": "E"
+        "level": "E",
+        "solution": "Height, balance check, and mirror of a tree"
       },
       {
         "name": "Binary Tree Level Order Traversal",
-        "level": "M"
+        "level": "M",
+        "solution": "Level order traversal"
       },
       {
         "name": "Binary Tree Right Side View",
-        "level": "M"
+        "level": "M",
+        "solution": "Tree views — left, right, top, bottom, diagonal, boundary"
       },
       {
         "name": "Binary Tree Zigzag Level Order Traversal",
-        "level": "M"
+        "level": "M",
+        "solution": "All tree traversals — inorder, preorder, postorder (recursive & iterative), level order, zig-zag"
       },
       {
         "name": "Lowest Common Ancestor of a Binary Tree",
-        "level": "M"
+        "level": "M",
+        "solution": "Find the Lowest Common Ancestor in a Binary Tree"
       },
       {
         "name": "Path Sum II",
@@ -413,11 +449,13 @@
       },
       {
         "name": "Path Sum III (k-sum paths)",
-        "level": "M"
+        "level": "M",
+        "solution": "Path sums — longest root-to-leaf sum, largest subtree sum, max non-adjacent sum, K-sum paths"
       },
       {
         "name": "Construct Binary Tree from Preorder and Inorder",
-        "level": "M"
+        "level": "M",
+        "solution": "Construct a binary tree from inorder + preorder"
       },
       {
         "name": "Count Good Nodes in Binary Tree",
@@ -425,7 +463,8 @@
       },
       {
         "name": "Vertical Order Traversal (top / bottom view)",
-        "level": "H"
+        "level": "H",
+        "solution": "Tree views — left, right, top, bottom, diagonal, boundary"
       },
       {
         "name": "Binary Tree Maximum Path Sum",
@@ -443,11 +482,13 @@
     "problems": [
       {
         "name": "Validate Binary Search Tree",
-        "level": "M"
+        "level": "M",
+        "solution": "Check whether a binary tree is a BST or not"
       },
       {
         "name": "Kth Smallest Element in a BST",
-        "level": "M"
+        "level": "M",
+        "solution": "Kth smallest / Kth largest element in a BST"
       },
       {
         "name": "Lowest Common Ancestor of a BST",
@@ -455,7 +496,8 @@
       },
       {
         "name": "Delete Node in a BST",
-        "level": "M"
+        "level": "M",
+        "solution": "Delete a node from a BST"
       },
       {
         "name": "Convert Sorted Array to BST",
@@ -485,19 +527,23 @@
       },
       {
         "name": "Reorganize String",
-        "level": "M"
+        "level": "M",
+        "solution": "Rearrange a string so no two adjacent characters are the same"
       },
       {
         "name": "Merge k Sorted Lists",
-        "level": "H"
+        "level": "H",
+        "solution": "Merge K sorted linked lists"
       },
       {
         "name": "Kth Smallest Element in a Sorted Matrix",
-        "level": "M"
+        "level": "M",
+        "solution": "Kth smallest element in a row- and column-sorted matrix"
       },
       {
         "name": "Find Median from Data Stream",
-        "level": "H"
+        "level": "H",
+        "solution": "Median in a stream of integers"
       },
       {
         "name": "Smallest Range Covering Elements from K Lists",
@@ -523,11 +569,13 @@
       },
       {
         "name": "Clone Graph",
-        "level": "M"
+        "level": "M",
+        "solution": "Clone a graph"
       },
       {
         "name": "Rotting Oranges",
-        "level": "M"
+        "level": "M",
+        "solution": "Rotten oranges (minimum time to rot all)"
       },
       {
         "name": "Pacific Atlantic Water Flow",
@@ -539,11 +587,13 @@
       },
       {
         "name": "01 Matrix (distance to nearest 0)",
-        "level": "M"
+        "level": "M",
+        "solution": "Distance of the nearest 1 in a binary matrix"
       },
       {
         "name": "Is Graph Bipartite?",
-        "level": "M"
+        "level": "M",
+        "solution": "Check whether a graph is bipartite / the Two-Clique problem"
       },
       {
         "name": "Word Ladder",
@@ -561,11 +611,13 @@
       },
       {
         "name": "Course Schedule II",
-        "level": "M"
+        "level": "M",
+        "solution": "Topological sort of a DAG"
       },
       {
         "name": "Alien Dictionary",
-        "level": "H"
+        "level": "H",
+        "solution": "Alien dictionary — order of letters"
       },
       {
         "name": "Minimum Height Trees",
@@ -583,7 +635,8 @@
       },
       {
         "name": "Redundant Connection",
-        "level": "M"
+        "level": "M",
+        "solution": "Making wired connections / redundant connection (components)"
       },
       {
         "name": "Graph Valid Tree",
@@ -605,7 +658,8 @@
     "problems": [
       {
         "name": "Network Delay Time (Dijkstra)",
-        "level": "M"
+        "level": "M",
+        "solution": "Dijkstra's shortest paths"
       },
       {
         "name": "Cheapest Flights Within K Stops",
@@ -617,7 +671,8 @@
       },
       {
         "name": "Min Cost to Connect All Points (Prim / Kruskal)",
-        "level": "M"
+        "level": "M",
+        "solution": "Minimum spanning tree — Kruskal and Prim"
       }
     ]
   },
@@ -627,7 +682,8 @@
     "problems": [
       {
         "name": "Implement Trie (Prefix Tree)",
-        "level": "M"
+        "level": "M",
+        "solution": "Construct a trie (insert / search / startsWith)"
       },
       {
         "name": "Design Add and Search Words Data Structure",
@@ -681,11 +737,13 @@
       },
       {
         "name": "Palindrome Partitioning",
-        "level": "M"
+        "level": "M",
+        "solution": "Print all palindromic partitions of a string"
       },
       {
         "name": "N-Queens",
-        "level": "H"
+        "level": "H",
+        "solution": "N-Queens — all solutions"
       },
       {
         "name": "Sudoku Solver",
@@ -731,11 +789,13 @@
       },
       {
         "name": "Maximum Product Subarray",
-        "level": "M"
+        "level": "M",
+        "solution": "find maximum product subarray"
       },
       {
         "name": "Partition Equal Subset Sum",
-        "level": "M"
+        "level": "M",
+        "solution": "Knapsack family — 0/1 partition, unbounded, min cost to fill a bag, min removals for range"
       },
       {
         "name": "Best Time to Buy and Sell Stock with Cooldown",
@@ -753,7 +813,8 @@
       },
       {
         "name": "Minimum Path Sum",
-        "level": "M"
+        "level": "M",
+        "solution": "Grid path DP — Gold Mine, Min Cost Path, max square submatrix of 1s, maximum sum rectangle"
       },
       {
         "name": "Longest Common Subsequence",
@@ -777,11 +838,13 @@
       },
       {
         "name": "Interleaving String",
-        "level": "M"
+        "level": "M",
+        "solution": "String DP — longest common substring, LCS of three strings, space-optimised LCS, interleaving, boolean parenthesization"
       },
       {
         "name": "Maximal Square",
-        "level": "M"
+        "level": "M",
+        "solution": "Grid path DP — Gold Mine, Min Cost Path, max square submatrix of 1s, maximum sum rectangle"
       },
       {
         "name": "0/1 Knapsack",
@@ -803,7 +866,8 @@
     "problems": [
       {
         "name": "Maximum Subarray (Kadane)",
-        "level": "M"
+        "level": "M",
+        "solution": "Kadane's Algo"
       },
       {
         "name": "Jump Game",
@@ -811,11 +875,13 @@
       },
       {
         "name": "Jump Game II",
-        "level": "M"
+        "level": "M",
+        "solution": "Minimum number of jumps to reach the end"
       },
       {
         "name": "Gas Station",
-        "level": "M"
+        "level": "M",
+        "solution": "First circular tour that visits all petrol pumps"
       },
       {
         "name": "Partition Labels",
@@ -827,7 +893,8 @@
       },
       {
         "name": "Minimum Platforms",
-        "level": "M"
+        "level": "M",
+        "solution": "Minimum number of platforms"
       },
       {
         "name": "Candy",
@@ -891,7 +958,8 @@
       },
       {
         "name": "Single Number III (two non-repeating)",
-        "level": "M"
+        "level": "M",
+        "solution": "Find the two non-repeating elements (all others appear twice)"
       }
     ]
   },
@@ -901,11 +969,13 @@
     "problems": [
       {
         "name": "Spiral Matrix",
-        "level": "M"
+        "level": "M",
+        "solution": "Spiral traversal of a matrix"
       },
       {
         "name": "Rotate Image",
-        "level": "M"
+        "level": "M",
+        "solution": "Rotate a matrix by 90 degrees"
       },
       {
         "name": "Set Matrix Zeroes",
@@ -913,7 +983,8 @@
       },
       {
         "name": "Search a 2D Matrix II",
-        "level": "M"
+        "level": "M",
+        "solution": "Search an element in a matrix"
       },
       {
         "name": "Game of Life",

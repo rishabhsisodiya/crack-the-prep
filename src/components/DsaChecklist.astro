@@ -2,9 +2,9 @@
 // Tickable DSA problem list, grouped by topic. Progress lives in localStorage
 // under `storageKey`, so each list keeps its own state.
 import { solutions } from '../data/dsa-solutions.mjs';
-import { u } from '../consts';
+import { u, kebab } from '../consts';
 
-interface Problem { name: string; important?: boolean; level?: 'E' | 'M' | 'H' }
+interface Problem { name: string; solution?: string; important?: boolean; level?: 'E' | 'M' | 'H' }
 interface Group { topic: string; pattern?: string; problems: Problem[] }
 interface Props { groups: Group[]; storageKey: string }
 
@@ -16,7 +16,7 @@ const LEVEL = { E: 'Easy', M: 'Medium', H: 'Hard' } as const;
 
 const solvedBy = new Map<string, string>();
 for (const s of solutions as { problem: string; topic: string; also?: string[] }[]) {
-  const link = u(`/dsa/solutions/${slug(s.topic)}#${slug(s.problem)}`);
+  const link = u(`/dsa/solutions/${kebab(s.topic)}#${kebab(s.problem)}`);
   solvedBy.set(norm(s.problem), link);
   for (const a of s.also ?? []) solvedBy.set(norm(a), link);
 }
@@ -42,7 +42,7 @@ for (const s of solutions as { problem: string; topic: string; also?: string[] }
         <ul>
           {g.problems.map((p) => {
             const id = `${slug(g.topic)}::${slug(p.name)}`;
-            const sol = solvedBy.get(norm(p.name));
+            const sol = solvedBy.get(norm(p.solution ?? p.name));
             return (
               <li>
                 <label>

@@ -9,8 +9,10 @@
  * Seeded with the highest-frequency interview problems; grow over time.
  */
 
+import { coreSolutions } from './dsa-solutions-core.mjs';
+
 /** @type {{topic:string, problem:string, also?:string[], difficulty?:string, approaches:{name:string,idea:string,time:string,space:string,code:string,note?:string}[]}[]} */
-export const solutions = [
+const baseSolutions = [
   // ---------------------------------------------------------------- Array
   {
     topic: 'Array',
@@ -9097,3 +9099,6 @@ function has_common_square(A, B, k) {
     ],
   },
 ];
+
+// Interview Core problems not covered by the 450-sheet solutions above.
+export const solutions = [...baseSolutions, ...coreSolutions];
