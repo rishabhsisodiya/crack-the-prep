@@ -424,6 +424,3 @@ There is an eventbridge setup on s3 bucket. We can write a rule that whenever an
 [https://github.com/ashishps1/awesome-system-design-resources](https://github.com/ashishps1/awesome-system-design-resources)
 
 [https://github.com/ashishps1/awesome-low-level-design](https://github.com/ashishps1/awesome-low-level-design) [https://github.com/ashishps1/awesome-leetcode-resources](https://github.com/ashishps1/awesome-leetcode-resources) [https://github.com/ashishps1/awesome-behavioral](https://github.com/ashishps1/awesome-behavioral)
-
-75 design systems
-[https://docs.google.com/document/d/1oSK3nmie73FoMCAzC9JX3YunqsOoYP2Fzd5V7ijBcjM/edit?tab=t.0](https://docs.google.com/document/d/1oSK3nmie73FoMCAzC9JX3YunqsOoYP2Fzd5V7ijBcjM/edit?tab=t.0)
