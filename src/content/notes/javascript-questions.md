@@ -5521,7 +5521,7 @@ Only the **last** trailing comma is ignored; every other comma creates a slot.
 
 </details>
 
-#### Q128. [3] vs new Array(3) vs Array.of(3)
+#### Q128. `[3]` vs `new Array(3)` vs `Array.of(3)`
 
 ```js
 console.log([3]);

@@ -739,7 +739,7 @@ Add authentication using jsonwebtoken
 
 **},**
 
-### { timestamps: true }
+### `{ timestamps: true }`
 
 **);**
 
@@ -1761,7 +1761,7 @@ Now render the blogs on homepage
 
 **},**
 
-### { timestamps: true }
+### `{ timestamps: true }`
 
 **);**
 

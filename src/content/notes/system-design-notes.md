@@ -56,7 +56,9 @@ There are many algorithms but we will discuss below two:
 
 A token bucket is a container that has a predefined capacity. Tokens are then put into the bucket at certain rates either periodically or sporadically. Once the bucket is full, no more tokens are added. Finally, when the bucket is full, incoming requests are dropped (most likely go into DLQ or some sort of queues to re-process those messages) and this limits the incoming traffic at certain limits. Therefore, it is a great algorithm for Rate Limiter.
 
-![](/notes-img/system-design-notes/img-001.webp)![](/notes-img/system-design-notes/img-002.webp)
+![](/notes-img/system-design-notes/img-001.webp)
+
+![](/notes-img/system-design-notes/img-002.webp)
 
 ![](/notes-img/system-design-notes/img-003.webp)
 

@@ -29,7 +29,9 @@ x();
 
 In DevTools you can see that the function `y()` has `[[Scopes]]`, which contains `a`. So even when we return `y()` and use it later, it will still have `a` with the value 7.
 
-![](/notes-img/javascript-notes/img-013.webp)![](/notes-img/javascript-notes/img-014.webp)
+![](/notes-img/javascript-notes/img-013.webp)
+
+![](/notes-img/javascript-notes/img-014.webp)
 
 A **closure** is the combination of a function bundled together (enclosed) with references to its surrounding state (the lexical environment). In other words, a closure gives you access to an outer function's scope from an inner function. In JavaScript, closures are created every time a function is created, at function creation time. **So a function along with its lexical scope bundled together forms a closure.**
 

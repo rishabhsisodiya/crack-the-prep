@@ -10,7 +10,30 @@ import { fileURLToPath } from 'node:url';
 const DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../src/content/notes');
 const filter = process.argv[2];
 
-/** each rule: { id, level, test(line, ctx) -> bool, msg } ; ctx has {inFence, prev, next, lineNo} */
+/**
+ * Two stripped views of a line, so prose rules do not fire on things that are not prose.
+ *
+ *   noCode  inline code spans, image targets and link targets removed (link text kept).
+ *           Use for rules about raw markup left in prose, e.g. a stray <td>.
+ *   prose   as noCode, plus HTML/JSX tags and bare URLs removed.
+ *           Use for rules about wording. A path like /javascript/08-closure/ is not prose,
+ *           and must stay lowercase, so it must never reach a spelling rule.
+ */
+// Removed spans become "x", never a space: blanking `expires_at`; would leave " ;" and
+// look like a space before punctuation, which is how this stripping first went wrong.
+const stripCodeAndTargets = (l) =>
+  l
+    .replace(/`[^`]*`/g, 'x')                 // `inline code`
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, 'x')     // ![alt](path)
+    .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1');  // [text](path) -> text
+
+const stripToProse = (l) =>
+  stripCodeAndTargets(l)
+    .replace(/<[^>\s][^>]*>/g, 'x')           // <td>, <React.Fragment key={id}>
+    .replace(/https?:\/\/\S+/g, 'x')          // bare urls
+    .replace(/(^|\s)\/[\w/-]+/g, '$1x');      // bare paths like /notes-img/javascript-notes/a
+
+/** each rule: { id, level, test(line, ctx) -> bool, msg } ; ctx has {inFence, prose, noCode, prev, next, lineNo} */
 const RULES = [
   {
     id: 'broken-table-row',
@@ -42,7 +65,9 @@ const RULES = [
     msg: 'heading text looks like code (lost its fence?)',
     test: (l, c) => {
       if (c.inFence || !/^#{2,6}\s+/.test(l)) return false;
-      const t = l.replace(/^#{2,6}\s+/, '');
+      // backticks mean the author meant it to look like code
+      const t = l.replace(/^#{2,6}\s+/, '').replace(/`[^`]*`/g, '').trim();
+      if (!t) return false;
       return (
         /^\/\//.test(t) ||
         /[;{}]\s*$/.test(t) ||
@@ -106,19 +131,20 @@ const RULES = [
     id: 'space-before-punct',
     level: 'info',
     msg: 'space before , ; : or .',
-    test: (l, c) => !c.inFence && / +[,;:](?=\s)| +\.(?= |$)/.test(l) && !/https?:/.test(l),
+    test: (l, c) => !c.inFence && / +[,;:](?=\s)| +\.(?= |$)/.test(c.prose),
   },
   {
     id: 'lowercase-javascript',
     level: 'info',
     msg: '"javascript"/"Javascript" not capitalized as "JavaScript"',
-    test: (l, c) => !c.inFence && /\bjava\s?script\b/.test(l) && !/JavaScript/.test(l) && !/https?:/.test(l),
+    test: (l, c) => !c.inFence && /\bjava\s?script\b/.test(c.prose) && !/JavaScript/.test(c.prose),
   },
   {
     id: 'raw-table-tag',
     level: 'warn',
     msg: 'raw table tag in prose (table conversion leftover)',
-    test: (l, c) => !c.inFence && /<\/?(table|thead|tbody|tr|td|th)\b/.test(l),
+    // a tag inside backticks is prose talking about a tag, not a conversion leftover
+    test: (l, c) => !c.inFence && /<\/?(table|thead|tbody|tr|td|th)\b/.test(c.noCode),
   },
   {
     id: 'stacked-images',
@@ -155,6 +181,8 @@ function lintFile(file) {
     const ctx = {
       inFence,
       fenceLang,
+      noCode: inFence ? line : stripCodeAndTargets(line),
+      prose: inFence ? line : stripToProse(line),
       prev: lines[i - 1],
       next: lines[i + 1],
       after2: lines[i + 2],
