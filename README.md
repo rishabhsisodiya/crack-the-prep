@@ -21,21 +21,6 @@ worked examples in one place.
 Around 135 notes and question sets. JavaScript, React and Node.js each have a dedicated
 questions drill page. Everything is searchable from any page.
 
-## The code is checked, not just written
-
-Notes that claim code works usually have not been run. Here every deploy is blocked unless
-three checks pass:
-
-- **`npm run check:data`** — every DSA solution has a statement and no statement is orphaned,
-  every interview core problem resolves to a solution, solution anchors are unique, and
-  **every reference solution is executed against its test specs**.
-- **`npm run check:mc`** — for each Machine Coding page, the "Final code" block is extracted,
-  compiled with esbuild (JSX included) and run against that page's tests. If the answer on the
-  page does not work, the build fails.
-- **`npm run lint:notes`** — scans the notes for conversion artifacts and rough spots.
-
-`npm run check` runs all three, and CI runs it before building.
-
 ## Running it locally
 
 ```bash
@@ -50,6 +35,10 @@ npm run check      # data integrity, machine-coding tests, note linting
 npm run build      # astro build, then a Pagefind search index over dist/
 npm run preview    # serve the built site
 ```
+
+`npm run check` is what CI runs before deploying: it verifies the DSA solutions against
+their tests, compiles and runs the "Final code" from each Machine Coding page, and lints the
+notes. Run it before opening a pull request.
 
 Node 22, matching CI.
 
