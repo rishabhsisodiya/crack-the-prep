@@ -1,0 +1,61 @@
+---
+title: "How to Approach the Machine Coding Round"
+track: "machine-coding"
+kind: "notes"
+order: 1
+slug: "approach"
+updated: 2026-09-22
+description: "What the machine coding round tests, how it is scored, a 45-minute plan, and how to talk while you build."
+---
+
+import Callout from '../../components/Callout.astro';
+
+In a machine coding round you build something small but real, live, in 45–60 minutes: a polyfill (`Promise.all`), a utility (`debounce`), an async helper (a promise pool), or a UI component (autocomplete). Unlike a DSA round, the algorithm is rarely hard. What is scored is how you get from a vague prompt to working, readable, well-tested code.
+
+## What interviewers score
+
+| Signal | What it looks like |
+|---|---|
+| **Requirements** | You ask about edge cases and scope *before* coding, and write the agreed API down. |
+| **Working code first** | A simple version that runs, then improvements — not a half-finished "perfect" version. |
+| **Correctness under edge cases** | Empty input, errors, `this`, rapid calls, cleanup, cancellation. |
+| **Code quality** | Small functions, clear names, no copy-paste, sensible data structures. |
+| **Communication** | You explain decisions and trade-offs as you go. |
+| **Testing** | You run it, show examples, and try the edge cases yourself. |
+
+## A 45-minute plan
+
+1. **Clarify (5 min).** Restate the task. Ask the clarifying questions listed on each problem page. Agree on the function signature or component props and write them at the top of the file.
+2. **Sketch (3 min).** Say the approach in two or three sentences. Name the state you will keep (a timer id, a cache, a listener map).
+3. **Build the basic version (15 min).** Make the main path work end to end. Run it.
+4. **Extend (12 min).** Add the options and edge cases one step at a time — each step on the problem pages is one of these increments.
+5. **Test (5 min).** Run the examples, then the edge cases. Fix what breaks.
+6. **Discuss (5 min).** Complexity, trade-offs, what you would add with more time (types, tests, accessibility, performance).
+
+<Callout type="tip">
+Commit to a working version by the halfway mark. An interviewer can extend a working `debounce` with you; they cannot grade one that never ran.
+</Callout>
+
+## How to talk while you build
+
+- **Before a decision:** "I'll store the timer id in the closure so each debounced function has its own."
+- **When you skip something:** "I'm not handling `leading` yet — I'll add it after the basic version works."
+- **When you test:** "Let me call it three times quickly and check it only fires once."
+- **When stuck:** say what you are trying and what you expected. Interviewers often give a nudge once they can see your reasoning.
+
+## Common ways to lose points
+
+- Starting to code before agreeing on the API.
+- Losing `this` or arguments by using an arrow function in the wrong place.
+- Forgetting cleanup: timers, event listeners, subscriptions, `AbortController`.
+- Mutating inputs the caller still owns.
+- Silent failures — swallowing errors instead of rejecting or rethrowing.
+- For UI: no loading, empty or error state; no keyboard support.
+
+## How the problem pages are laid out
+
+Every problem follows the same sections, in the order you would work in the room:
+
+**Problem** → **Clarifying questions** → **Approach** → **Step-by-step build** → **Final code** → **Edge cases** → **Follow-ups** → **Common mistakes** → **Related**.
+
+Try each problem yourself before reading the build steps. The underlying language concepts (closures, `this`, prototypes, the event loop) are covered in the [JavaScript track](/javascript) — each page links to the relevant chapter.

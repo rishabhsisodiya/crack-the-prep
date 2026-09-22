@@ -1,0 +1,224 @@
+---
+title: "Autocomplete / Typeahead"
+track: "machine-coding"
+kind: "notes"
+order: 41
+slug: "autocomplete"
+imp: true
+updated: 2026-09-22
+description: "Build a React autocomplete — debounced fetching, cancelling stale requests, keyboard navigation, highlighting, and the ARIA combobox pattern."
+---
+
+import Callout from '../../components/Callout.astro';
+
+## Problem
+
+Build an `Autocomplete` component. As the user types, it fetches suggestions from `fetchSuggestions(query, signal)` and shows them in a list. The user can pick one with the mouse or keyboard:
+
+```jsx
+<Autocomplete
+  fetchSuggestions={(q, signal) => fetch(`/api/search?q=${encodeURIComponent(q)}`, { signal }).then((r) => r.json())}
+  onSelect={(item) => console.log('picked', item)}
+/>
+```
+
+## Clarifying questions
+
+- Minimum characters before searching? Debounce delay? *e.g. 1 character, 300 ms.*
+- What if responses arrive out of order? *Only the latest query's results may be shown.*
+- Keyboard support: ↑/↓ to move, Enter to select, Escape to close? *Yes — and it must be accessible to screen readers.*
+- Highlight the matching part of each suggestion? *Nice to have.*
+- Cache previous queries? *Follow-up.*
+- Loading, empty and error states? *Yes, all three.*
+
+## Approach
+
+Split the work: a `useDebouncedValue` hook turns fast keystrokes into one query; an effect fetches for the debounced query and **aborts the previous request** with `AbortController`, so a slow old response can never overwrite a newer one. The component keeps the list, the active index and the open/closed state. Pure helpers handle index wrapping and match highlighting, so they are easy to test.
+
+## Step-by-step build
+
+### Step 1 — debounce the input
+
+```jsx
+function useDebouncedValue(value, delay) {
+  const [debounced, setDebounced] = useState(value);
+  useEffect(() => {
+    const t = setTimeout(() => setDebounced(value), delay);
+    return () => clearTimeout(t);          // a new keystroke cancels the pending update
+  }, [value, delay]);
+  return debounced;
+}
+```
+
+### Step 2 — fetch, ignoring stale responses
+
+```jsx
+useEffect(() => {
+  if (query.trim().length < minChars) { setItems([]); return; }
+  const controller = new AbortController();
+  setStatus('loading');
+  fetchSuggestions(query, controller.signal)
+    .then((data) => { setItems(data); setStatus('success'); })
+    .catch((e) => { if (e.name !== 'AbortError') setStatus('error'); });
+  return () => controller.abort();         // query changed → cancel the old request
+}, [query]);
+```
+
+### Step 3 — keyboard navigation
+
+```js
+function moveIndex(current, delta, length) {
+  if (length === 0) return -1;
+  if (current === -1) return delta > 0 ? 0 : length - 1;
+  return (current + delta + length) % length;   // wrap around
+}
+```
+
+### Step 4 — highlight and ARIA
+
+`highlight(text, query)` splits a label into matching and non-matching parts. The input gets `role="combobox"`, `aria-expanded`, `aria-controls` and `aria-activedescendant`; the list gets `role="listbox"` and each item `role="option"` with `aria-selected`.
+
+## Final code
+
+```jsx
+import { useEffect, useId, useState } from 'react';
+
+export function moveIndex(current, delta, length) {
+  if (length === 0) return -1;
+  if (current === -1) return delta > 0 ? 0 : length - 1;
+  return (current + delta + length) % length;
+}
+
+// Split text into [{ text, match }] parts for the first case-insensitive match of query.
+export function highlight(text, query) {
+  const q = query.trim().toLowerCase();
+  const i = q ? text.toLowerCase().indexOf(q) : -1;
+  if (i === -1) return [{ text, match: false }];
+  return [
+    { text: text.slice(0, i), match: false },
+    { text: text.slice(i, i + q.length), match: true },
+    { text: text.slice(i + q.length), match: false },
+  ].filter((p) => p.text);
+}
+
+export function useDebouncedValue(value, delay) {
+  const [debounced, setDebounced] = useState(value);
+  useEffect(() => {
+    const t = setTimeout(() => setDebounced(value), delay);
+    return () => clearTimeout(t);
+  }, [value, delay]);
+  return debounced;
+}
+
+export function Autocomplete({ fetchSuggestions, onSelect, getLabel = (x) => String(x), minChars = 1, delay = 300 }) {
+  const [input, setInput] = useState('');
+  const [items, setItems] = useState([]);
+  const [status, setStatus] = useState('idle'); // idle | loading | success | error
+  const [active, setActive] = useState(-1);
+  const [open, setOpen] = useState(false);
+  const query = useDebouncedValue(input, delay);
+  const listId = useId();
+
+  useEffect(() => {
+    if (query.trim().length < minChars) {
+      setItems([]);
+      setStatus('idle');
+      return;
+    }
+    const controller = new AbortController();
+    setStatus('loading');
+    fetchSuggestions(query, controller.signal)
+      .then((data) => {
+        setItems(data);
+        setActive(-1);
+        setStatus('success');
+      })
+      .catch((e) => {
+        if (e.name !== 'AbortError') setStatus('error');
+      });
+    return () => controller.abort();
+  }, [query, minChars, fetchSuggestions]);
+
+  const choose = (item) => {
+    setInput(getLabel(item));
+    setOpen(false);
+    onSelect?.(item);
+  };
+
+  const onKeyDown = (e) => {
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      setOpen(true);
+      setActive((i) => moveIndex(i, e.key === 'ArrowDown' ? 1 : -1, items.length));
+    } else if (e.key === 'Enter' && open && active >= 0) {
+      e.preventDefault();
+      choose(items[active]);
+    } else if (e.key === 'Escape') {
+      setOpen(false);
+    }
+  };
+
+  const showList = open && query.trim().length >= minChars;
+  return (
+    <div className="ac">
+      <input
+        role="combobox"
+        aria-expanded={showList}
+        aria-controls={listId}
+        aria-autocomplete="list"
+        aria-activedescendant={active >= 0 ? `${listId}-${active}` : undefined}
+        value={input}
+        onChange={(e) => { setInput(e.target.value); setOpen(true); }}
+        onKeyDown={onKeyDown}
+        onBlur={() => setOpen(false)}
+      />
+      {showList && (
+        <ul id={listId} role="listbox" className="ac-list">
+          {status === 'loading' && <li className="ac-msg">Loading…</li>}
+          {status === 'error' && <li className="ac-msg">Could not load suggestions.</li>}
+          {status === 'success' && items.length === 0 && <li className="ac-msg">No results</li>}
+          {status === 'success' && items.map((item, i) => (
+            <li
+              key={getLabel(item)}
+              id={`${listId}-${i}`}
+              role="option"
+              aria-selected={i === active}
+              onMouseDown={(e) => e.preventDefault()}   // keep focus in the input
+              onClick={() => choose(item)}
+            >
+              {highlight(getLabel(item), query).map((p, j) => (p.match ? <mark key={j}>{p.text}</mark> : <span key={j}>{p.text}</span>))}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+```
+
+## Edge cases
+
+- Typing fast sends one request per pause, not per keystroke.
+- A slow response for "ap" arriving after "app" is aborted, so it cannot overwrite newer results.
+- Clearing the input closes the list and drops the old results.
+- Blur closes the list, but `onMouseDown` + `preventDefault` stops the blur from swallowing a click on an item.
+- Special characters in the query are URL-encoded by the caller (`encodeURIComponent`).
+
+## Follow-ups
+
+- *Cache:* keep a `Map` of query → results (and serve "app" results instantly on backspace). See [memoize](/machine-coding/memoize).
+- *Stale-while-revalidate:* show cached results immediately, refresh in the background.
+- *Virtualise* very long lists.
+- *Without AbortController:* compare a request id captured in the effect with the latest id before setting state.
+
+## Common mistakes
+
+- Debouncing the fetch function but creating a new debounced function every render.
+- Not handling out-of-order responses.
+- Using the array index as the React `key` for results that change.
+- No keyboard support or ARIA roles — screen-reader users cannot use it.
+
+## Related
+
+- Uses: [debounce](/machine-coding/debounce).
+- Next: [infinite scroll](/machine-coding/infinite-scroll).

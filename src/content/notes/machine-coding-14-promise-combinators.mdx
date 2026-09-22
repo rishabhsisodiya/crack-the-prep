@@ -1,0 +1,193 @@
+---
+title: "Polyfill: Promise.all, allSettled, race and any"
+track: "machine-coding"
+kind: "notes"
+order: 14
+slug: "promise-combinators"
+imp: true
+updated: 2026-09-22
+description: "Implement the four Promise combinators — result order, empty input, non-promise values, fail-fast and AggregateError."
+---
+
+import Callout from '../../components/Callout.astro';
+
+## Problem
+
+Implement `promiseAll`, `promiseAllSettled`, `promiseRace` and `promiseAny`, each taking an iterable of promises (or plain values) and returning a promise:
+
+```js
+const wait = (ms, v, fail) => new Promise((res, rej) => setTimeout(() => (fail ? rej(v) : res(v)), ms));
+
+await promiseAll([wait(30, 'a'), 'b', wait(10, 'c')]);   // ['a', 'b', 'c'] — input order
+await promiseAllSettled([wait(10, 1), wait(5, 'x', true)]);
+// [{ status: 'fulfilled', value: 1 }, { status: 'rejected', reason: 'x' }]
+await promiseRace([wait(30, 'slow'), wait(10, 'fast')]); // 'fast'
+await promiseAny([wait(5, 'e1', true), wait(20, 'ok')]); // 'ok'
+```
+
+## Clarifying questions
+
+- Can the input contain plain values? *Yes — treat them as already-fulfilled.*
+- Is the input an array or any iterable? *Any iterable; convert with `Array.from`.*
+- What should an empty input do? *`all` / `allSettled` resolve with `[]`; `any` rejects with `AggregateError`; `race` stays pending forever.*
+- Should `all` stop at the first rejection? *Yes — reject immediately with that error.*
+
+## Approach
+
+Wrap every item with `Promise.resolve(item)` so values and promises are handled the same way. Keep results **by index**, not in completion order, and count how many have settled. The four functions differ only in what settles the outer promise:
+
+| | Resolves when | Rejects when |
+|---|---|---|
+| `all` | every item fulfils | the first item rejects |
+| `allSettled` | every item settles | never |
+| `race` | the first item fulfils | the first item rejects |
+| `any` | the first item fulfils | every item rejects (`AggregateError`) |
+
+## Step-by-step build
+
+### Step 1 — promiseAll
+
+```js
+function promiseAll(iterable) {
+  return new Promise((resolve, reject) => {
+    const items = Array.from(iterable);
+    const results = new Array(items.length);
+    let remaining = items.length;
+    if (remaining === 0) return resolve(results);
+    items.forEach((item, i) => {
+      Promise.resolve(item).then((value) => {
+        results[i] = value;                 // index keeps input order
+        if (--remaining === 0) resolve(results);
+      }, reject);                           // first rejection wins
+    });
+  });
+}
+```
+
+### Step 2 — promiseAllSettled
+
+Never rejects: each item records its outcome.
+
+```js
+function promiseAllSettled(iterable) {
+  return promiseAll(
+    Array.from(iterable, (item) =>
+      Promise.resolve(item).then(
+        (value) => ({ status: 'fulfilled', value }),
+        (reason) => ({ status: 'rejected', reason }),
+      ),
+    ),
+  );
+}
+```
+
+### Step 3 — promiseRace
+
+```js
+function promiseRace(iterable) {
+  return new Promise((resolve, reject) => {
+    for (const item of iterable) Promise.resolve(item).then(resolve, reject);
+  });
+}
+```
+
+Calling `resolve` or `reject` more than once is harmless: a promise settles only once.
+
+### Step 4 — promiseAny
+
+The mirror image of `all`: count rejections instead of fulfilments.
+
+```js
+function promiseAny(iterable) {
+  return new Promise((resolve, reject) => {
+    const items = Array.from(iterable);
+    const errors = new Array(items.length);
+    let remaining = items.length;
+    if (remaining === 0) return reject(new AggregateError([], 'All promises were rejected'));
+    items.forEach((item, i) => {
+      Promise.resolve(item).then(resolve, (e) => {
+        errors[i] = e;
+        if (--remaining === 0) reject(new AggregateError(errors, 'All promises were rejected'));
+      });
+    });
+  });
+}
+```
+
+## Final code
+
+```js
+function promiseAll(iterable) {
+  return new Promise((resolve, reject) => {
+    const items = Array.from(iterable);
+    const results = new Array(items.length);
+    let remaining = items.length;
+    if (remaining === 0) return resolve(results);
+    items.forEach((item, i) => {
+      Promise.resolve(item).then((value) => {
+        results[i] = value;
+        if (--remaining === 0) resolve(results);
+      }, reject);
+    });
+  });
+}
+
+function promiseAllSettled(iterable) {
+  return promiseAll(
+    Array.from(iterable, (item) =>
+      Promise.resolve(item).then(
+        (value) => ({ status: 'fulfilled', value }),
+        (reason) => ({ status: 'rejected', reason }),
+      ),
+    ),
+  );
+}
+
+function promiseRace(iterable) {
+  return new Promise((resolve, reject) => {
+    for (const item of iterable) Promise.resolve(item).then(resolve, reject);
+  });
+}
+
+function promiseAny(iterable) {
+  return new Promise((resolve, reject) => {
+    const items = Array.from(iterable);
+    const errors = new Array(items.length);
+    let remaining = items.length;
+    if (remaining === 0) return reject(new AggregateError([], 'All promises were rejected'));
+    items.forEach((item, i) => {
+      Promise.resolve(item).then(resolve, (e) => {
+        errors[i] = e;
+        if (--remaining === 0) reject(new AggregateError(errors, 'All promises were rejected'));
+      });
+    });
+  });
+}
+```
+
+## Edge cases
+
+- Empty input: `all` → `[]`, `allSettled` → `[]`, `any` → `AggregateError`, `race` → pending forever.
+- Plain values mixed with promises: `Promise.resolve` wraps them.
+- Results must follow input order even when later items finish first.
+- A rejection in `all` after it has already rejected is ignored — but the other promises keep running; `all` does not cancel them.
+- Iterables such as a `Set` or a generator work because of `Array.from` / `for…of`.
+
+## Follow-ups
+
+- *Cancel the remaining work when `all` fails.* Pass an `AbortController` signal to the tasks and abort in the rejection handler.
+- *Limit concurrency.* That is a different problem — see a promise pool (coming in the Async section).
+- *`all` with a timeout.* Race `promiseAll(...)` against a promise that rejects after `ms`.
+- *Why is `allSettled` built on top of `all`?* Every mapped promise fulfils, so `all` can never reject — reuse instead of duplication.
+
+## Common mistakes
+
+- Pushing results in completion order (`results.push(value)`) instead of by index.
+- Checking `results.length === items.length` to detect completion — sparse assignment makes `length` jump early. Use a counter.
+- Forgetting the empty-input case, so `promiseAll([])` never resolves.
+- Calling `.then` directly on items without `Promise.resolve`, which breaks on plain values.
+
+## Related
+
+- Concepts: [Promise.all, allSettled, race and any](/javascript/questions) in the JavaScript questions.
+- Builds on: [Promise polyfill](/machine-coding/promise).

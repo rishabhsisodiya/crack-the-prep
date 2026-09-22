@@ -1,0 +1,181 @@
+---
+title: "Event Emitter"
+track: "machine-coding"
+kind: "notes"
+order: 27
+slug: "event-emitter"
+imp: true
+updated: 2026-09-22
+description: "Build a Node-style EventEmitter — on, off, once, emit, unsubscribe handles, and removing listeners safely while emitting."
+---
+
+import Callout from '../../components/Callout.astro';
+
+## Problem
+
+Implement an `EventEmitter` class with `on`, `off`, `once` and `emit`:
+
+```js
+const bus = new EventEmitter();
+const greet = (name) => console.log('hi', name);
+
+bus.on('join', greet);
+bus.once('join', (name) => console.log('first join:', name));
+bus.emit('join', 'Asha');   // "hi Asha", "first join: Asha"
+bus.emit('join', 'Ravi');   // "hi Ravi"
+bus.off('join', greet);
+bus.emit('join', 'Mia');    // nothing
+```
+
+## Clarifying questions
+
+- Should `on` return an unsubscribe function? *Handy — many interviewers like it.*
+- Can the same listener be added twice? *Node allows it (it runs twice); agree on the behaviour.*
+- What does `emit` return? *`true` if there were listeners, like Node.*
+- What if a listener throws? *Let it throw (Node) or catch and continue — agree first.*
+
+## Approach
+
+Store a `Map` from event name to an array of listeners. `on` pushes, `off` removes, `emit` calls each listener with the arguments. `once` registers a wrapper that removes itself before calling the real listener. `emit` must iterate over a **copy** of the array, because listeners may add or remove listeners while it runs.
+
+## Step-by-step build
+
+### Step 1 — on and emit
+
+```js
+class EventEmitter {
+  #events = new Map();
+
+  on(name, listener) {
+    if (!this.#events.has(name)) this.#events.set(name, []);
+    this.#events.get(name).push(listener);
+    return this;
+  }
+
+  emit(name, ...args) {
+    const listeners = this.#events.get(name);
+    if (!listeners || listeners.length === 0) return false;
+    for (const l of [...listeners]) l.apply(this, args);   // copy: safe against changes
+    return true;
+  }
+}
+```
+
+### Step 2 — off
+
+```js
+off(name, listener) {
+  const listeners = this.#events.get(name);
+  if (!listeners) return this;
+  const i = listeners.findIndex((l) => l === listener || l.original === listener);
+  if (i !== -1) listeners.splice(i, 1);   // remove one registration
+  if (listeners.length === 0) this.#events.delete(name);
+  return this;
+}
+```
+
+### Step 3 — once
+
+The wrapper keeps a reference to the original so `off(name, original)` can remove a `once` listener too.
+
+```js
+once(name, listener) {
+  const wrapper = (...args) => {
+    this.off(name, wrapper);
+    listener.apply(this, args);
+  };
+  wrapper.original = listener;
+  return this.on(name, wrapper);
+}
+```
+
+### Step 4 — unsubscribe handle
+
+```js
+subscribe(name, listener) {
+  this.on(name, listener);
+  return () => this.off(name, listener);
+}
+```
+
+## Final code
+
+```js
+class EventEmitter {
+  #events = new Map();
+
+  on(name, listener) {
+    if (typeof listener !== 'function') throw new TypeError('listener must be a function');
+    if (!this.#events.has(name)) this.#events.set(name, []);
+    this.#events.get(name).push(listener);
+    return this;
+  }
+
+  once(name, listener) {
+    const wrapper = (...args) => {
+      this.off(name, wrapper);
+      listener.apply(this, args);
+    };
+    wrapper.original = listener;
+    return this.on(name, wrapper);
+  }
+
+  off(name, listener) {
+    const listeners = this.#events.get(name);
+    if (!listeners) return this;
+    const i = listeners.findIndex((l) => l === listener || l.original === listener);
+    if (i !== -1) listeners.splice(i, 1);
+    if (listeners.length === 0) this.#events.delete(name);
+    return this;
+  }
+
+  emit(name, ...args) {
+    const listeners = this.#events.get(name);
+    if (!listeners || listeners.length === 0) return false;
+    for (const l of [...listeners]) l.apply(this, args);
+    return true;
+  }
+
+  subscribe(name, listener) {
+    this.on(name, listener);
+    return () => this.off(name, listener);
+  }
+
+  removeAllListeners(name) {
+    if (name === undefined) this.#events.clear();
+    else this.#events.delete(name);
+    return this;
+  }
+
+  listenerCount(name) {
+    return this.#events.get(name)?.length ?? 0;
+  }
+}
+```
+
+## Edge cases
+
+- A listener that removes itself (or another) during `emit` does not make the loop skip anyone — `emit` iterates a copy.
+- A `once` listener fires exactly once, even if the event is emitted again from inside it.
+- `off` for a listener that was never added is a no-op.
+- The same function added twice runs twice and needs two `off` calls, matching Node.
+- Emitting an event nobody listens to returns `false`.
+
+## Follow-ups
+
+- *Memory leaks:* listeners keep closures alive — why must components unsubscribe on unmount? Node warns above 10 listeners per event (`setMaxListeners`).
+- *Error handling:* Node throws if `'error'` is emitted with no listener. Add that rule.
+- *Wildcards:* `on('user:*', …)` — match names with a pattern on `emit`.
+- *Async emit:* run listeners in microtasks, or `await` them in order.
+
+## Common mistakes
+
+- Iterating the live array during `emit`, so a self-removing `once` listener skips the next listener.
+- Removing every copy of a listener instead of one registration.
+- `off` that cannot remove a `once` listener because only the wrapper is stored.
+- Arrow-function methods that break `this` when a method is passed around.
+
+## Related
+
+- Concepts: closures and `this` in the [JavaScript track](/javascript).
+- Node's built-in [events module](/nodejs) works the same way.

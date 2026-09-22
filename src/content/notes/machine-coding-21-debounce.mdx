@@ -1,0 +1,176 @@
+---
+title: "Debounce"
+track: "machine-coding"
+kind: "notes"
+order: 21
+slug: "debounce"
+imp: true
+updated: 2026-09-22
+description: "Build debounce step by step — trailing call, this and arguments, cancel and flush, then the leading option."
+---
+
+import Callout from '../../components/Callout.astro';
+
+## Problem
+
+Implement `debounce(fn, wait, options?)`. The returned function delays calling `fn` until `wait` ms have passed since the **last** call. Typical use: run a search only after the user stops typing.
+
+```js
+const save = debounce((text) => console.log('saving', text), 300);
+save('h'); save('he'); save('hel');   // only "saving hel", 300 ms after the last call
+save.cancel();                        // drop a pending call
+save.flush();                         // run a pending call now
+```
+
+## Clarifying questions
+
+- Trailing only, or also a `leading` option (fire on the first call, then wait)? *Start trailing; add `leading` as an extension.*
+- Must `this` and the latest arguments be passed to `fn`? *Yes.*
+- Do we need `cancel()` and `flush()`? *Often asked as a follow-up — plan for them.*
+- Should the debounced function return `fn`'s result? *Return the last result (it cannot return the future one).*
+
+## Approach
+
+Keep one timer id in a closure. Every call clears the previous timer and starts a new one, so `fn` only runs once the calls stop for `wait` ms. Store the latest `this` and arguments so the delayed call uses them.
+
+## Step-by-step build
+
+### Step 1 — basic trailing debounce
+
+```js
+function debounce(fn, wait) {
+  let timer;
+  return (...args) => {
+    clearTimeout(timer);
+    timer = setTimeout(() => fn(...args), wait);
+  };
+}
+```
+
+### Step 2 — keep `this`
+
+An arrow function captures the wrong `this`. Use a regular function and remember the context.
+
+```js
+function debounce(fn, wait) {
+  let timer;
+  return function (...args) {
+    clearTimeout(timer);
+    timer = setTimeout(() => fn.apply(this, args), wait);
+  };
+}
+```
+
+### Step 3 — cancel and flush
+
+```js
+function debounce(fn, wait) {
+  let timer = null, lastArgs, lastThis;
+  const invoke = () => {
+    timer = null;
+    const args = lastArgs, ctx = lastThis;
+    lastArgs = lastThis = undefined;
+    return fn.apply(ctx, args);
+  };
+  function debounced(...args) {
+    lastArgs = args;
+    lastThis = this;
+    clearTimeout(timer);
+    timer = setTimeout(invoke, wait);
+  }
+  debounced.cancel = () => { clearTimeout(timer); timer = null; lastArgs = lastThis = undefined; };
+  debounced.flush = () => { if (timer !== null) { clearTimeout(timer); return invoke(); } };
+  return debounced;
+}
+```
+
+### Step 4 — the leading option
+
+With `leading: true`, the first call of a burst runs immediately. With `trailing: false` too, no call runs at the end of the burst.
+
+```js
+function debounced(...args) {
+  lastArgs = args;
+  lastThis = this;
+  const isFirst = timer === null;       // no burst in progress
+  clearTimeout(timer);
+  timer = setTimeout(() => {
+    timer = null;
+    if (trailing && lastArgs) invoke();  // only if calls arrived after the leading one
+  }, wait);
+  if (leading && isFirst) invoke();      // invoke clears lastArgs
+}
+```
+
+## Final code
+
+```js
+function debounce(fn, wait = 0, { leading = false, trailing = true } = {}) {
+  let timer = null;
+  let lastArgs;
+  let lastThis;
+  let result;
+
+  function invoke() {
+    const args = lastArgs, ctx = lastThis;
+    lastArgs = lastThis = undefined;
+    result = fn.apply(ctx, args);
+    return result;
+  }
+
+  function debounced(...args) {
+    lastArgs = args;
+    lastThis = this;
+    const isFirst = timer === null;
+    clearTimeout(timer);
+    timer = setTimeout(() => {
+      timer = null;
+      if (trailing && lastArgs) invoke();
+    }, wait);
+    if (leading && isFirst) invoke();
+    return result;
+  }
+
+  debounced.cancel = () => {
+    clearTimeout(timer);
+    timer = null;
+    lastArgs = lastThis = undefined;
+  };
+
+  debounced.flush = () => {
+    if (timer === null) return result;
+    clearTimeout(timer);
+    timer = null;
+    return lastArgs ? invoke() : result;
+  };
+
+  return debounced;
+}
+```
+
+## Edge cases
+
+- `wait = 0` still defers to the next macrotask.
+- `leading: true, trailing: true` with a single call runs `fn` once, not twice — `invoke` clears `lastArgs`.
+- `leading: false, trailing: false` never calls `fn`; point it out as a meaningless configuration.
+- `cancel()` after the timer fired is a no-op.
+- In React, create the debounced function once (`useMemo` / `useRef`) and cancel it on unmount — otherwise every render makes a new timer.
+
+## Follow-ups
+
+- *Debounce vs throttle:* debounce waits for silence; throttle runs at most once per interval during continuous calls — see [throttle](/machine-coding/throttle).
+- *`maxWait`:* guarantee a call at least every `maxWait` ms even while calls keep coming (lodash has it) — track the burst start time.
+- *Return a promise* that resolves with the eventual result, rejecting superseded calls.
+- *Build `useDebouncedValue(value, delay)`* as a React hook.
+
+## Common mistakes
+
+- Arrow function as the returned function, losing `this`.
+- Using the first call's arguments instead of the latest.
+- Creating the timer variable inside the returned function, so every call has its own timer and nothing is debounced.
+- Forgetting cleanup in components, so a delayed call runs after unmount.
+
+## Related
+
+- Concepts: [debouncing and throttling](/javascript/19-debouncing-throttling) and [closures](/javascript/08-closure) in the JavaScript track.
+- Next: [throttle](/machine-coding/throttle).

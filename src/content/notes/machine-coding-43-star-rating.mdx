@@ -1,0 +1,177 @@
+---
+title: "Star Rating"
+track: "machine-coding"
+kind: "notes"
+order: 43
+slug: "star-rating"
+updated: 2026-09-22
+description: "A controlled, accessible star rating in React — hover preview, keyboard support, read-only mode and a radio-group pattern."
+---
+
+import Callout from '../../components/Callout.astro';
+
+## Problem
+
+Build a `StarRating` component. It shows `max` stars; clicking a star sets the rating; hovering previews it; it can be read-only:
+
+```jsx
+const [rating, setRating] = useState(3);
+<StarRating value={rating} onChange={setRating} max={5} />
+<StarRating value={4} readOnly />
+```
+
+## Clarifying questions
+
+- Controlled (`value` + `onChange`) or uncontrolled? *Controlled — the parent owns the rating.*
+- Half stars? *Follow-up.*
+- Can the user clear the rating (click the current star again)? *Agree on it — here, yes.*
+- Keyboard and screen-reader support? *Yes: arrow keys, and announce "3 of 5 stars".*
+
+## Approach
+
+Render `max` buttons. A local `hover` value (or `null`) previews the rating; the displayed rating is `hover ?? value`. Keyboard handling is a pure function mapping the current value and a key to the next value, so it can be tested without rendering. The container uses `role="radiogroup"`, each star `role="radio"` with `aria-checked`, and roving `tabIndex` so Tab enters the group once.
+
+## Step-by-step build
+
+### Step 1 — render and click
+
+```jsx
+function StarRating({ value, onChange, max = 5 }) {
+  return (
+    <div>
+      {Array.from({ length: max }, (_, i) => (
+        <button key={i} onClick={() => onChange(i + 1)}>{i < value ? '★' : '☆'}</button>
+      ))}
+    </div>
+  );
+}
+```
+
+### Step 2 — hover preview
+
+```jsx
+const [hover, setHover] = useState(null);
+const shown = hover ?? value;
+// onMouseEnter={() => setHover(i + 1)}  onMouseLeave on the container → setHover(null)
+```
+
+### Step 3 — keyboard
+
+```js
+function nextRating(value, key, max) {
+  switch (key) {
+    case 'ArrowRight': case 'ArrowUp': return Math.min(max, value + 1);
+    case 'ArrowLeft': case 'ArrowDown': return Math.max(1, value - 1);
+    case 'Home': return 1;
+    case 'End': return max;
+    default: return value;
+  }
+}
+```
+
+### Step 4 — ARIA and read-only
+
+`role="radiogroup"` with an `aria-label`; each star `role="radio"`, `aria-checked={value === i + 1}`, `aria-label="3 stars"`. In read-only mode render plain elements with `role="img"` and `aria-label="4 out of 5 stars"`.
+
+## Final code
+
+```jsx
+import { useState } from 'react';
+
+export function nextRating(value, key, max) {
+  switch (key) {
+    case 'ArrowRight':
+    case 'ArrowUp':
+      return Math.min(max, value + 1);
+    case 'ArrowLeft':
+    case 'ArrowDown':
+      return Math.max(1, value - 1);
+    case 'Home':
+      return 1;
+    case 'End':
+      return max;
+    default:
+      return value;
+  }
+}
+
+// Clicking the current rating clears it (0); any other star sets it.
+export function ratingAfterClick(value, star) {
+  return star === value ? 0 : star;
+}
+
+export function StarRating({ value = 0, onChange, max = 5, readOnly = false, label = 'Rating' }) {
+  const [hover, setHover] = useState(null);
+  const shown = hover ?? value;
+
+  if (readOnly) {
+    return (
+      <span role="img" aria-label={`${value} out of ${max} stars`}>
+        {Array.from({ length: max }, (_, i) => (i < value ? '★' : '☆')).join('')}
+      </span>
+    );
+  }
+
+  const focusIndex = Math.max(0, value - 1); // roving tabindex: only one star is tabbable
+  return (
+    <div
+      role="radiogroup"
+      aria-label={label}
+      onMouseLeave={() => setHover(null)}
+      onKeyDown={(e) => {
+        const next = nextRating(value, e.key, max);
+        if (next !== value) {
+          e.preventDefault();
+          onChange(next);
+          e.currentTarget.querySelectorAll('[role="radio"]')[next - 1]?.focus();
+        }
+      }}
+    >
+      {Array.from({ length: max }, (_, i) => {
+        const star = i + 1;
+        return (
+          <button
+            key={star}
+            type="button"
+            role="radio"
+            aria-checked={value === star}
+            aria-label={`${star} star${star > 1 ? 's' : ''}`}
+            tabIndex={i === focusIndex ? 0 : -1}
+            onMouseEnter={() => setHover(star)}
+            onClick={() => onChange(ratingAfterClick(value, star))}
+            className={star <= shown ? 'star filled' : 'star'}
+          >
+            {star <= shown ? '★' : '☆'}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+```
+
+## Edge cases
+
+- `value = 0` (no rating): the first star is the tab stop.
+- Hover preview never changes the real value; leaving the group restores it.
+- Arrow keys stop at 1 and `max` rather than wrapping.
+- Read-only mode has no buttons, so it is not focusable and not clickable.
+- Clicking the current star clears the rating — make it obvious in the UI or drop the behaviour.
+
+## Follow-ups
+
+- *Half stars:* use the pointer's x position inside a star (`offsetX < width / 2`) and render a half-filled icon.
+- *Uncontrolled mode:* accept `defaultValue` and keep internal state when `value` is not passed.
+- *Why buttons, not divs?* Buttons are focusable and respond to Enter/Space for free.
+- *Native alternative:* a group of `<input type="radio">` styled as stars — accessibility built in.
+
+## Common mistakes
+
+- Every star is a Tab stop, so keyboard users must press Tab five times to get past it.
+- Hover state that overwrites the actual value.
+- Stars as `<span onClick>` — no keyboard access, no semantics.
+- Fixed at five stars instead of a `max` prop.
+
+## Related
+
+- Next: [nested file tree](/machine-coding/file-tree).

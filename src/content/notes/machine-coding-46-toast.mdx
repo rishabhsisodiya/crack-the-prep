@@ -1,0 +1,203 @@
+---
+title: "Toast Notification System"
+track: "machine-coding"
+kind: "notes"
+order: 46
+slug: "toast"
+imp: true
+updated: 2026-09-22
+description: "A toast system in React — a provider and useToast hook, a reducer with a visible limit, auto-dismiss that pauses on hover, and live-region announcements."
+---
+
+import Callout from '../../components/Callout.astro';
+
+## Problem
+
+Build a toast (snackbar) system. Any component can show a notification that disappears after a few seconds:
+
+```jsx
+function App() {
+  return <ToastProvider max={3}><SaveButton /></ToastProvider>;
+}
+
+function SaveButton() {
+  const toast = useToast();
+  return <button onClick={() => toast.show('Saved!', { type: 'success' })}>Save</button>;
+}
+```
+
+## Clarifying questions
+
+- How long does a toast stay? *Default 3 s; `duration: Infinity` for sticky ones.*
+- Maximum visible at once? *e.g. 3; extra toasts wait in a queue.*
+- Pause the timer on hover? *Yes — users need time to read.*
+- Can toasts contain an action (e.g. "Undo")? *Follow-up.*
+- Screen readers? *Announce toasts with a live region.*
+
+## Approach
+
+A **context provider** owns the toast list and exposes `show` and `dismiss` through a `useToast` hook, so any component can trigger a toast without prop drilling. The list is managed by a pure **reducer** (`add`, `remove`), and the visible toasts are simply the first `max` entries — the rest are queued automatically. Each rendered toast owns its own timer, which it pauses while hovered.
+
+## Step-by-step build
+
+### Step 1 — the reducer
+
+```js
+function toastReducer(state, action) {
+  switch (action.type) {
+    case 'add': return [...state, action.toast];
+    case 'remove': return state.filter((t) => t.id !== action.id);
+    default: return state;
+  }
+}
+```
+
+### Step 2 — provider and hook
+
+```jsx
+const ToastContext = createContext(null);
+
+function useToast() {
+  const ctx = useContext(ToastContext);
+  if (!ctx) throw new Error('useToast must be used inside <ToastProvider>');
+  return ctx;
+}
+```
+
+### Step 3 — auto-dismiss with pause on hover
+
+Track the remaining time; hovering clears the timer and records how much time was left.
+
+```jsx
+useEffect(() => {
+  if (paused || toast.duration === Infinity) return;
+  const start = Date.now();
+  const t = setTimeout(() => onDismiss(toast.id), remaining.current);
+  return () => { clearTimeout(t); remaining.current -= Date.now() - start; };
+}, [paused]);
+```
+
+### Step 4 — accessibility
+
+The container is a live region: `role="status"` with `aria-live="polite"` for normal toasts; errors use `role="alert"`. Each toast has a close button.
+
+## Final code
+
+```jsx
+import { createContext, useCallback, useContext, useEffect, useMemo, useReducer, useRef, useState } from 'react';
+
+export function toastReducer(state, action) {
+  switch (action.type) {
+    case 'add':
+      // same id again → replace instead of duplicating (e.g. "Saving…" → "Saved")
+      return state.some((t) => t.id === action.toast.id)
+        ? state.map((t) => (t.id === action.toast.id ? action.toast : t))
+        : [...state, action.toast];
+    case 'remove':
+      return state.filter((t) => t.id !== action.id);
+    case 'clear':
+      return [];
+    default:
+      return state;
+  }
+}
+
+export function visibleToasts(state, max) {
+  return state.slice(0, max); // the rest wait in the queue
+}
+
+const ToastContext = createContext(null);
+
+export function useToast() {
+  const ctx = useContext(ToastContext);
+  if (!ctx) throw new Error('useToast must be used inside <ToastProvider>');
+  return ctx;
+}
+
+let nextId = 0;
+
+export function ToastProvider({ children, max = 3, defaultDuration = 3000 }) {
+  const [toasts, dispatch] = useReducer(toastReducer, []);
+
+  const dismiss = useCallback((id) => dispatch({ type: 'remove', id }), []);
+  const show = useCallback(
+    (message, { type = 'info', duration = defaultDuration, id = `t${++nextId}`, action } = {}) => {
+      dispatch({ type: 'add', toast: { id, message, type, duration, action } });
+      return id;
+    },
+    [defaultDuration],
+  );
+  const api = useMemo(() => ({ show, dismiss, clear: () => dispatch({ type: 'clear' }) }), [show, dismiss]);
+
+  return (
+    <ToastContext.Provider value={api}>
+      {children}
+      <div className="toasts" role="region" aria-label="Notifications">
+        {visibleToasts(toasts, max).map((t) => (
+          <Toast key={t.id} toast={t} onDismiss={dismiss} />
+        ))}
+      </div>
+    </ToastContext.Provider>
+  );
+}
+
+function Toast({ toast, onDismiss }) {
+  const [paused, setPaused] = useState(false);
+  const remaining = useRef(toast.duration);
+
+  useEffect(() => {
+    if (paused || toast.duration === Infinity) return;
+    const start = Date.now();
+    const timer = setTimeout(() => onDismiss(toast.id), remaining.current);
+    return () => {
+      clearTimeout(timer);
+      remaining.current -= Date.now() - start; // keep the time left for when hover ends
+    };
+  }, [paused, toast.id, toast.duration, onDismiss]);
+
+  return (
+    <div
+      className={`toast toast-${toast.type}`}
+      role={toast.type === 'error' ? 'alert' : 'status'}
+      aria-live={toast.type === 'error' ? 'assertive' : 'polite'}
+      onMouseEnter={() => setPaused(true)}
+      onMouseLeave={() => setPaused(false)}
+      onFocus={() => setPaused(true)}
+      onBlur={() => setPaused(false)}
+    >
+      <span>{toast.message}</span>
+      {toast.action && (
+        <button onClick={() => { toast.action.onClick(); onDismiss(toast.id); }}>{toast.action.label}</button>
+      )}
+      <button aria-label="Dismiss notification" onClick={() => onDismiss(toast.id)}>×</button>
+    </div>
+  );
+}
+```
+
+## Edge cases
+
+- More than `max` toasts: extras wait and appear as visible ones are dismissed; their timers only start once rendered.
+- Hovering pauses the timer and resumes with the **remaining** time, not a fresh full duration.
+- `duration: Infinity` toasts stay until closed.
+- Showing a toast with an existing `id` updates it in place ("Saving…" → "Saved").
+- `useToast` outside the provider throws a clear error instead of failing silently.
+
+## Follow-ups
+
+- *Call it from outside React* (API helpers): keep a module-level store with `subscribe`, and have the provider subscribe to it — the same idea as an [EventEmitter](/machine-coding/event-emitter).
+- *Promise toasts:* `toast.promise(save(), { loading, success, error })` updates one toast by id.
+- *Animations:* keep a "leaving" state so the toast can animate out before removal.
+- *Portals:* render the container with `createPortal` into `document.body` so parents with `overflow: hidden` cannot clip it.
+
+## Common mistakes
+
+- A single global timer for all toasts.
+- Restarting the full timer after hover instead of resuming.
+- Passing `show` down through props everywhere instead of context.
+- Toasts that are invisible to screen readers (no live region) or impossible to close.
+
+## Related
+
+- Uses: context and reducers from the [React track](/react).
+- Pattern: [EventEmitter](/machine-coding/event-emitter) for triggering toasts from non-React code.

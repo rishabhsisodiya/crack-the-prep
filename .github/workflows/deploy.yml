@@ -33,7 +33,8 @@ jobs:
       - run: npm ci
 
       # Blocks the deploy on any error: missing statements, broken core
-      # aliases, duplicate anchors, or a reference solution failing its tests.
+      # aliases, duplicate anchors, a reference solution failing its tests,
+      # or a machine-coding page whose final code fails its tests.
       - name: Check data and notes
         run: npm run check
 

@@ -158,3 +158,5 @@ console.log(tenPercentOff(1000)); // 900
 ```
 
 **Currying vs partial application:** currying always takes **one argument at a time** (`f(a)(b)(c)`). Partial application fixes **some** arguments and returns a function for the rest (`bind(null, a)` then `f(b, c)`). The `bind` example above is technically partial application.
+
+> **Interview practice:** Interview version, including the placeholder follow-up: [Machine Coding — curry](/machine-coding/curry).

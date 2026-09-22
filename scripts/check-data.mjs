@@ -8,6 +8,7 @@
  *   - no two solutions in a topic share an anchor (◆ solutions links stay unique)
  *   - test specs are well-formed, and every reference approach passes its tests
  *   - notes: no duplicate `order` within a track (warn)
+ *   - machine-coding problem pages follow the fixed section template, in order
  */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -141,6 +142,27 @@ for (const f of fs.readdirSync(NOTES).filter((f) => /\.mdx?$/.test(f))) {
   const k = `${get('track')}|${get('kind') ?? 'notes'}|${get('order') ?? '1'}`;
   if (orders.has(k)) warn('notes', `${f} and ${orders.get(k)} share track/kind/order ${k}`);
   else orders.set(k, f);
+}
+
+// ---------------------------------------------------------------- machine-coding template
+// Problem pages (order >= 10; lower orders are intro pages) must use exactly
+// these `##` sections, in this order, and show the final code as a js/jsx block.
+const MC_SECTIONS = [
+  'Problem', 'Clarifying questions', 'Approach', 'Step-by-step build', 'Final code',
+  'Edge cases', 'Follow-ups', 'Common mistakes', 'Related',
+];
+for (const f of fs.readdirSync(NOTES).filter((f) => f.startsWith('machine-coding-') && f.endsWith('.mdx'))) {
+  const src = fs.readFileSync(path.join(NOTES, f), 'utf8');
+  const order = Number(src.match(/^order:\s*(\d+)/m)?.[1] ?? 1);
+  if (order < 10) continue;
+  const body = src.replace(/```[\s\S]*?```/g, ''); // headings inside code blocks do not count
+  const found = [...body.matchAll(/^## (.+)$/gm)].map((m) => m[1].trim());
+  if (found.join('|') !== MC_SECTIONS.join('|')) {
+    err('machine-coding', `${f}: sections must be [${MC_SECTIONS.join(', ')}], found [${found.join(', ')}]`);
+  }
+  const final = src.split(/^## Final code$/m)[1]?.split(/^## /m)[0] ?? '';
+  if (!/```jsx?\n/.test(final)) err('machine-coding', `${f}: "Final code" needs a \`\`\`js or \`\`\`jsx block`);
+  if (!/^### Step 1/m.test(src)) err('machine-coding', `${f}: "Step-by-step build" needs "### Step 1 …" headings`);
 }
 
 // ---------------------------------------------------------------- report

@@ -1,0 +1,143 @@
+---
+title: "Polyfill: Array.flat"
+track: "machine-coding"
+kind: "notes"
+order: 15
+slug: "array-flat"
+updated: 2026-09-22
+description: "Flatten nested arrays to a given depth — recursive, iterative with a stack, and the edge cases around holes and Infinity."
+---
+
+import Callout from '../../components/Callout.astro';
+
+## Problem
+
+Implement `flat(arr, depth = 1)`, which returns a new array with sub-arrays concatenated up to `depth` levels:
+
+```js
+flat([1, [2, [3, [4]]]]);            // [1, 2, [3, [4]]]
+flat([1, [2, [3, [4]]]], 2);         // [1, 2, 3, [4]]
+flat([1, [2, [3, [4]]]], Infinity);  // [1, 2, 3, 4]
+```
+
+## Clarifying questions
+
+- Default depth? *1, like the built-in.*
+- Should holes be removed? *Yes — `[1, , 3].flat()` gives `[1, 3]`.*
+- Should array-like objects (`arguments`, `{ length: 2 }`) be flattened? *No — only real arrays (`Array.isArray`).*
+- Recursion or iteration? *Either; mention the stack-depth risk of recursion for very deep input.*
+
+## Approach
+
+Walk the array. Each element that is an array (and while depth remains) gets flattened one level deeper; everything else is copied. Recursion expresses this directly. The iterative version keeps an explicit stack of `[value, depth]` pairs so very deep nesting cannot overflow the call stack.
+
+## Step-by-step build
+
+### Step 1 — recursive
+
+```js
+function flat(arr, depth = 1) {
+  const out = [];
+  for (const item of arr) {
+    if (Array.isArray(item) && depth > 0) out.push(...flat(item, depth - 1));
+    else out.push(item);
+  }
+  return out;
+}
+```
+
+`for…of` visits holes as `undefined`. To skip holes like the built-in, iterate with indices and `i in arr`.
+
+### Step 2 — skip holes, avoid huge spreads
+
+`out.push(...bigArray)` can throw "Maximum call stack size exceeded" for very large arrays. Pass the output array down instead.
+
+```js
+function flat(arr, depth = 1, out = []) {
+  for (let i = 0; i < arr.length; i++) {
+    if (!(i in arr)) continue;                 // hole
+    const item = arr[i];
+    if (Array.isArray(item) && depth > 0) flat(item, depth - 1, out);
+    else out.push(item);
+  }
+  return out;
+}
+```
+
+### Step 3 — iterative with a stack
+
+Push elements in reverse so they pop in their original order.
+
+```js
+function flatIter(arr, depth = 1) {
+  const stack = [];
+  for (let i = arr.length - 1; i >= 0; i--) if (i in arr) stack.push([arr[i], depth]);
+  const out = [];
+  while (stack.length) {
+    const [item, d] = stack.pop();
+    if (Array.isArray(item) && d > 0) {
+      for (let i = item.length - 1; i >= 0; i--) if (i in item) stack.push([item[i], d - 1]);
+    } else {
+      out.push(item);
+    }
+  }
+  return out;
+}
+```
+
+## Final code
+
+```js
+function flat(arr, depth = 1, out = []) {
+  for (let i = 0; i < arr.length; i++) {
+    if (!(i in arr)) continue;
+    const item = arr[i];
+    if (Array.isArray(item) && depth > 0) flat(item, depth - 1, out);
+    else out.push(item);
+  }
+  return out;
+}
+
+function flatIter(arr, depth = 1) {
+  const stack = [];
+  for (let i = arr.length - 1; i >= 0; i--) if (i in arr) stack.push([arr[i], depth]);
+  const out = [];
+  while (stack.length) {
+    const [item, d] = stack.pop();
+    if (Array.isArray(item) && d > 0) {
+      for (let i = item.length - 1; i >= 0; i--) if (i in item) stack.push([item[i], d - 1]);
+    } else {
+      out.push(item);
+    }
+  }
+  return out;
+}
+
+// As a method: Array.prototype.myFlat = function (depth = 1) { return flat(this, depth); };
+```
+
+## Edge cases
+
+- `depth = 0` returns a shallow copy.
+- `depth = Infinity` flattens fully — `Infinity - 1` is still `Infinity`.
+- Holes are dropped at every level; explicit `undefined` values are kept.
+- Strings are not arrays: `flat(['ab', ['c']])` gives `['ab', 'c']`.
+- Negative or non-numeric depth behaves like 0.
+
+## Follow-ups
+
+- *Flatten a deeply nested object* into `{ 'a.b.c': 1 }` keys — same recursion, building a path.
+- *Generator version* (`function* flatGen`) that yields lazily without building the whole array.
+- *Complexity:* O(total elements) time, O(depth) extra space for the recursive version.
+
+## Common mistakes
+
+- Using `arr.reduce((a, x) => a.concat(...))` in a loop — correct but O(n²) copying for large inputs.
+- Forgetting the default depth of 1 and flattening fully.
+- Mutating the input instead of returning a new array.
+- Checking `typeof item === 'object'` instead of `Array.isArray`, which flattens plain objects too.
+
+## Related
+
+- Previous: [map, filter and reduce](/machine-coding/map-filter-reduce).
+- Next: [Object.assign and Object.create](/machine-coding/object-assign-create).

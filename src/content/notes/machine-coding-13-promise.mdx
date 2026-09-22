@@ -1,0 +1,255 @@
+---
+title: "Polyfill: Promise"
+track: "machine-coding"
+kind: "notes"
+order: 13
+slug: "promise"
+imp: true
+updated: 2026-09-22
+description: "Build a Promise from scratch — states, then-chaining, adopting thenables, async callbacks via microtasks, catch, finally and the static helpers."
+---
+
+import Callout from '../../components/Callout.astro';
+
+## Problem
+
+Implement a `MyPromise` class that behaves like the native `Promise` for the common cases:
+
+```js
+new MyPromise((resolve) => setTimeout(() => resolve(1), 100))
+  .then((v) => v + 1)
+  .then((v) => { throw new Error('boom ' + v); })
+  .catch((e) => e.message)        // "boom 2"
+  .finally(() => console.log('done'))
+  .then(console.log);             // "boom 2"
+```
+
+## Clarifying questions
+
+- Which parts are needed: `then`, `catch`, `finally`, `MyPromise.resolve` / `reject`? *Usually all of these. `all` and friends are a separate problem.*
+- Must callbacks run asynchronously even when the promise is already settled? *Yes — always as a microtask.*
+- Should resolving with another promise (or any thenable) adopt its state? *Yes; this is the part most candidates miss.*
+- Do I need full Promises/A+ compliance? *No — the core behaviour is enough.*
+
+## Approach
+
+A promise is a small state machine: `pending` → `fulfilled` or `rejected`, exactly once. While pending it stores callbacks. `then` always returns a **new** promise whose outcome depends on what the callback returns or throws — that is what makes chaining work. Callbacks are scheduled with `queueMicrotask`, so they run after the current synchronous code, like the native ones.
+
+## Step-by-step build
+
+### Step 1 — state and the executor
+
+```js
+class MyPromise {
+  #state = 'pending';
+  #value;
+  #handlers = [];
+
+  constructor(executor) {
+    const settle = (state, value) => {
+      if (this.#state !== 'pending') return;   // settle only once
+      this.#state = state;
+      this.#value = value;
+      this.#handlers.forEach((h) => h());
+      this.#handlers = [];
+    };
+    try {
+      executor((v) => settle('fulfilled', v), (e) => settle('rejected', e));
+    } catch (e) {
+      settle('rejected', e);                   // a throwing executor rejects
+    }
+  }
+}
+```
+
+### Step 2 — then returns a new promise
+
+```js
+then(onFulfilled, onRejected) {
+  return new MyPromise((resolve, reject) => {
+    const run = () => queueMicrotask(() => {
+      const cb = this.#state === 'fulfilled' ? onFulfilled : onRejected;
+      if (typeof cb !== 'function') {
+        // no handler: pass the value or error through to the next promise
+        return this.#state === 'fulfilled' ? resolve(this.#value) : reject(this.#value);
+      }
+      try {
+        resolve(cb(this.#value));
+      } catch (e) {
+        reject(e);
+      }
+    });
+    if (this.#state === 'pending') this.#handlers.push(run);
+    else run();
+  });
+}
+```
+
+### Step 3 — adopt promises and thenables
+
+If `resolve` receives something with a `then` method, the new promise must follow it instead of fulfilling with the object itself.
+
+```js
+const resolve = (v) => {
+  if (v === this) return reject(new TypeError('Chaining cycle detected'));
+  if (v !== null && (typeof v === 'object' || typeof v === 'function')) {
+    let then;
+    try { then = v.then; } catch (e) { return reject(e); }
+    if (typeof then === 'function') {
+      let called = false;                      // a thenable may call back more than once
+      try {
+        then.call(v, (x) => { if (!called) { called = true; resolve(x); } },
+                     (e) => { if (!called) { called = true; reject(e); } });
+      } catch (e) {
+        if (!called) reject(e);
+      }
+      return;
+    }
+  }
+  settle('fulfilled', v);
+};
+```
+
+### Step 4 — catch, finally and the statics
+
+```js
+catch(onRejected) { return this.then(undefined, onRejected); }
+
+finally(onFinally) {
+  // runs the callback, then passes the ORIGINAL outcome through
+  return this.then(
+    (v) => MyPromise.resolve(onFinally()).then(() => v),
+    (e) => MyPromise.resolve(onFinally()).then(() => { throw e; }),
+  );
+}
+
+static resolve(v) { return v instanceof MyPromise ? v : new MyPromise((res) => res(v)); }
+static reject(e) { return new MyPromise((_, rej) => rej(e)); }
+```
+
+## Final code
+
+```js
+class MyPromise {
+  #state = 'pending';
+  #value;
+  #handlers = [];
+
+  constructor(executor) {
+    const settle = (state, value) => {
+      if (this.#state !== 'pending') return;
+      this.#state = state;
+      this.#value = value;
+      const handlers = this.#handlers;
+      this.#handlers = [];
+      handlers.forEach((h) => h());
+    };
+
+    let done = false; // resolve/reject from the executor only count once
+    const reject = (e) => { if (!done) { done = true; settle('rejected', e); } };
+    const resolve = (v) => {
+      if (done) return;
+      done = true;
+      this.#adopt(v, (x) => settle('fulfilled', x), (e) => settle('rejected', e));
+    };
+
+    try {
+      executor(resolve, reject);
+    } catch (e) {
+      reject(e);
+    }
+  }
+
+  // Follow promises and thenables; fulfil directly with anything else.
+  #adopt(v, fulfil, reject) {
+    if (v === this) return reject(new TypeError('Chaining cycle detected for promise'));
+    if (v !== null && (typeof v === 'object' || typeof v === 'function')) {
+      let then;
+      try {
+        then = v.then;
+      } catch (e) {
+        return reject(e);
+      }
+      if (typeof then === 'function') {
+        let called = false;
+        try {
+          then.call(
+            v,
+            (x) => { if (!called) { called = true; this.#adopt(x, fulfil, reject); } },
+            (e) => { if (!called) { called = true; reject(e); } },
+          );
+        } catch (e) {
+          if (!called) reject(e);
+        }
+        return;
+      }
+    }
+    fulfil(v);
+  }
+
+  then(onFulfilled, onRejected) {
+    return new MyPromise((resolve, reject) => {
+      const run = () =>
+        queueMicrotask(() => {
+          const fulfilled = this.#state === 'fulfilled';
+          const cb = fulfilled ? onFulfilled : onRejected;
+          if (typeof cb !== 'function') return fulfilled ? resolve(this.#value) : reject(this.#value);
+          try {
+            resolve(cb(this.#value));
+          } catch (e) {
+            reject(e);
+          }
+        });
+      if (this.#state === 'pending') this.#handlers.push(run);
+      else run();
+    });
+  }
+
+  catch(onRejected) {
+    return this.then(undefined, onRejected);
+  }
+
+  finally(onFinally) {
+    return this.then(
+      (v) => MyPromise.resolve(onFinally?.()).then(() => v),
+      (e) => MyPromise.resolve(onFinally?.()).then(() => { throw e; }),
+    );
+  }
+
+  static resolve(v) {
+    return v instanceof MyPromise ? v : new MyPromise((res) => res(v));
+  }
+
+  static reject(e) {
+    return new MyPromise((_, rej) => rej(e));
+  }
+}
+```
+
+## Edge cases
+
+- Resolving or rejecting twice: only the first call counts.
+- The executor throws after calling `resolve`: ignored, because the promise is already settled.
+- `then` with no handlers (`p.then()`): the value passes through untouched.
+- `then` on an already-settled promise still runs the callback asynchronously.
+- Resolving a promise with itself rejects with a `TypeError` instead of hanging forever.
+- `finally` does not change the value — unless its callback throws or returns a rejected promise, which replaces the outcome.
+
+## Follow-ups
+
+- *Order of logs:* `console.log(1); MyPromise.resolve().then(() => console.log(2)); console.log(3);` prints 1, 3, 2 — explain the microtask queue.
+- *Why `queueMicrotask` and not `setTimeout`?* `setTimeout` is a macrotask: callbacks would run after timers and I/O, unlike native promises.
+- *Add `MyPromise.all` / `race`.* See [Promise combinators](/machine-coding/promise-combinators).
+- *Unhandled rejections:* how would you report a rejection nobody handled? (Track whether any `then`/`catch` was attached before a microtask tick.)
+
+## Common mistakes
+
+- `then` returning `this` instead of a new promise — chaining then shares one state.
+- Calling callbacks synchronously when the promise is already settled.
+- Not catching errors thrown inside callbacks, so they escape instead of rejecting the next promise.
+- Fulfilling with a promise object instead of adopting its state.
+
+## Related
+
+- Concepts: promises and the event loop in the [JavaScript track](/javascript).
+- Next: [Promise.all, allSettled, race and any](/machine-coding/promise-combinators).

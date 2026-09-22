@@ -1,0 +1,135 @@
+---
+title: "Deep Clone"
+track: "machine-coding"
+kind: "notes"
+order: 23
+slug: "deep-clone"
+imp: true
+updated: 2026-09-22
+description: "Deep-copy any value — objects, arrays, Date, RegExp, Map, Set, symbol keys and circular references."
+---
+
+import Callout from '../../components/Callout.astro';
+
+## Problem
+
+Implement `deepClone(value)` returning a copy that shares no mutable objects with the original:
+
+```js
+const a = { n: 1, list: [1, { x: 2 }], when: new Date(0), tags: new Set(['js']) };
+a.self = a;                          // circular reference
+const b = deepClone(a);
+b.list[1].x = 99;                    // a.list[1].x is still 2
+b.self === b;                        // true — the cycle points at the copy
+```
+
+## Clarifying questions
+
+- Which types must be supported? *Plain objects and arrays at minimum; ask about `Date`, `RegExp`, `Map`, `Set`.*
+- Circular references? *Yes — they are the main follow-up.*
+- Keep the prototype of class instances? *Usually yes.*
+- Functions? *Copy by reference — cloning code is not meaningful.*
+- Why not `JSON.parse(JSON.stringify(x))`? *It drops `undefined`, functions and symbols, turns dates into strings and `NaN` into `null`, and throws on cycles.*
+
+## Approach
+
+Primitives and functions are returned as they are. For objects, create an empty container of the same kind, **record it in a `WeakMap` before recursing**, then copy the contents. When a value is seen again, return the recorded copy — this handles cycles and shared references.
+
+## Step-by-step build
+
+### Step 1 — objects and arrays
+
+```js
+function deepClone(value) {
+  if (value === null || typeof value !== 'object') return value;
+  const copy = Array.isArray(value) ? [] : {};
+  for (const key of Object.keys(value)) copy[key] = deepClone(value[key]);
+  return copy;
+}
+```
+
+### Step 2 — circular references
+
+```js
+function deepClone(value, seen = new WeakMap()) {
+  if (value === null || typeof value !== 'object') return value;
+  if (seen.has(value)) return seen.get(value);
+  const copy = Array.isArray(value) ? [] : {};
+  seen.set(value, copy);              // register BEFORE recursing
+  for (const key of Object.keys(value)) copy[key] = deepClone(value[key], seen);
+  return copy;
+}
+```
+
+### Step 3 — special types, prototypes and symbol keys
+
+```js
+if (value instanceof Date) return new Date(value.getTime());
+if (value instanceof RegExp) return new RegExp(value.source, value.flags);
+if (value instanceof Map) { /* new Map, clone each key and value */ }
+if (value instanceof Set) { /* new Set, clone each value */ }
+const copy = Array.isArray(value) ? [] : Object.create(Object.getPrototypeOf(value));
+for (const key of Reflect.ownKeys(value)) { /* includes symbol keys */ }
+```
+
+## Final code
+
+```js
+function deepClone(value, seen = new WeakMap()) {
+  if (value === null || typeof value !== 'object') return value; // primitives, functions
+  if (seen.has(value)) return seen.get(value);
+
+  if (value instanceof Date) return new Date(value.getTime());
+  if (value instanceof RegExp) return new RegExp(value.source, value.flags);
+
+  if (value instanceof Map) {
+    const copy = new Map();
+    seen.set(value, copy);
+    value.forEach((v, k) => copy.set(deepClone(k, seen), deepClone(v, seen)));
+    return copy;
+  }
+
+  if (value instanceof Set) {
+    const copy = new Set();
+    seen.set(value, copy);
+    value.forEach((v) => copy.add(deepClone(v, seen)));
+    return copy;
+  }
+
+  const copy = Array.isArray(value) ? new Array(value.length) : Object.create(Object.getPrototypeOf(value));
+  seen.set(value, copy);
+  for (const key of Reflect.ownKeys(value)) {
+    if (Array.isArray(value) && key === 'length') continue;
+    const desc = Object.getOwnPropertyDescriptor(value, key);
+    if (desc && desc.enumerable) copy[key] = deepClone(value[key], seen);
+  }
+  return copy;
+}
+```
+
+## Edge cases
+
+- Cycles (`a.self = a`) and shared references (`{ x: o, y: o }`) are preserved: both keys point at one copy.
+- `Date` and `RegExp` get real copies, not `{}`.
+- Class instances keep their prototype, so methods still work.
+- Symbol keys are copied; non-enumerable properties are skipped (like spread).
+- Very deep structures can overflow the call stack — an iterative version with an explicit stack avoids that.
+
+## Follow-ups
+
+- *`structuredClone`:* the built-in handles most of this — but not functions, DOM nodes or class prototypes. When would you still write your own?
+- *Why `WeakMap` and not `Map` for `seen`?* The cache should not keep objects alive after the clone finishes.
+- *Clone getters and setters* as accessors instead of values — copy the descriptors with `Object.defineProperty`.
+- *Typed arrays, `ArrayBuffer`, `Error`:* extend the type checks.
+
+## Common mistakes
+
+- Registering the copy in `seen` **after** recursing, which still loops forever on cycles.
+- `typeof value === 'object'` without the `null` check.
+- `for…in`, which copies inherited properties.
+- Presenting `JSON.parse(JSON.stringify(x))` as the answer without its limits.
+
+## Related
+
+- Next: [deep equal](/machine-coding/deep-equal) uses the same traversal.
+- Shallow copies: [Object.assign](/machine-coding/object-assign-create).

@@ -1,0 +1,208 @@
+---
+title: "Infinite Scroll"
+track: "machine-coding"
+kind: "notes"
+order: 42
+slug: "infinite-scroll"
+imp: true
+updated: 2026-09-22
+description: "Load pages as the user scrolls — IntersectionObserver sentinel, a reducer for loading/error/end states, de-duplication and double-fetch guards."
+---
+
+import Callout from '../../components/Callout.astro';
+
+## Problem
+
+Build an infinitely scrolling list. `fetchPage(cursor)` returns `{ items, nextCursor }` (`nextCursor` is `null` on the last page). Load the first page on mount and the next page whenever the user nears the bottom:
+
+```jsx
+<InfiniteList
+  fetchPage={(cursor) => fetch(`/api/posts?cursor=${cursor ?? ''}`).then((r) => r.json())}
+  renderItem={(post) => <PostCard post={post} />}
+/>
+```
+
+## Clarifying questions
+
+- Page-number or cursor pagination? *Cursor — safer when items are inserted while scrolling.*
+- Can the same item appear on two pages? *Possibly — de-duplicate by `id`.*
+- Error handling? *Show a retry button; do not keep firing requests.*
+- Very long lists (10,000+ rows)? *Follow-up: virtualisation.*
+
+## Approach
+
+Put an invisible "sentinel" element after the last item and watch it with `IntersectionObserver`. When it becomes visible, load the next page — unless a request is already in flight, the last request failed, or there are no more pages. All list state lives in a pure **reducer**, which makes the transitions explicit and testable.
+
+## Step-by-step build
+
+### Step 1 — the reducer
+
+```js
+const initial = { items: [], cursor: null, status: 'idle', hasMore: true, error: null };
+
+function listReducer(state, action) {
+  switch (action.type) {
+    case 'start': return { ...state, status: 'loading', error: null };
+    case 'success': return { ...state, status: 'idle', items: [...state.items, ...action.items], cursor: action.nextCursor, hasMore: action.nextCursor != null };
+    case 'error': return { ...state, status: 'error', error: action.error };
+    default: return state;
+  }
+}
+```
+
+### Step 2 — de-duplicate by id
+
+```js
+const seen = new Set(state.items.map((x) => x.id));
+const fresh = action.items.filter((x) => !seen.has(x.id));
+```
+
+### Step 3 — load more, guarded
+
+```jsx
+const loadMore = useCallback(async () => {
+  if (state.status !== 'idle' || !state.hasMore) return;   // no double fetches, stop at the end
+  dispatch({ type: 'start' });
+  try {
+    const page = await fetchPage(state.cursor);
+    dispatch({ type: 'success', ...page });
+  } catch (error) {
+    dispatch({ type: 'error', error });
+  }
+}, [state.status, state.hasMore, state.cursor, fetchPage]);
+```
+
+### Step 4 — observe the sentinel
+
+```jsx
+useEffect(() => {
+  const el = sentinelRef.current;
+  if (!el) return;
+  const observer = new IntersectionObserver(([entry]) => entry.isIntersecting && loadMore(), { rootMargin: '300px' });
+  observer.observe(el);
+  return () => observer.disconnect();
+}, [loadMore]);
+```
+
+`rootMargin: '300px'` starts loading before the user actually reaches the end.
+
+## Final code
+
+```jsx
+import { useCallback, useEffect, useReducer, useRef } from 'react';
+
+export const initialList = { items: [], cursor: null, status: 'idle', hasMore: true, error: null };
+
+export function listReducer(state, action) {
+  switch (action.type) {
+    case 'start':
+      return { ...state, status: 'loading', error: null };
+    case 'success': {
+      const seen = new Set(state.items.map((x) => x.id));
+      const fresh = action.items.filter((x) => !seen.has(x.id));
+      return {
+        ...state,
+        status: 'idle',
+        items: [...state.items, ...fresh],
+        cursor: action.nextCursor ?? null,
+        hasMore: action.nextCursor != null,
+      };
+    }
+    case 'error':
+      return { ...state, status: 'error', error: action.error };
+    case 'retry':
+      return { ...state, status: 'idle', error: null };
+    default:
+      return state;
+  }
+}
+
+export function canLoadMore(state) {
+  return state.status === 'idle' && state.hasMore;
+}
+
+export function useInfiniteList(fetchPage) {
+  const [state, dispatch] = useReducer(listReducer, initialList);
+  const inFlight = useRef(false); // guards against two observer callbacks before a re-render
+
+  const loadMore = useCallback(async () => {
+    if (!canLoadMore(state) || inFlight.current) return;
+    inFlight.current = true;
+    dispatch({ type: 'start' });
+    try {
+      const page = await fetchPage(state.cursor);
+      dispatch({ type: 'success', items: page.items, nextCursor: page.nextCursor });
+    } catch (error) {
+      dispatch({ type: 'error', error });
+    } finally {
+      inFlight.current = false;
+    }
+  }, [state, fetchPage]);
+
+  return { state, loadMore, retry: () => dispatch({ type: 'retry' }) };
+}
+
+export function InfiniteList({ fetchPage, renderItem }) {
+  const { state, loadMore, retry } = useInfiniteList(fetchPage);
+  const sentinelRef = useRef(null);
+
+  useEffect(() => {
+    const el = sentinelRef.current;
+    if (!el) return;
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        if (entry.isIntersecting) loadMore();
+      },
+      { rootMargin: '300px' },
+    );
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [loadMore]);
+
+  return (
+    <div>
+      <ul>
+        {state.items.map((item) => (
+          <li key={item.id}>{renderItem(item)}</li>
+        ))}
+      </ul>
+      {state.status === 'loading' && <p role="status">Loading…</p>}
+      {state.status === 'error' && (
+        <p role="alert">
+          Could not load more. <button onClick={retry}>Retry</button>
+        </p>
+      )}
+      {!state.hasMore && state.items.length > 0 && <p>You have reached the end.</p>}
+      {!state.hasMore && state.items.length === 0 && <p>Nothing here yet.</p>}
+      {state.hasMore && state.status !== 'error' && <div ref={sentinelRef} aria-hidden="true" style={{ height: 1 }} />}
+    </div>
+  );
+}
+```
+
+## Edge cases
+
+- The first page is loaded because the sentinel is visible on mount — no separate "initial load" code.
+- A short first page that does not fill the screen: the sentinel stays visible, but the observer only fires on changes. After each success the effect re-runs (new `loadMore`), re-observing and triggering the next page.
+- Duplicate items across pages are dropped by `id`.
+- After an error the sentinel is removed, so it does not retry in a loop; "Retry" puts it back.
+- `nextCursor: null` ends loading for good.
+
+## Follow-ups
+
+- *Virtualisation* (`react-window`): render only visible rows for huge lists.
+- *Restore scroll position* when the user navigates back.
+- *Scroll events vs IntersectionObserver:* scroll handlers fire constantly and need [throttling](/machine-coding/throttle); the observer is cheaper and simpler.
+- *Bidirectional loading* for chat history (load older messages at the top without jumping).
+
+## Common mistakes
+
+- Firing several requests for the same page because the observer fired twice before the state updated.
+- Page numbers with data that shifts, causing skipped or repeated items.
+- Retrying automatically forever after an error.
+- Forgetting `observer.disconnect()` on unmount.
+
+## Related
+
+- Previous: [autocomplete](/machine-coding/autocomplete).
+- Next: [star rating](/machine-coding/star-rating).

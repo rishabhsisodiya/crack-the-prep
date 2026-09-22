@@ -1,0 +1,192 @@
+---
+title: "Promise Pool (Concurrency Limit)"
+track: "machine-coding"
+kind: "notes"
+order: 32
+slug: "promise-pool"
+imp: true
+updated: 2026-09-22
+description: "Run async tasks with at most N in flight — results in input order, fail-fast or settle-all, and a reusable p-limit style limiter."
+---
+
+import Callout from '../../components/Callout.astro';
+
+## Problem
+
+Implement `promisePool(tasks, limit)`. `tasks` is an array of functions that each return a promise. Run them with **at most `limit` running at the same time**, and resolve with their results in input order:
+
+```js
+const urls = ['/a', '/b', '/c', '/d', '/e'];
+const results = await promisePool(urls.map((u) => () => fetch(u).then((r) => r.json())), 2);
+// never more than 2 requests in flight; results[i] belongs to urls[i]
+```
+
+## Clarifying questions
+
+- Tasks are **functions** returning promises, not promises? *Yes — a promise has already started; a function lets us decide when to start it.*
+- On the first failure: reject at once, or finish everything and report each outcome? *Offer both; start fail-fast like `Promise.all`.*
+- After a failure, should queued tasks still start? *No — stop launching new ones.*
+- Also want a reusable limiter (`const limit = createLimiter(2); limit(() => task())`)? *A common follow-up.*
+
+## Approach
+
+Start `limit` "workers". Each worker repeatedly takes the next unstarted task index, runs it, stores the result at that index, and moves on until no tasks are left. Because each worker waits for its task before taking another, at most `limit` tasks run at once. `Promise.all` over the workers tells us when everything is done.
+
+## Step-by-step build
+
+### Step 1 — workers pulling from a shared index
+
+```js
+async function promisePool(tasks, limit) {
+  const results = new Array(tasks.length);
+  let next = 0;
+  async function worker() {
+    while (next < tasks.length) {
+      const i = next++;              // claim an index (safe: JS runs this synchronously)
+      results[i] = await tasks[i]();
+    }
+  }
+  const workers = Array.from({ length: Math.min(limit, tasks.length) }, worker);
+  await Promise.all(workers);
+  return results;
+}
+```
+
+### Step 2 — stop launching after a failure
+
+`Promise.all(workers)` already rejects on the first error. Add a flag so the other workers stop taking new tasks.
+
+```js
+let failed = false;
+async function worker() {
+  while (!failed && next < tasks.length) {
+    const i = next++;
+    try {
+      results[i] = await tasks[i]();
+    } catch (e) {
+      failed = true;
+      throw e;
+    }
+  }
+}
+```
+
+### Step 3 — settle-all variant
+
+Wrap every task so it never rejects, reusing the same pool:
+
+```js
+const settle = (task) => () => task().then(
+  (value) => ({ status: 'fulfilled', value }),
+  (reason) => ({ status: 'rejected', reason }),
+);
+promisePool(tasks.map(settle), limit);
+```
+
+### Step 4 — a reusable limiter
+
+```js
+function createLimiter(limit) {
+  let active = 0;
+  const queue = [];
+  const runNext = () => {
+    if (active >= limit || queue.length === 0) return;
+    active++;
+    const { task, resolve, reject } = queue.shift();
+    Promise.resolve().then(task).then(resolve, reject).finally(() => { active--; runNext(); });
+  };
+  return (task) => new Promise((resolve, reject) => { queue.push({ task, resolve, reject }); runNext(); });
+}
+```
+
+## Final code
+
+```js
+async function promisePool(tasks, limit = 5) {
+  if (!Number.isInteger(limit) || limit < 1) throw new RangeError('limit must be a positive integer');
+  const results = new Array(tasks.length);
+  let next = 0;
+  let failed = false;
+
+  async function worker() {
+    while (!failed && next < tasks.length) {
+      const i = next++;
+      try {
+        results[i] = await tasks[i]();
+      } catch (e) {
+        failed = true;
+        throw e;
+      }
+    }
+  }
+
+  const workers = Array.from({ length: Math.min(limit, tasks.length) }, worker);
+  await Promise.all(workers);
+  return results;
+}
+
+function promisePoolSettled(tasks, limit = 5) {
+  const settle = (task) => () =>
+    Promise.resolve()
+      .then(task)
+      .then(
+        (value) => ({ status: 'fulfilled', value }),
+        (reason) => ({ status: 'rejected', reason }),
+      );
+  return promisePool(tasks.map(settle), limit);
+}
+
+function createLimiter(limit) {
+  let active = 0;
+  const queue = [];
+  const runNext = () => {
+    if (active >= limit || queue.length === 0) return;
+    active++;
+    const { task, resolve, reject } = queue.shift();
+    Promise.resolve()
+      .then(task)
+      .then(resolve, reject)
+      .finally(() => {
+        active--;
+        runNext();
+      });
+  };
+  const limited = (task) =>
+    new Promise((resolve, reject) => {
+      queue.push({ task, resolve, reject });
+      runNext();
+    });
+  Object.defineProperties(limited, {
+    activeCount: { get: () => active },
+    pendingCount: { get: () => queue.length },
+  });
+  return limited;
+}
+```
+
+## Edge cases
+
+- Empty task list → resolves with `[]` without starting workers.
+- `limit` larger than the number of tasks → one worker per task.
+- A task that throws synchronously is caught the same way as a rejection (it runs inside `async`/`await`).
+- Results follow input order even though tasks finish in any order.
+- Fail-fast does not cancel tasks already running — pass an `AbortSignal` into tasks if they must stop.
+
+## Follow-ups
+
+- *Why functions instead of promises?* `[fetch(a), fetch(b)]` has already started every request — there is nothing left to limit.
+- *Priority:* use a priority queue instead of FIFO in the limiter.
+- *Rate limiting vs concurrency limiting:* "at most 2 at a time" is not "at most 10 per second" — the latter needs a token bucket.
+- *Streaming results:* an async generator that yields results as they finish.
+
+## Common mistakes
+
+- Starting all promises first and then "limiting" them.
+- Batching in groups of `limit` (`await Promise.all(chunk)`) — a slow task blocks the whole next batch; workers keep every slot busy.
+- `results.push(...)` instead of `results[i] = ...`, losing input order.
+- Forgetting `active--` in a `finally`, so one failure permanently shrinks the limiter.
+
+## Related
+
+- Builds on: [Promise.all and friends](/machine-coding/promise-combinators).
+- Next: [async task queue](/machine-coding/async-task-queue) adds pause/resume and tasks arriving over time.

@@ -353,3 +353,5 @@ const save = debounceWithCancel(() => console.log("saved"), 1000);
 save();
 save.cancel(); // nothing is logged
 ```
+
+> **Interview practice:** Interview versions with `cancel`, `flush`, and leading/trailing options: [Machine Coding — debounce](/machine-coding/debounce) and [throttle](/machine-coding/throttle).

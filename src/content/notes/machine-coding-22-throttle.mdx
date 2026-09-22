@@ -1,0 +1,153 @@
+---
+title: "Throttle"
+track: "machine-coding"
+kind: "notes"
+order: 22
+slug: "throttle"
+imp: true
+updated: 2026-09-22
+description: "Build throttle — run at most once per interval, with leading and trailing calls, the latest arguments, and cancel."
+---
+
+import Callout from '../../components/Callout.astro';
+
+## Problem
+
+Implement `throttle(fn, wait, options?)`. The returned function calls `fn` **at most once every `wait` ms**, no matter how often it is called. Typical use: scroll or resize handlers.
+
+```js
+const onScroll = throttle(() => console.log('position', window.scrollY), 200);
+window.addEventListener('scroll', onScroll);
+// While scrolling continuously: runs immediately, then at most every 200 ms,
+// plus one final call with the latest state after scrolling stops.
+```
+
+## Clarifying questions
+
+- Run on the first call (`leading`)? Run once more at the end with the latest arguments (`trailing`)? *Both default to `true`, like lodash.*
+- Must `this` and the latest arguments be used? *Yes.*
+- Need `cancel()`? *Usually as a follow-up.*
+
+## Approach
+
+Remember when `fn` last ran. On each call, if at least `wait` ms have passed, run now. Otherwise remember the latest arguments and, if no trailing timer is pending, schedule one for the remaining time. The trailing call guarantees the final state is not lost.
+
+## Step-by-step build
+
+### Step 1 — timestamp version (leading only)
+
+```js
+function throttle(fn, wait) {
+  let last = 0;
+  return function (...args) {
+    const now = Date.now();
+    if (now - last >= wait) {
+      last = now;
+      fn.apply(this, args);
+    }
+  };
+}
+```
+
+This drops the last calls of a burst: after scrolling stops, the final position may never be handled.
+
+### Step 2 — add the trailing call
+
+```js
+function throttle(fn, wait) {
+  let last = 0, timer = null, lastArgs, lastThis;
+  const invoke = () => {
+    last = Date.now();
+    timer = null;
+    fn.apply(lastThis, lastArgs);
+    lastArgs = lastThis = undefined;
+  };
+  return function (...args) {
+    lastArgs = args;
+    lastThis = this;
+    const remaining = wait - (Date.now() - last);
+    if (remaining <= 0) {
+      clearTimeout(timer);
+      invoke();
+    } else if (!timer) {
+      timer = setTimeout(invoke, remaining);
+    }
+  };
+}
+```
+
+### Step 3 — leading / trailing options and cancel
+
+With `leading: false`, the first call of a burst only starts the clock. With `trailing: false`, no timer is scheduled.
+
+## Final code
+
+```js
+function throttle(fn, wait = 0, { leading = true, trailing = true } = {}) {
+  let last = 0;
+  let timer = null;
+  let lastArgs;
+  let lastThis;
+
+  function invoke() {
+    last = Date.now();
+    timer = null;
+    const args = lastArgs, ctx = lastThis;
+    lastArgs = lastThis = undefined;
+    fn.apply(ctx, args);
+  }
+
+  function throttled(...args) {
+    const now = Date.now();
+    if (!last && !leading) last = now;          // leading: false — the first call starts the clock
+    lastArgs = args;
+    lastThis = this;
+    const remaining = wait - (now - last);
+    if (remaining <= 0 || remaining > wait) {   // > wait: the system clock moved backwards
+      if (timer) { clearTimeout(timer); timer = null; }
+      invoke();
+    } else if (!timer && trailing) {
+      timer = setTimeout(() => {
+        timer = null;
+        if (lastArgs) invoke();
+        if (!leading) last = 0; // the next burst starts the clock again
+      }, remaining);
+    }
+  }
+
+  throttled.cancel = () => {
+    clearTimeout(timer);
+    timer = null;
+    last = 0;
+    lastArgs = lastThis = undefined;
+  };
+
+  return throttled;
+}
+```
+
+## Edge cases
+
+- A single call with default options runs once, immediately — the trailing timer is never started.
+- Calls inside the window update the arguments, so the trailing call uses the **latest** ones.
+- `leading: false` delays the first run until the end of the window.
+- The system clock changing (`remaining > wait`) must not freeze the throttle.
+- `cancel()` resets the clock, so the next call runs immediately again.
+
+## Follow-ups
+
+- *Throttle with `requestAnimationFrame`* for visual updates: at most once per frame instead of a fixed interval.
+- *Throttle vs debounce for a search box?* Debounce — you want the final text, not intermediate ones.
+- *Implement throttle using your debounce with `maxWait = wait`* — that is exactly how lodash does it.
+
+## Common mistakes
+
+- Only the timestamp version, which loses the final call.
+- Scheduling a new timer on every call instead of one per window.
+- Using the arguments of the first call in the window rather than the latest.
+- Losing `this` with arrow functions.
+
+## Related
+
+- Concepts: [debouncing and throttling](/javascript/19-debouncing-throttling) in the JavaScript track.
+- Previous: [debounce](/machine-coding/debounce).

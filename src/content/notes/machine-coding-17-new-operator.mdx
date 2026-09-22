@@ -1,0 +1,124 @@
+---
+title: "Polyfill: the new operator and instanceof"
+track: "machine-coding"
+kind: "notes"
+order: 17
+slug: "new-operator"
+updated: 2026-09-22
+description: "Implement what `new` does in four steps, and instanceof by walking the prototype chain."
+---
+
+import Callout from '../../components/Callout.astro';
+
+## Problem
+
+Implement `myNew(Constructor, ...args)` that behaves like `new Constructor(...args)`, and `myInstanceOf(obj, Constructor)` that behaves like `obj instanceof Constructor`:
+
+```js
+function Person(name) { this.name = name; }
+Person.prototype.hi = function () { return 'hi ' + this.name; };
+
+const p = myNew(Person, 'Asha');
+p.hi();                        // "hi Asha"
+myInstanceOf(p, Person);       // true
+myInstanceOf(p, Object);       // true
+myInstanceOf(p, Array);        // false
+```
+
+## Clarifying questions
+
+- What if the constructor returns an object? *`new` returns that object instead of the new instance.*
+- What if it returns a primitive? *Ignored — the new instance is returned.*
+- Does `myInstanceOf` need to handle primitives? *Yes: `myInstanceOf(1, Number)` is `false`.*
+- Support `Symbol.hasInstance`? *Mention it; implement only if asked.*
+
+## Approach
+
+`new F(...args)` does four things: create an empty object, link its prototype to `F.prototype`, call `F` with `this` set to the new object, and return that object unless `F` returned an object of its own. `instanceof` walks the prototype chain of `obj` looking for `F.prototype`.
+
+## Step-by-step build
+
+### Step 1 — the four steps of new
+
+```js
+function myNew(Ctor, ...args) {
+  const obj = Object.create(Ctor.prototype);   // 1 + 2: new object, linked prototype
+  const result = Ctor.apply(obj, args);        // 3: run the constructor with this = obj
+  return result !== null && (typeof result === 'object' || typeof result === 'function')
+    ? result                                   // 4: an explicitly returned object wins
+    : obj;
+}
+```
+
+### Step 2 — validate the constructor
+
+Arrow functions and methods have no `prototype` and cannot be constructed.
+
+```js
+if (typeof Ctor !== 'function' || !Ctor.prototype) throw new TypeError(Ctor + ' is not a constructor');
+```
+
+### Step 3 — instanceof
+
+```js
+function myInstanceOf(obj, Ctor) {
+  if (obj === null || (typeof obj !== 'object' && typeof obj !== 'function')) return false;
+  let proto = Object.getPrototypeOf(obj);
+  while (proto !== null) {
+    if (proto === Ctor.prototype) return true;
+    proto = Object.getPrototypeOf(proto);
+  }
+  return false;
+}
+```
+
+## Final code
+
+```js
+function myNew(Ctor, ...args) {
+  if (typeof Ctor !== 'function' || !Ctor.prototype) {
+    throw new TypeError(String(Ctor) + ' is not a constructor');
+  }
+  const obj = Object.create(Ctor.prototype);
+  const result = Ctor.apply(obj, args);
+  const isObject = result !== null && (typeof result === 'object' || typeof result === 'function');
+  return isObject ? result : obj;
+}
+
+function myInstanceOf(obj, Ctor) {
+  if (typeof Ctor !== 'function') throw new TypeError("Right-hand side of 'instanceof' is not callable");
+  if (obj === null || (typeof obj !== 'object' && typeof obj !== 'function')) return false;
+  let proto = Object.getPrototypeOf(obj);
+  while (proto !== null) {
+    if (proto === Ctor.prototype) return true;
+    proto = Object.getPrototypeOf(proto);
+  }
+  return false;
+}
+```
+
+## Edge cases
+
+- Constructor returns `{}` → that object; returns `42` or `'x'` → ignored.
+- Constructor returns a function → the function is returned (functions are objects).
+- `myNew` on an arrow function throws, like `new`.
+- `myInstanceOf(Object.create(null), Object)` → `false`: that object has no prototype chain.
+- Classes: `myNew` uses `Ctor.apply`, which throws for `class` constructors ("cannot be invoked without new"). Use `Reflect.construct(Ctor, args)` if classes must be supported — say so.
+
+## Follow-ups
+
+- *`Symbol.hasInstance`:* `instanceof` first checks `Ctor[Symbol.hasInstance]` — how would you add it?
+- *Why is `instanceof` unreliable across iframes?* Each realm has its own `Array.prototype`; use `Array.isArray`.
+- *What does `new.target` give inside a constructor?* The constructor that `new` was applied to — used in the [bind polyfill](/machine-coding/call-apply-bind).
+
+## Common mistakes
+
+- Returning `result || obj`, which returns a primitive like `42` when the constructor returns one.
+- Setting `obj.__proto__` after calling the constructor, so methods are missing during construction.
+- Comparing against `Ctor` instead of `Ctor.prototype` in `instanceof`.
+- Not handling primitives on the left of `instanceof`.
+
+## Related
+
+- Concepts: prototypes, constructors and `this` in the [JavaScript track](/javascript).
+- Previous: [Object.assign and Object.create](/machine-coding/object-assign-create).

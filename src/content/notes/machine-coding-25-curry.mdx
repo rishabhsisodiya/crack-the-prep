@@ -1,0 +1,134 @@
+---
+title: "Curry"
+track: "machine-coding"
+kind: "notes"
+order: 25
+slug: "curry"
+imp: true
+updated: 2026-09-22
+description: "Implement curry for fixed-arity functions, then the infinite sum(1)(2)(3)() variant and placeholder support."
+---
+
+import Callout from '../../components/Callout.astro';
+
+## Problem
+
+Implement `curry(fn)` so a function of N arguments can be called with them one at a time, or in any grouping:
+
+```js
+const add3 = (a, b, c) => a + b + c;
+const c = curry(add3);
+c(1)(2)(3);     // 6
+c(1, 2)(3);     // 6
+c(1)(2, 3);     // 6
+c(1, 2, 3);     // 6
+```
+
+A common follow-up: `sum(1)(2)(3)()` → `6`, with any number of calls ended by an empty call.
+
+## Clarifying questions
+
+- Does `fn` have a fixed number of parameters (`fn.length`)? *Yes for the main version.*
+- Extra arguments beyond `fn.length`? *Pass them through.*
+- Must the curried function keep `this`? *Nice to have.*
+- Placeholders (`c(_, 2)(1, 3)`)? *Only if asked — it is the hard follow-up.*
+
+## Approach
+
+Collect arguments in a closure. Each call adds its arguments to the collected list; once there are at least `fn.length` of them, call `fn`. Otherwise return a new function that keeps collecting. Every partial call returns a **new** function with its own argument list, so partial applications can be reused independently.
+
+## Step-by-step build
+
+### Step 1 — fixed arity
+
+```js
+function curry(fn) {
+  return function curried(...args) {
+    if (args.length >= fn.length) return fn.apply(this, args);
+    return (...more) => curried.apply(this, [...args, ...more]);
+  };
+}
+```
+
+### Step 2 — reuse is safe
+
+```js
+const add1 = curry(add3)(1);
+add1(2)(3);  // 6
+add1(10)(20); // 31 — add1 is not affected by the previous call
+```
+
+This works because every call builds a new array (`[...args, ...more]`) instead of pushing into a shared one.
+
+### Step 3 — the infinite sum variant
+
+Keep adding until a call with no arguments.
+
+```js
+function sum(a) {
+  return function next(b) {
+    return b === undefined ? a : sum(a + b);
+  };
+}
+sum(1)(2)(3)(); // 6
+```
+
+## Final code
+
+```js
+function curry(fn) {
+  return function curried(...args) {
+    if (args.length >= fn.length) return fn.apply(this, args);
+    const ctx = this;
+    return function (...more) {
+      return curried.apply(ctx, [...args, ...more]);
+    };
+  };
+}
+
+// sum(1)(2)(3)() → 6 ; also accepts several arguments per call: sum(1, 2)(3)()
+function sum(...first) {
+  const total = first.reduce((s, x) => s + x, 0);
+  return function next(...more) {
+    return more.length === 0 ? total : sum(total, ...more);
+  };
+}
+
+// Placeholder version: `curry.placeholder` marks a slot to fill later.
+curry.placeholder = Symbol('_');
+function curryWithPlaceholder(fn) {
+  const _ = curry.placeholder;
+  return function curried(...args) {
+    const ready = args.length >= fn.length && args.slice(0, fn.length).every((a) => a !== _);
+    if (ready) return fn.apply(this, args);
+    return (...more) => {
+      const merged = args.map((a) => (a === _ && more.length ? more.shift() : a));
+      return curried.apply(this, [...merged, ...more]);
+    };
+  };
+}
+```
+
+## Edge cases
+
+- `fn.length` ignores default and rest parameters: `(a, b = 1) => …` has length 1. Accept an explicit arity argument if that matters.
+- A zero-argument function is called on the first call.
+- Calling with more arguments than needed passes the extras to `fn`.
+- The infinite `sum` needs an explicit terminator (the empty call). The alternative — overriding `valueOf` / `toString` so `+sum(1)(2)` works — is clever but fragile; mention it, do not rely on it.
+
+## Follow-ups
+
+- *Where is currying useful?* Building specialised functions: `const logError = log('error')`, event handlers with preset ids, point-free `map(multiply(2))`.
+- *Currying vs partial application:* currying always takes one argument per step in its strict form; partial application fixes any number of arguments once (`bind` does that).
+- *Uncurry:* convert `a => b => c => …` back into `(a, b, c) => …`.
+
+## Common mistakes
+
+- Storing arguments in a single shared array, so reusing a partial application gives wrong results.
+- Checking `args.length === fn.length`, which breaks when extra arguments are passed.
+- Forgetting to return the function in the partial case.
+
+## Related
+
+- Concepts: [currying](/javascript/18-currying) and [closures](/javascript/08-closure) in the JavaScript track.
+- Next: [memoize](/machine-coding/memoize).

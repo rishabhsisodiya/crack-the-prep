@@ -1,0 +1,149 @@
+---
+title: "Polyfill: map, filter and reduce"
+track: "machine-coding"
+kind: "notes"
+order: 12
+slug: "map-filter-reduce"
+imp: true
+updated: 2026-09-22
+description: "Implement Array.prototype.map, filter and reduce — sparse arrays, thisArg, and reduce with and without an initial value."
+---
+
+import Callout from '../../components/Callout.astro';
+
+## Problem
+
+Implement `myMap`, `myFilter` and `myReduce` on `Array.prototype`, matching the built-ins:
+
+```js
+[1, 2, 3].myMap((x) => x * 2);                 // [2, 4, 6]
+[1, 2, 3, 4].myFilter((x) => x % 2 === 0);     // [2, 4]
+[1, 2, 3].myReduce((sum, x) => sum + x, 0);    // 6
+[1, 2, 3].myReduce((sum, x) => sum + x);       // 6 (no initial value)
+```
+
+## Clarifying questions
+
+- Does the callback receive `(element, index, array)`? *Yes, all three.*
+- Should `map` and `filter` accept a `thisArg`? *Yes, the built-ins do.*
+- Should holes in sparse arrays (`[1, , 3]`) be skipped? *Yes — the built-ins skip them.*
+- What should `reduce` do on an empty array with no initial value? *Throw a `TypeError`.*
+
+## Approach
+
+Loop over the indices, skip holes with `i in this`, call the callback, and collect results. `reduce` needs one extra decision: if no initial value was passed, the first existing element becomes the accumulator and the loop starts after it. Check `arguments.length` rather than `initial === undefined`, because `undefined` is a legitimate initial value.
+
+## Step-by-step build
+
+### Step 1 — myMap
+
+```js
+Array.prototype.myMap = function (cb, thisArg) {
+  const out = new Array(this.length);
+  for (let i = 0; i < this.length; i++) {
+    if (i in this) out[i] = cb.call(thisArg, this[i], i, this);
+  }
+  return out;
+};
+```
+
+### Step 2 — myFilter
+
+```js
+Array.prototype.myFilter = function (cb, thisArg) {
+  const out = [];
+  for (let i = 0; i < this.length; i++) {
+    if (i in this && cb.call(thisArg, this[i], i, this)) out.push(this[i]);
+  }
+  return out;
+};
+```
+
+### Step 3 — myReduce
+
+```js
+Array.prototype.myReduce = function (cb, initial) {
+  let i = 0;
+  let acc = initial;
+  if (arguments.length < 2) {
+    while (i < this.length && !(i in this)) i++;   // find the first real element
+    if (i >= this.length) throw new TypeError('Reduce of empty array with no initial value');
+    acc = this[i++];
+  }
+  for (; i < this.length; i++) {
+    if (i in this) acc = cb(acc, this[i], i, this);
+  }
+  return acc;
+};
+```
+
+### Step 4 — validate the callback
+
+```js
+if (typeof cb !== 'function') throw new TypeError(cb + ' is not a function');
+```
+
+## Final code
+
+```js
+Array.prototype.myMap = function (cb, thisArg) {
+  if (typeof cb !== 'function') throw new TypeError(cb + ' is not a function');
+  const len = this.length;
+  const out = new Array(len);
+  for (let i = 0; i < len; i++) {
+    if (i in this) out[i] = cb.call(thisArg, this[i], i, this);
+  }
+  return out;
+};
+
+Array.prototype.myFilter = function (cb, thisArg) {
+  if (typeof cb !== 'function') throw new TypeError(cb + ' is not a function');
+  const len = this.length;
+  const out = [];
+  for (let i = 0; i < len; i++) {
+    if (i in this && cb.call(thisArg, this[i], i, this)) out.push(this[i]);
+  }
+  return out;
+};
+
+Array.prototype.myReduce = function (cb, initial) {
+  if (typeof cb !== 'function') throw new TypeError(cb + ' is not a function');
+  const len = this.length;
+  let i = 0;
+  let acc = initial;
+  if (arguments.length < 2) {
+    while (i < len && !(i in this)) i++;
+    if (i >= len) throw new TypeError('Reduce of empty array with no initial value');
+    acc = this[i++];
+  }
+  for (; i < len; i++) {
+    if (i in this) acc = cb(acc, this[i], i, this);
+  }
+  return acc;
+};
+```
+
+## Edge cases
+
+- Sparse arrays: `[1, , 3].myMap(f)` keeps the hole and never calls `f` for index 1.
+- `reduce` on `[]` with no initial value throws; with an initial value it returns it untouched.
+- `reduce` with `undefined` as the explicit initial value must use it — hence `arguments.length`.
+- The callback pushes to the array while looping: the built-ins read `length` once at the start, so elements added later are not visited. Caching `len` gives the same behaviour.
+
+## Follow-ups
+
+- *Implement `reduceRight`.* Same logic, walking from `len − 1` down.
+- *Write `map` and `filter` using only your `reduce`.* A common twist to check you understand the accumulator.
+- *Why not use arrow functions for the polyfills?* `this` must be the array the method is called on.
+
+## Common mistakes
+
+- `if (!initial)` instead of checking whether it was passed — breaks `reduce(fn, 0)`.
+- Using `push` in `map`, which collapses holes and shifts indices.
+- Forgetting the `index` and `array` arguments to the callback.
+- Ignoring `thisArg`.
+
+## Related
+
+- Concepts: [reduce polyfill](/javascript/17-polyfill-reduce) in the JavaScript track.
+- Next: [Array.flat](/machine-coding/array-flat).

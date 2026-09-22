@@ -163,3 +163,5 @@ console.log(whoAmI.call(null) === globalThis); // true in non-strict mode (undef
 ```
 
 For how to write your own versions of these methods, see **Polyfill for call, apply and bind method**.
+
+> **Interview practice:** Interview version, built step by step with edge cases: [Machine Coding — call, apply and bind](/machine-coding/call-apply-bind).

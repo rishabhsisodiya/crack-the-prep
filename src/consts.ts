@@ -54,6 +54,12 @@ export const TRACKS: Track[] = [
     hasQuestions: true,
   },
   {
+    slug: 'machine-coding',
+    title: 'Machine Coding',
+    blurb: 'Polyfills, utilities, async helpers and UI components — built live, step by step, the way the round is scored.',
+    badge: '⌨',
+  },
+  {
     slug: 'system-design',
     title: 'System Design',
     blurb: 'A framework, the building blocks, and worked problems with diagrams.',

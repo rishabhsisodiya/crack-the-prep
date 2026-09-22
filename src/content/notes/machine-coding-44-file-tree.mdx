@@ -1,0 +1,239 @@
+---
+title: "Nested File Tree"
+track: "machine-coding"
+kind: "notes"
+order: 44
+slug: "file-tree"
+imp: true
+updated: 2026-09-22
+description: "A recursive folder/file tree in React — expand and collapse, immutable add and delete, keyboard navigation over visible rows, and the tree ARIA pattern."
+---
+
+import Callout from '../../components/Callout.astro';
+
+## Problem
+
+Render a nested file explorer from data like this. Folders expand and collapse; the user can add and delete items:
+
+```js
+const data = {
+  id: 'root', name: 'src', children: [
+    { id: 'c', name: 'components', children: [{ id: 'b', name: 'Button.jsx' }] },
+    { id: 'i', name: 'index.js' },
+  ],
+};
+// <FileTree data={data} />
+```
+
+A node with a `children` array is a folder; without one it is a file.
+
+## Clarifying questions
+
+- Unlimited depth? *Yes — recursion.*
+- Which folders start expanded? *Only the root.*
+- Add/rename/delete? *Add and delete here; rename is similar.*
+- Keyboard navigation? *↑/↓ move between visible rows, → expands or enters, ← collapses or goes to the parent.*
+- Sort folders before files? *Ask; here we keep data order.*
+
+## Approach
+
+Keep the tree data and a `Set` of expanded folder ids in state. Rendering is recursive: a folder renders its children only when expanded. All updates are **pure functions** that return a new tree (never mutate), which React needs to notice changes. For keyboard navigation, flatten the tree into the list of currently *visible* rows — moving up and down is then just moving through that list.
+
+## Step-by-step build
+
+### Step 1 — recursive rendering
+
+```jsx
+function Node({ node, depth, expanded, toggle }) {
+  const isFolder = Array.isArray(node.children);
+  const open = expanded.has(node.id);
+  return (
+    <li>
+      <div style={{ paddingLeft: depth * 16 }} onClick={() => isFolder && toggle(node.id)}>
+        {isFolder ? (open ? '📂' : '📁') : '📄'} {node.name}
+      </div>
+      {isFolder && open && (
+        <ul>{node.children.map((c) => <Node key={c.id} node={c} depth={depth + 1} expanded={expanded} toggle={toggle} />)}</ul>
+      )}
+    </li>
+  );
+}
+```
+
+### Step 2 — immutable updates
+
+```js
+function addNode(tree, parentId, newNode) {
+  if (tree.id === parentId) return { ...tree, children: [...tree.children, newNode] };
+  if (!tree.children) return tree;
+  return { ...tree, children: tree.children.map((c) => addNode(c, parentId, newNode)) };
+}
+```
+
+### Step 3 — visible rows for keyboard navigation
+
+```js
+function visibleRows(tree, expanded, depth = 0, parentId = null, out = []) {
+  out.push({ node: tree, depth, parentId });
+  if (tree.children && expanded.has(tree.id)) tree.children.forEach((c) => visibleRows(c, expanded, depth + 1, tree.id, out));
+  return out;
+}
+```
+
+### Step 4 — ARIA
+
+The list is `role="tree"`, each row `role="treeitem"` with `aria-level`, and `aria-expanded` on folders; nested lists are `role="group"`. Roving `tabIndex` keeps one row in the Tab order.
+
+## Final code
+
+```jsx
+import { useState } from 'react';
+
+export const isFolder = (node) => Array.isArray(node.children);
+
+export function toggleId(set, id) {
+  const next = new Set(set);
+  next.has(id) ? next.delete(id) : next.add(id);
+  return next;
+}
+
+// Both updates copy only the path to the change; untouched subtrees (and the whole
+// tree, when nothing matches) keep their identity, so React skips re-rendering them.
+function mapChildren(tree, fn) {
+  let changed = false;
+  const children = [];
+  for (const c of tree.children) {
+    const next = fn(c);
+    if (next !== c) changed = true;
+    if (next !== null) children.push(next);
+  }
+  return changed ? { ...tree, children } : tree;
+}
+
+export function addNode(tree, parentId, newNode) {
+  if (!isFolder(tree)) return tree;
+  if (tree.id === parentId) return { ...tree, children: [...tree.children, newNode] };
+  return mapChildren(tree, (c) => addNode(c, parentId, newNode));
+}
+
+export function removeNode(tree, id) {
+  if (!isFolder(tree)) return tree;
+  return mapChildren(tree, (c) => (c.id === id ? null : removeNode(c, id)));
+}
+
+export function visibleRows(tree, expanded, depth = 1, parentId = null, out = []) {
+  out.push({ node: tree, depth, parentId });
+  if (isFolder(tree) && expanded.has(tree.id)) {
+    for (const c of tree.children) visibleRows(c, expanded, depth + 1, tree.id, out);
+  }
+  return out;
+}
+
+// Keyboard: returns { focus, expanded } after a key press on the row with id `focus`.
+export function treeKey(tree, expanded, focus, key) {
+  const rows = visibleRows(tree, expanded);
+  const i = rows.findIndex((r) => r.node.id === focus);
+  if (i === -1) return { focus, expanded };
+  const row = rows[i];
+  const folder = isFolder(row.node);
+  const open = expanded.has(row.node.id);
+  switch (key) {
+    case 'ArrowDown': return { focus: rows[Math.min(rows.length - 1, i + 1)].node.id, expanded };
+    case 'ArrowUp': return { focus: rows[Math.max(0, i - 1)].node.id, expanded };
+    case 'ArrowRight':
+      if (folder && !open) return { focus, expanded: toggleId(expanded, focus) };
+      if (folder && open && row.node.children.length) return { focus: row.node.children[0].id, expanded };
+      return { focus, expanded };
+    case 'ArrowLeft':
+      if (folder && open) return { focus, expanded: toggleId(expanded, focus) };
+      return { focus: row.parentId ?? focus, expanded };
+    case 'Home': return { focus: rows[0].node.id, expanded };
+    case 'End': return { focus: rows[rows.length - 1].node.id, expanded };
+    default: return { focus, expanded };
+  }
+}
+
+export function FileTree({ data }) {
+  const [tree, setTree] = useState(data);
+  const [expanded, setExpanded] = useState(() => new Set([data.id]));
+  const [focus, setFocus] = useState(data.id);
+
+  const onKeyDown = (e) => {
+    const next = treeKey(tree, expanded, focus, e.key);
+    if (next.focus !== focus || next.expanded !== expanded) {
+      e.preventDefault();
+      setFocus(next.focus);
+      setExpanded(next.expanded);
+      requestAnimationFrame(() => document.getElementById(`tree-${next.focus}`)?.focus());
+    }
+  };
+
+  const add = (parentId) => {
+    const name = prompt('Name (end with / for a folder)');
+    if (!name) return;
+    const node = name.endsWith('/')
+      ? { id: crypto.randomUUID(), name: name.slice(0, -1), children: [] }
+      : { id: crypto.randomUUID(), name };
+    setTree((t) => addNode(t, parentId, node));
+    setExpanded((s) => new Set(s).add(parentId));
+  };
+
+  const renderNode = (node, depth) => {
+    const folder = isFolder(node);
+    const open = expanded.has(node.id);
+    return (
+      <li
+        key={node.id}
+        id={`tree-${node.id}`}
+        role="treeitem"
+        aria-level={depth}
+        aria-expanded={folder ? open : undefined}
+        aria-selected={focus === node.id}
+        tabIndex={focus === node.id ? 0 : -1}
+        onFocus={(e) => { if (e.target === e.currentTarget) setFocus(node.id); }}
+      >
+        <div className="row" style={{ paddingLeft: (depth - 1) * 16 }} onClick={() => folder && setExpanded((s) => toggleId(s, node.id))}>
+          <span aria-hidden="true">{folder ? (open ? '📂' : '📁') : '📄'}</span> {node.name}
+          {folder && <button tabIndex={-1} onClick={(e) => { e.stopPropagation(); add(node.id); }}>+</button>}
+          {node.id !== tree.id && (
+            <button tabIndex={-1} aria-label={`Delete ${node.name}`} onClick={(e) => { e.stopPropagation(); setTree((t) => removeNode(t, node.id)); }}>×</button>
+          )}
+        </div>
+        {folder && open && node.children.length > 0 && <ul role="group">{node.children.map((c) => renderNode(c, depth + 1))}</ul>}
+      </li>
+    );
+  };
+
+  return (
+    <ul role="tree" aria-label="Files" onKeyDown={onKeyDown}>
+      {renderNode(tree, 1)}
+    </ul>
+  );
+}
+```
+
+## Edge cases
+
+- Empty folders render with no group and cannot be entered with →.
+- Deleting a folder removes its whole subtree; if it held the focused row, move focus to its parent.
+- Deeply nested data: recursion depth equals tree depth, which is fine for UI trees.
+- Duplicate names are allowed; `id`s must be unique — use them as React keys, never the name.
+- `addNode` on a file id, or `removeNode` of an unknown id, returns the **same** tree object — no needless re-render.
+
+## Follow-ups
+
+- *Very large trees:* render `visibleRows` with virtualisation instead of recursion.
+- *Lazy loading:* fetch a folder's children the first time it is expanded.
+- *Drag and drop* to move nodes: `removeNode` then `addNode`, and forbid dropping a folder into its own descendant.
+- *Normalised state:* store nodes in a map by id with `childIds` — updates become O(1) instead of rebuilding the path.
+
+## Common mistakes
+
+- Mutating `node.children.push(...)` — React does not re-render.
+- Using names or indices as keys.
+- Storing `expanded` on the data nodes, mixing UI state with data.
+- A tree that is only usable with a mouse.
+
+## Related
+
+- Next: [tabs and accordion](/machine-coding/tabs-accordion) — the same roving-tabindex pattern.

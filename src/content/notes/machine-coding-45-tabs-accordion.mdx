@@ -1,0 +1,206 @@
+---
+title: "Accessible Tabs and Accordion"
+track: "machine-coding"
+kind: "notes"
+order: 45
+slug: "tabs-accordion"
+updated: 2026-09-22
+description: "Tabs and an accordion in React that follow the WAI-ARIA patterns — roving tabindex, arrow-key navigation, controlled state, single or multiple open sections."
+---
+
+import Callout from '../../components/Callout.astro';
+
+## Problem
+
+Build two components used on almost every product page:
+
+```jsx
+<Tabs tabs={[
+  { id: 'overview', label: 'Overview', content: <Overview /> },
+  { id: 'specs', label: 'Specs', content: <Specs /> },
+]} />
+
+<Accordion allowMultiple sections={[
+  { id: 'ship', title: 'Shipping', content: '…' },
+  { id: 'returns', title: 'Returns', content: '…' },
+]} />
+```
+
+## Clarifying questions
+
+- Tabs: activate on arrow-key focus (automatic) or on Enter (manual)? *Automatic here.*
+- Controlled (`activeId` + `onChange`) as well as uncontrolled? *Support both for tabs.*
+- Accordion: one section open at a time, or several? *An `allowMultiple` prop.*
+- Keep inactive tab panels mounted (to preserve form state)? *Ask; here only the active panel renders.*
+
+## Approach
+
+Both components are mostly accessibility work. **Tabs:** `role="tablist"` containing `role="tab"` buttons linked to `role="tabpanel"`s with `aria-controls` / `aria-labelledby`; only the active tab is in the Tab order (roving `tabIndex`), and arrow keys move between tabs. **Accordion:** each header is a real `<button>` with `aria-expanded` controlling its panel. The logic — which tab comes next, which sections are open — lives in pure functions.
+
+## Step-by-step build
+
+### Step 1 — next tab for a key
+
+```js
+function nextTabIndex(index, key, count) {
+  switch (key) {
+    case 'ArrowRight': return (index + 1) % count;
+    case 'ArrowLeft': return (index - 1 + count) % count;
+    case 'Home': return 0;
+    case 'End': return count - 1;
+    default: return index;
+  }
+}
+```
+
+### Step 2 — Tabs with roving tabindex
+
+```jsx
+<button role="tab" aria-selected={active} tabIndex={active ? 0 : -1} aria-controls={panelId} id={tabId}>…</button>
+<div role="tabpanel" id={panelId} aria-labelledby={tabId} tabIndex={0}>…</div>
+```
+
+### Step 3 — controlled or uncontrolled
+
+Use the `activeId` prop when it is provided; otherwise keep internal state.
+
+### Step 4 — accordion open state
+
+```js
+function toggleSection(open, id, allowMultiple) {
+  if (open.includes(id)) return open.filter((x) => x !== id);
+  return allowMultiple ? [...open, id] : [id];
+}
+```
+
+## Final code
+
+```jsx
+import { useId, useRef, useState } from 'react';
+
+export function nextTabIndex(index, key, count) {
+  switch (key) {
+    case 'ArrowRight':
+      return (index + 1) % count;
+    case 'ArrowLeft':
+      return (index - 1 + count) % count;
+    case 'Home':
+      return 0;
+    case 'End':
+      return count - 1;
+    default:
+      return index;
+  }
+}
+
+export function toggleSection(open, id, allowMultiple) {
+  if (open.includes(id)) return open.filter((x) => x !== id);
+  return allowMultiple ? [...open, id] : [id];
+}
+
+export function Tabs({ tabs, activeId, defaultActiveId, onChange }) {
+  const [internal, setInternal] = useState(defaultActiveId ?? tabs[0]?.id);
+  const current = activeId ?? internal; // controlled when activeId is passed
+  const base = useId();
+  const refs = useRef([]);
+
+  const select = (id) => {
+    if (activeId === undefined) setInternal(id);
+    onChange?.(id);
+  };
+
+  const onKeyDown = (e, index) => {
+    const next = nextTabIndex(index, e.key, tabs.length);
+    if (next === index) return;
+    e.preventDefault();
+    select(tabs[next].id);
+    refs.current[next]?.focus();
+  };
+
+  const active = tabs.find((t) => t.id === current) ?? tabs[0];
+  return (
+    <div className="tabs">
+      <div role="tablist">
+        {tabs.map((t, i) => {
+          const selected = t.id === active?.id;
+          return (
+            <button
+              key={t.id}
+              ref={(el) => (refs.current[i] = el)}
+              role="tab"
+              id={`${base}-tab-${t.id}`}
+              aria-selected={selected}
+              aria-controls={`${base}-panel-${t.id}`}
+              tabIndex={selected ? 0 : -1}
+              onClick={() => select(t.id)}
+              onKeyDown={(e) => onKeyDown(e, i)}
+            >
+              {t.label}
+            </button>
+          );
+        })}
+      </div>
+      {active && (
+        <div role="tabpanel" id={`${base}-panel-${active.id}`} aria-labelledby={`${base}-tab-${active.id}`} tabIndex={0}>
+          {active.content}
+        </div>
+      )}
+    </div>
+  );
+}
+
+export function Accordion({ sections, allowMultiple = false, defaultOpen = [] }) {
+  const [open, setOpen] = useState(defaultOpen);
+  const base = useId();
+  return (
+    <div className="accordion">
+      {sections.map((s) => {
+        const expanded = open.includes(s.id);
+        return (
+          <div key={s.id}>
+            <h3>
+              <button
+                id={`${base}-h-${s.id}`}
+                aria-expanded={expanded}
+                aria-controls={`${base}-p-${s.id}`}
+                onClick={() => setOpen((o) => toggleSection(o, s.id, allowMultiple))}
+              >
+                {s.title}
+              </button>
+            </h3>
+            <div id={`${base}-p-${s.id}`} role="region" aria-labelledby={`${base}-h-${s.id}`} hidden={!expanded}>
+              {s.content}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+```
+
+## Edge cases
+
+- Arrow keys wrap from the last tab to the first and back.
+- Only one tab is reachable with Tab; the panel itself is focusable so keyboard users can reach its content.
+- A controlled `activeId` that matches no tab falls back to the first tab.
+- Single-open accordion: opening a section closes the others; clicking the open one closes it.
+- The accordion panel stays in the DOM with `hidden`, so content is searchable with Ctrl+F in some browsers only when shown — mention `hidden="until-found"`.
+
+## Follow-ups
+
+- *Manual activation:* arrows move focus only; Enter/Space activates — better when panels are expensive to render.
+- *Lazy panels:* render a panel the first time it is opened, then keep it mounted.
+- *Native accordion:* `<details>`/`<summary>` gives expand/collapse and semantics for free (with `name` for exclusive groups).
+- *URL sync:* store the active tab in `?tab=` so it survives refreshes and can be linked.
+
+## Common mistakes
+
+- Tabs built from `<div onClick>` — not focusable, no roles.
+- Every tab in the Tab order.
+- Missing `aria-controls` / `aria-labelledby` links between tab and panel.
+- Accordion headers that are not buttons.
+
+## Related
+
+- Same keyboard pattern: [file tree](/machine-coding/file-tree), [star rating](/machine-coding/star-rating).

@@ -239,3 +239,5 @@ if (!Function.prototype.bind) {
   };
 }
 ```
+
+> **Interview practice:** Interview version, built step by step — including `new` on a bound function: [Machine Coding — call, apply and bind](/machine-coding/call-apply-bind).

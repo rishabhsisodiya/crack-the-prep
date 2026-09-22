@@ -1,0 +1,131 @@
+---
+title: "Polyfill: Object.assign and Object.create"
+track: "machine-coding"
+kind: "notes"
+order: 16
+slug: "object-assign-create"
+updated: 2026-09-22
+description: "Implement Object.assign (own enumerable string and symbol keys, getters, null sources) and Object.create (prototype plus property descriptors)."
+---
+
+import Callout from '../../components/Callout.astro';
+
+## Problem
+
+Implement `assign(target, ...sources)` and `create(proto, descriptors?)` to match `Object.assign` and `Object.create`:
+
+```js
+assign({ a: 1 }, { b: 2 }, null, { a: 3 });    // { a: 3, b: 2 }
+
+const animal = { speak() { return `${this.name} makes a sound`; } };
+const dog = create(animal, { name: { value: 'Rex', enumerable: true } });
+dog.speak();                                   // "Rex makes a sound"
+Object.getPrototypeOf(dog) === animal;         // true
+```
+
+## Clarifying questions
+
+- `assign`: are `null` / `undefined` sources skipped? *Yes. A `null` target throws.*
+- Copy symbol keys? *Yes — own enumerable string **and** symbol keys.*
+- Should getters be copied as getters or invoked? *Invoked: `assign` reads the value and writes it with `=`.*
+- `create`: must `create(null)` produce an object with no prototype? *Yes.*
+
+## Approach
+
+`assign` is a loop over sources and their own enumerable keys, reading each value and assigning it to the target, which triggers setters. `create` needs an object whose prototype is `proto`: the classic trick is a throwaway constructor whose `prototype` is `proto`. The optional second argument is handed to `Object.defineProperties`.
+
+## Step-by-step build
+
+### Step 1 — assign, string keys
+
+```js
+function assign(target, ...sources) {
+  if (target == null) throw new TypeError('Cannot convert undefined or null to object');
+  const to = Object(target);
+  for (const src of sources) {
+    if (src == null) continue;
+    for (const key of Object.keys(src)) to[key] = src[key];
+  }
+  return to;
+}
+```
+
+### Step 2 — include enumerable symbol keys
+
+`Object.keys` skips symbols. Use `Reflect.ownKeys` and keep only enumerable ones.
+
+```js
+for (const key of Reflect.ownKeys(Object(src))) {
+  if (Object.prototype.propertyIsEnumerable.call(src, key)) to[key] = src[key];
+}
+```
+
+### Step 3 — create with the constructor trick
+
+```js
+function create(proto, descriptors) {
+  if (proto !== null && typeof proto !== 'object' && typeof proto !== 'function')
+    throw new TypeError('Object prototype may only be an Object or null');
+  function F() {}
+  F.prototype = proto;
+  const obj = new F();
+  if (proto === null) Object.setPrototypeOf(obj, null); // new F() would fall back to Object.prototype
+  if (descriptors !== undefined) Object.defineProperties(obj, descriptors);
+  return obj;
+}
+```
+
+## Final code
+
+```js
+function assign(target, ...sources) {
+  if (target == null) throw new TypeError('Cannot convert undefined or null to object');
+  const to = Object(target);
+  for (const src of sources) {
+    if (src == null) continue;
+    const from = Object(src);
+    for (const key of Reflect.ownKeys(from)) {
+      if (Object.prototype.propertyIsEnumerable.call(from, key)) to[key] = from[key];
+    }
+  }
+  return to;
+}
+
+function create(proto, descriptors) {
+  if (proto !== null && typeof proto !== 'object' && typeof proto !== 'function') {
+    throw new TypeError('Object prototype may only be an Object or null: ' + proto);
+  }
+  function F() {}
+  F.prototype = proto;
+  const obj = new F();
+  if (proto === null) Object.setPrototypeOf(obj, null);
+  if (descriptors !== undefined) Object.defineProperties(obj, descriptors);
+  return obj;
+}
+```
+
+## Edge cases
+
+- `assign(null)` throws; `assign({}, null, undefined)` returns `{}`.
+- String sources are spread by index: `assign({}, 'ab')` → `{ 0: 'a', 1: 'b' }`.
+- Getters on sources run, and their current value is copied; setters on the target run too.
+- `assign` is shallow: nested objects are shared, not copied — see [deep clone](/machine-coding/deep-clone).
+- `create(null)` has no `toString`, `hasOwnProperty` — useful for dictionaries.
+
+## Follow-ups
+
+- *Difference between `assign` and spread `{ ...a }`?* Spread defines properties (no setters on the target run); `assign` sets them.
+- *Why not `obj.__proto__ = proto`?* Non-standard historically, slow, and does nothing for `Object.create(null)`-style objects.
+- *Implement inheritance ES5-style* using `create`: `Child.prototype = create(Parent.prototype); Child.prototype.constructor = Child`.
+
+## Common mistakes
+
+- Using `for…in`, which also copies inherited enumerable properties.
+- Forgetting symbol keys.
+- Treating `assign` as a deep copy.
+- `create(null)` returning an object that still inherits from `Object.prototype`.
+
+## Related
+
+- Concepts: prototypes and inheritance in the [JavaScript track](/javascript).
+- Next: [the new operator and instanceof](/machine-coding/new-operator).

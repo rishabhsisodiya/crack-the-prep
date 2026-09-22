@@ -1,0 +1,179 @@
+---
+title: "Async Task Queue with Pause and Resume"
+track: "machine-coding"
+kind: "notes"
+order: 33
+slug: "async-task-queue"
+updated: 2026-09-22
+description: "A task queue with a concurrency limit, tasks added over time, per-task promises, pause/resume, clear and onIdle."
+---
+
+import Callout from '../../components/Callout.astro';
+
+## Problem
+
+Implement a `TaskQueue` class. Tasks (functions returning promises) can be added at any time; at most `concurrency` run at once; each `add` returns a promise for that task's result. The queue can be paused and resumed:
+
+```js
+const q = new TaskQueue({ concurrency: 2 });
+const a = q.add(() => upload(file1));   // starts now
+const b = q.add(() => upload(file2));   // starts now
+const c = q.add(() => upload(file3));   // waits for a free slot
+q.pause();                              // running tasks finish; queued ones wait
+q.resume();
+await q.onIdle();                       // everything done
+```
+
+## Clarifying questions
+
+- Does `pause()` cancel running tasks? *No — it only stops new ones from starting.*
+- Does one task's failure affect others? *No — only that task's promise rejects.*
+- `clear()`: drop queued tasks — reject their promises or leave them pending? *Reject, so callers are not left waiting forever.*
+- `onIdle()`: when nothing is queued **and** nothing is running.
+
+## Approach
+
+Keep a FIFO array of `{ task, resolve, reject }`, a count of running tasks, and a `paused` flag. A single `#next()` method starts tasks while there is a free slot, the queue is not paused and something is waiting. Every finished task frees a slot and calls `#next()` again. `onIdle` promises are resolved whenever the queue drains.
+
+## Step-by-step build
+
+### Step 1 — add and run with a limit
+
+```js
+class TaskQueue {
+  #queue = [];
+  #running = 0;
+  constructor({ concurrency = 1 } = {}) { this.concurrency = concurrency; }
+
+  add(task) {
+    return new Promise((resolve, reject) => {
+      this.#queue.push({ task, resolve, reject });
+      this.#next();
+    });
+  }
+
+  #next() {
+    while (this.#running < this.concurrency && this.#queue.length) {
+      const { task, resolve, reject } = this.#queue.shift();
+      this.#running++;
+      Promise.resolve().then(task).then(resolve, reject).finally(() => {
+        this.#running--;
+        this.#next();
+      });
+    }
+  }
+}
+```
+
+### Step 2 — pause and resume
+
+```js
+pause() { this.paused = true; }
+resume() { this.paused = false; this.#next(); }
+// in #next: while (!this.paused && ...)
+```
+
+### Step 3 — onIdle and clear
+
+```js
+onIdle() {
+  if (this.#running === 0 && this.#queue.length === 0) return Promise.resolve();
+  return new Promise((resolve) => this.#idleWaiters.push(resolve));
+}
+```
+
+Call the waiters at the end of `#next` when both counts are zero.
+
+## Final code
+
+```js
+class TaskQueue {
+  #queue = [];
+  #running = 0;
+  #idleWaiters = [];
+
+  constructor({ concurrency = 1, autoStart = true } = {}) {
+    if (!Number.isInteger(concurrency) || concurrency < 1) throw new RangeError('concurrency must be >= 1');
+    this.concurrency = concurrency;
+    this.paused = !autoStart;
+  }
+
+  get size() { return this.#queue.length; }      // waiting
+  get pending() { return this.#running; }        // running
+
+  add(task) {
+    return new Promise((resolve, reject) => {
+      this.#queue.push({ task, resolve, reject });
+      this.#next();
+    });
+  }
+
+  pause() {
+    this.paused = true;
+  }
+
+  resume() {
+    if (!this.paused) return;
+    this.paused = false;
+    this.#next();
+  }
+
+  clear(reason = new Error('Task cleared from queue')) {
+    const dropped = this.#queue.splice(0);
+    dropped.forEach(({ reject }) => reject(reason));
+    this.#checkIdle();
+  }
+
+  onIdle() {
+    if (this.#running === 0 && this.#queue.length === 0) return Promise.resolve();
+    return new Promise((resolve) => this.#idleWaiters.push(resolve));
+  }
+
+  #next() {
+    while (!this.paused && this.#running < this.concurrency && this.#queue.length) {
+      const { task, resolve, reject } = this.#queue.shift();
+      this.#running++;
+      Promise.resolve()
+        .then(task)
+        .then(resolve, reject)
+        .finally(() => {
+          this.#running--;
+          this.#next();
+        });
+    }
+    this.#checkIdle();
+  }
+
+  #checkIdle() {
+    if (this.#running === 0 && this.#queue.length === 0 && this.#idleWaiters.length) {
+      this.#idleWaiters.splice(0).forEach((resolve) => resolve());
+    }
+  }
+}
+```
+
+## Edge cases
+
+- Adding while paused queues the task; it starts on `resume()`.
+- A task that throws synchronously rejects only its own promise — `Promise.resolve().then(task)` catches it.
+- `onIdle()` on an empty queue resolves immediately; while paused with queued tasks it waits until they run.
+- `clear()` rejects queued tasks but lets running ones finish.
+- Raising `concurrency` at runtime should start more tasks — call `#next()` from a setter if that is required.
+
+## Follow-ups
+
+- *Priorities:* insert by priority instead of `push` (or use a heap for large queues).
+- *Per-task timeout:* wrap each task with [withTimeout](/machine-coding/sleep-timeout).
+- *Events:* emit `active`, `completed`, `error`, `idle` — extend the [EventEmitter](/machine-coding/event-emitter).
+- *Where is this used?* Upload managers, crawlers, background job runners, rate-sensitive API clients.
+
+## Common mistakes
+
+- `pause()` that tries to abort running tasks without cancellation support.
+- Forgetting to call `#next()` after a task finishes, so the queue stalls after the first `concurrency` tasks.
+- `onIdle` that resolves when the queue is empty but tasks are still running.
+- A failed task that stops the whole queue.
+
+## Related
+
+- Previous: [promise pool](/machine-coding/promise-pool) — the same slot logic for a fixed list.

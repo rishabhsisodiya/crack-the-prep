@@ -1,0 +1,142 @@
+---
+title: "Sleep and Timeout Wrappers"
+track: "machine-coding"
+kind: "notes"
+order: 34
+slug: "sleep-timeout"
+updated: 2026-09-22
+description: "A cancellable sleep, withTimeout that cleans up its timer, and passing an AbortSignal so the timed-out work actually stops."
+---
+
+import Callout from '../../components/Callout.astro';
+
+## Problem
+
+Implement two small async helpers:
+
+1. `sleep(ms, { signal })` — a promise that resolves after `ms` milliseconds, and rejects early if the signal aborts.
+2. `withTimeout(promiseOrFn, ms, message?)` — rejects with a `TimeoutError` if the work takes longer than `ms`.
+
+```js
+await sleep(500);
+const user = await withTimeout(fetchUser(id), 2000);             // rejects after 2 s
+const data = await withTimeout((signal) => fetch(url, { signal }), 2000); // and aborts the request
+```
+
+## Clarifying questions
+
+- Should the timeout **cancel** the work or only stop waiting for it? *Accept a function that receives an `AbortSignal`, so it can do both.*
+- What error type? *A dedicated `TimeoutError` so callers can tell it apart.*
+- Must the timer be cleared when the work finishes first? *Yes — otherwise it keeps Node processes and tests alive.*
+
+## Approach
+
+`sleep` is a `setTimeout` wrapped in a promise, plus an abort listener that clears the timer and rejects. `withTimeout` races the work against a timer, then clears the timer whichever side wins. If it was given a function, it creates an `AbortController`, passes its signal to the function, and aborts it on timeout.
+
+## Step-by-step build
+
+### Step 1 — sleep
+
+```js
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+```
+
+### Step 2 — cancellable sleep
+
+```js
+function sleep(ms, { signal } = {}) {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) return reject(signal.reason);
+    const onAbort = () => { clearTimeout(timer); reject(signal.reason); };
+    const timer = setTimeout(() => { signal?.removeEventListener('abort', onAbort); resolve(); }, ms);
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+}
+```
+
+### Step 3 — withTimeout that cleans up
+
+```js
+function withTimeout(promise, ms) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`Timed out after ${ms} ms`)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+```
+
+### Step 4 — actually cancel the work
+
+```js
+if (typeof work === 'function') {
+  const controller = new AbortController();
+  // pass controller.signal to work; call controller.abort() when the timer fires
+}
+```
+
+## Final code
+
+```js
+class TimeoutError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'TimeoutError';
+  }
+}
+
+function sleep(ms, { signal } = {}) {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) return reject(signal.reason);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(signal.reason);
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
+// work: a promise, or a function (signal) => promise that should stop when signal aborts
+function withTimeout(work, ms, message = `Timed out after ${ms} ms`) {
+  const controller = typeof work === 'function' ? new AbortController() : null;
+  const promise = controller ? Promise.resolve().then(() => work(controller.signal)) : Promise.resolve(work);
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      const error = new TimeoutError(message);
+      controller?.abort(error);
+      reject(error);
+    }, ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+```
+
+## Edge cases
+
+- The work finishes first → the timer is cleared, nothing leaks.
+- The work rejects first → that error is passed through, not a timeout.
+- `ms = 0` still yields to the event loop before timing out.
+- An already-aborted signal makes `sleep` reject immediately.
+- Passing a plain promise can only stop the **waiting**; the underlying work keeps running. Say this out loud — it is the key point of the question.
+
+## Follow-ups
+
+- *Built-ins:* `AbortSignal.timeout(ms)` and `AbortSignal.any([...])` do much of this in modern runtimes; Node has `timers/promises` `setTimeout`.
+- *Timeout per attempt inside [retry](/machine-coding/retry-backoff)* — compose `retry(() => withTimeout(fn, 1000))`.
+- *Why does an uncleared timer matter?* It keeps the Node event loop alive and makes test runners hang.
+
+## Common mistakes
+
+- Not clearing the timer when the work finishes first.
+- Rejecting with a string instead of an `Error` subclass — no stack, no `instanceof` check.
+- Claiming `Promise.race` cancels the loser. It does not.
+- Forgetting to remove the abort listener after a normal finish.
+
+## Related
+
+- Used by: [retry with backoff](/machine-coding/retry-backoff), [async task queue](/machine-coding/async-task-queue).

@@ -1,0 +1,160 @@
+---
+title: "Retry with Exponential Backoff"
+track: "machine-coding"
+kind: "notes"
+order: 31
+slug: "retry-backoff"
+imp: true
+updated: 2026-09-22
+description: "Retry a failing async operation with exponential backoff, a delay cap, jitter, a retry predicate and cancellation."
+---
+
+import Callout from '../../components/Callout.astro';
+
+## Problem
+
+Implement `retry(fn, options)`. It calls the async function `fn`; if it rejects, it waits and tries again, doubling the wait each time, up to `retries` extra attempts:
+
+```js
+const data = await retry(() => fetch('/api/items').then((r) => {
+  if (!r.ok) throw new Error('HTTP ' + r.status);
+  return r.json();
+}), { retries: 3, baseDelay: 200 });
+// attempt 1 fails → wait 200 ms → attempt 2 fails → wait 400 ms → attempt 3 → …
+```
+
+## Clarifying questions
+
+- Does `retries: 3` mean 3 attempts in total, or 3 **extra** attempts after the first? *Agree explicitly — here, 3 extra (4 in total).*
+- Should every error be retried? *No — a `shouldRetry(error)` predicate lets callers skip e.g. HTTP 400s.*
+- Cap the delay? Add jitter? *Yes to both: a `maxDelay`, and random jitter so many clients do not retry in lockstep.*
+- Must it be cancellable? *Support an `AbortSignal`.*
+- What is thrown when every attempt fails? *The last error.*
+
+## Approach
+
+Loop over attempts. Each attempt awaits `fn(attempt)`; success returns immediately. On failure, stop if it was the last attempt or `shouldRetry` says no; otherwise wait `min(maxDelay, baseDelay × factor^attempt)` — optionally randomised — and try again. The wait itself must be cancellable, so a single helper sleeps and rejects early if the signal aborts.
+
+## Step-by-step build
+
+### Step 1 — fixed number of attempts
+
+```js
+async function retry(fn, retries = 3) {
+  let lastError;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      return await fn(attempt);
+    } catch (e) {
+      lastError = e;
+    }
+  }
+  throw lastError;
+}
+```
+
+### Step 2 — exponential delay with a cap
+
+```js
+const delay = Math.min(maxDelay, baseDelay * factor ** attempt); // 200, 400, 800, …
+await new Promise((r) => setTimeout(r, delay));
+```
+
+Do not wait after the final attempt — it only slows down the failure.
+
+### Step 3 — jitter and a retry predicate
+
+"Full jitter" picks a random delay between 0 and the computed one, spreading retries from many clients.
+
+```js
+const wait = jitter ? Math.random() * delay : delay;
+if (!shouldRetry(e, attempt)) throw e;
+```
+
+### Step 4 — cancellation with AbortSignal
+
+```js
+function sleep(ms, signal) {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) return reject(signal.reason);
+    const t = setTimeout(done, ms);
+    function done() { signal?.removeEventListener('abort', onAbort); resolve(); }
+    function onAbort() { clearTimeout(t); reject(signal.reason); }
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+}
+```
+
+## Final code
+
+```js
+function sleep(ms, signal) {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) return reject(signal.reason);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(signal.reason);
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
+async function retry(
+  fn,
+  {
+    retries = 3,           // extra attempts after the first
+    baseDelay = 200,
+    factor = 2,
+    maxDelay = 10_000,
+    jitter = false,
+    shouldRetry = () => true,
+    onRetry = () => {},
+    signal,
+  } = {},
+) {
+  for (let attempt = 0; ; attempt++) {
+    if (signal?.aborted) throw signal.reason;
+    try {
+      return await fn(attempt);
+    } catch (error) {
+      const last = attempt >= retries;
+      if (last || signal?.aborted || !shouldRetry(error, attempt)) throw error;
+      const delay = Math.min(maxDelay, baseDelay * factor ** attempt);
+      const wait = jitter ? Math.random() * delay : delay;
+      onRetry(error, attempt + 1, wait);
+      await sleep(wait, signal);
+    }
+  }
+}
+```
+
+## Edge cases
+
+- `retries: 0` → exactly one attempt; its error is thrown as it is.
+- `fn` throws synchronously → caught the same way, because it runs inside `try` with `await`.
+- A non-retryable error (`shouldRetry` returns `false`) is thrown at once, with no wait.
+- Aborting during a wait rejects immediately with `signal.reason` and clears the timer.
+- Very large attempt counts: `factor ** attempt` grows fast, but the `maxDelay` cap keeps waits bounded.
+
+## Follow-ups
+
+- *Which errors should be retried?* Network failures, timeouts, HTTP 429 and 5xx — not 4xx validation errors. Honour a `Retry-After` header when present.
+- *Why jitter?* Without it, thousands of clients that failed together retry together, causing a "thundering herd" on the recovering server.
+- *Idempotency:* retrying a `POST /payments` can charge twice — mention idempotency keys.
+- *Circuit breaker:* stop calling a dependency for a while after repeated failures instead of retrying forever.
+
+## Common mistakes
+
+- Waiting after the last attempt.
+- Off-by-one on `retries` (total vs extra attempts) — clarify it up front.
+- Swallowing the error and resolving with `undefined` when every attempt fails.
+- `setTimeout` without cleanup when cancelled, leaving timers running.
+
+## Related
+
+- Next: [promise pool](/machine-coding/promise-pool) — limit how many requests run at once.
+- Uses: [sleep and timeout](/machine-coding/sleep-timeout).

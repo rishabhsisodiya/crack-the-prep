@@ -1,0 +1,129 @@
+---
+title: "Deep Equal"
+track: "machine-coding"
+kind: "notes"
+order: 24
+slug: "deep-equal"
+updated: 2026-09-22
+description: "Compare two values structurally — NaN, arrays vs objects, Date, RegExp, Map, Set, key order and circular references."
+---
+
+import Callout from '../../components/Callout.astro';
+
+## Problem
+
+Implement `deepEqual(a, b)` that returns `true` when two values have the same structure and contents:
+
+```js
+deepEqual({ a: [1, { b: 2 }] }, { a: [1, { b: 2 }] });   // true
+deepEqual([1, 2], { 0: 1, 1: 2 });                       // false — array vs object
+deepEqual(NaN, NaN);                                     // true
+deepEqual(new Date(0), new Date(0));                     // true
+```
+
+## Clarifying questions
+
+- Is `NaN` equal to `NaN`? *Yes, usually (`Object.is` semantics).* Is `0` equal to `-0`? *Usually yes.*
+- Does key order matter? *No.*
+- Must prototypes match (a class instance vs a plain object)? *Ask; the answer below requires matching prototypes.*
+- Circular references? *Handle them as a follow-up.*
+
+## Approach
+
+If the values are identical, they are equal. If either is not an object, they are equal only if both are `NaN`. For objects: same prototype, same set of own keys, and every key's values deeply equal. Special types (`Date`, `RegExp`, `Map`, `Set`) compare by their contents. A map of pairs already being compared stops infinite recursion on cycles.
+
+## Step-by-step build
+
+### Step 1 — primitives and plain objects
+
+```js
+function deepEqual(a, b) {
+  if (a === b) return true;
+  if (typeof a !== 'object' || typeof b !== 'object' || a === null || b === null) {
+    return Number.isNaN(a) && Number.isNaN(b);
+  }
+  const ka = Object.keys(a), kb = Object.keys(b);
+  if (ka.length !== kb.length) return false;
+  return ka.every((k) => Object.prototype.hasOwnProperty.call(b, k) && deepEqual(a[k], b[k]));
+}
+```
+
+### Step 2 — arrays vs objects, prototypes
+
+```js
+if (Object.getPrototypeOf(a) !== Object.getPrototypeOf(b)) return false; // [] vs {} fails here
+```
+
+### Step 3 — special types
+
+```js
+if (a instanceof Date) return a.getTime() === b.getTime();
+if (a instanceof RegExp) return a.source === b.source && a.flags === b.flags;
+if (a instanceof Map) return a.size === b.size && [...a].every(([k, v]) => b.has(k) && deepEqual(v, b.get(k)));
+if (a instanceof Set) return a.size === b.size && [...a].every((v) => b.has(v));
+```
+
+### Step 4 — cycles
+
+Remember which `b` each `a` is being compared with; meeting the same pair again means "assume equal so far".
+
+## Final code
+
+```js
+function deepEqual(a, b, seen = new WeakMap()) {
+  if (a === b) return true;
+  if (typeof a !== 'object' || typeof b !== 'object' || a === null || b === null) {
+    return Number.isNaN(a) && Number.isNaN(b);
+  }
+  if (Object.getPrototypeOf(a) !== Object.getPrototypeOf(b)) return false;
+
+  if (seen.get(a) === b) return true; // already comparing this pair (cycle)
+  seen.set(a, b);
+
+  if (a instanceof Date) return a.getTime() === b.getTime();
+  if (a instanceof RegExp) return a.source === b.source && a.flags === b.flags;
+  if (a instanceof Map) {
+    if (a.size !== b.size) return false;
+    for (const [k, v] of a) if (!b.has(k) || !deepEqual(v, b.get(k), seen)) return false;
+    return true;
+  }
+  if (a instanceof Set) {
+    if (a.size !== b.size) return false;
+    for (const v of a) if (!b.has(v)) return false; // members compared by identity, like Set itself
+    return true;
+  }
+
+  const ka = Reflect.ownKeys(a), kb = Reflect.ownKeys(b);
+  if (ka.length !== kb.length) return false;
+  for (const k of ka) {
+    if (!Object.prototype.hasOwnProperty.call(b, k)) return false;
+    if (!deepEqual(a[k], b[k], seen)) return false;
+  }
+  return true;
+}
+```
+
+## Edge cases
+
+- `NaN` vs `NaN` → `true`; `0` vs `-0` → `true` (use `Object.is` if they must differ).
+- `[]` vs `{}` → `false` via the prototype check; `[1, 2]` vs `[2, 1]` → `false`.
+- `{ a: undefined }` vs `{}` → `false`: different key sets.
+- Two separately built cyclic structures with the same shape → `true`.
+- `Set`s of objects compare members by reference; say so if asked.
+
+## Follow-ups
+
+- *Return the path of the first difference* (for a test framework's error message).
+- *Loose mode:* ignore prototypes, compare only enumerable string keys (what many test libraries do by default).
+- *Complexity:* O(total size of both values).
+
+## Common mistakes
+
+- `JSON.stringify(a) === JSON.stringify(b)` — breaks on key order, `undefined`, `NaN`, dates and cycles.
+- Comparing only `Object.keys(a)` without checking `b` has no extra keys.
+- `typeof null === 'object'` crashes on `Object.keys(null)`.
+- Treating arrays and objects with the same indices as equal.
+
+## Related
+
+- Previous: [deep clone](/machine-coding/deep-clone) — the same traversal and `WeakMap` trick.

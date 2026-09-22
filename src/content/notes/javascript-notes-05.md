@@ -667,3 +667,5 @@ function sum(a) {
 }
 console.log(sum(1)(2)(3)()); // 6
 ```
+
+> **Interview practice:** Practise closures in interview form: [debounce](/machine-coding/debounce), [memoize](/machine-coding/memoize) and [curry](/machine-coding/curry) in the Machine Coding track.

@@ -1,0 +1,137 @@
+---
+title: "Memoize"
+track: "machine-coding"
+kind: "notes"
+order: 26
+slug: "memoize"
+updated: 2026-09-22
+description: "Cache a function's results — cache keys for many arguments, a custom resolver, promise caching, and an LRU size limit."
+---
+
+import Callout from '../../components/Callout.astro';
+
+## Problem
+
+Implement `memoize(fn, resolver?)`. The returned function caches results by argument, so repeated calls with the same input skip the work:
+
+```js
+const slowSquare = (n) => { for (let i = 0; i < 1e7; i++); return n * n; };
+const fast = memoize(slowSquare);
+fast(9);  // slow the first time
+fast(9);  // instant — from the cache
+fast.cache.clear();
+```
+
+## Clarifying questions
+
+- How should multiple arguments form a key? *Default: the first argument only (lodash) or all arguments serialised — agree on one. A custom `resolver` covers the rest.*
+- Object arguments: compare by reference or by content? *By reference is safest; content keys (`JSON.stringify`) are slower and ambiguous.*
+- Should the cache be limited in size? *A good follow-up: LRU.*
+- Async functions: cache the promise or the value? *The promise — so concurrent calls share one request.*
+
+## Approach
+
+Keep a `Map` in the closure. Compute a key from the arguments; if the key is in the map, return the stored result; otherwise call `fn`, store the result and return it. Exposing the map as `memoized.cache` lets callers clear or inspect it.
+
+## Step-by-step build
+
+### Step 1 — single argument
+
+```js
+function memoize(fn) {
+  const cache = new Map();
+  return function (arg) {
+    if (cache.has(arg)) return cache.get(arg);   // has(), not get(): results may be undefined
+    const result = fn.call(this, arg);
+    cache.set(arg, result);
+    return result;
+  };
+}
+```
+
+### Step 2 — many arguments and a resolver
+
+```js
+function memoize(fn, resolver = (...args) => JSON.stringify(args)) {
+  const cache = new Map();
+  function memoized(...args) {
+    const key = resolver.apply(this, args);
+    if (cache.has(key)) return cache.get(key);
+    const result = fn.apply(this, args);
+    cache.set(key, result);
+    return result;
+  }
+  memoized.cache = cache;
+  return memoized;
+}
+```
+
+### Step 3 — async functions
+
+Caching the promise means two calls made at the same time share one request. Remove rejected promises so a failure is not cached forever.
+
+```js
+const result = fn.apply(this, args);
+cache.set(key, result);
+if (result && typeof result.then === 'function') {
+  result.catch(() => cache.delete(key));
+}
+```
+
+### Step 4 — limit the size (LRU)
+
+A `Map` keeps insertion order: re-inserting a key on each hit moves it to the end, so the first key is the least recently used.
+
+## Final code
+
+```js
+function memoize(fn, { resolver = (...args) => JSON.stringify(args), maxSize = Infinity } = {}) {
+  const cache = new Map();
+
+  function memoized(...args) {
+    const key = resolver.apply(this, args);
+    if (cache.has(key)) {
+      const hit = cache.get(key);
+      cache.delete(key);          // refresh recency
+      cache.set(key, hit);
+      return hit;
+    }
+    const result = fn.apply(this, args);
+    cache.set(key, result);
+    if (cache.size > maxSize) cache.delete(cache.keys().next().value); // evict least recently used
+    if (result && typeof result.then === 'function') {
+      result.then(undefined, () => cache.delete(key)); // do not cache failures
+    }
+    return result;
+  }
+
+  memoized.cache = cache;
+  return memoized;
+}
+```
+
+## Edge cases
+
+- A function that returns `undefined` is still cached — `has()` distinguishes "cached undefined" from "missing".
+- `JSON.stringify` keys: `f({ a: 1, b: 2 })` and `f({ b: 2, a: 1 })` get different keys, and functions or `undefined` inside arguments disappear from the key. Offer a resolver for object arguments.
+- Memoizing an impure function (depends on time, randomness or outside state) gives stale results — only memoize pure functions.
+- Rejected promises are removed so the next call retries.
+
+## Follow-ups
+
+- *Reference keys for objects:* nest `WeakMap`s per argument so object keys are compared by identity and garbage-collected.
+- *Time-to-live:* store `[value, expiresAt]` and treat expired entries as missing.
+- *Memoized Fibonacci:* recursion through the memoized function turns O(2ⁿ) into O(n).
+- *React:* `useMemo`, `React.memo` and why they only cache the last input, not every input.
+
+## Common mistakes
+
+- `if (cache[key])` — misses cached falsy results (`0`, `''`, `false`).
+- Using a plain object as the cache: keys become strings and inherit prototype properties like `constructor`.
+- An unbounded cache in a long-running server — a memory leak.
+- Losing `this` when memoizing methods.
+
+## Related
+
+- Concepts: [closures](/javascript/08-closure) in the JavaScript track.
+- The same LRU idea as the [LRU Cache](/dsa/solutions/stacks-queues#lru-cache) DSA problem.
