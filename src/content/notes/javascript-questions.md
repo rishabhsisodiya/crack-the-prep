@@ -18,6 +18,25 @@ Short answers for quick revision. Each answer has a small example, and **Deep di
 
 JavaScript is a cross-platform, multi-paradigm (object-oriented, functional, procedural) programming language. In browsers it makes web pages interactive; with Node.js it also runs on servers.
 
+```javascript
+// Same task, 3 paradigms
+
+// Procedural
+function doubleProcedural(arr) {
+  const result = [];
+  for (let i = 0; i < arr.length; i++) result.push(arr[i] * 2);
+  return result;
+}
+
+// Object-oriented
+class Doubler {
+  double(arr) { return arr.map(n => n * 2); }
+}
+
+// Functional
+const doubleFunctional = arr => arr.map(n => n * 2);
+```
+
 [Deep dive → Syntax, Variables & Operators](/javascript/basics-syntax/)
 
 ### What is ECMAScript?

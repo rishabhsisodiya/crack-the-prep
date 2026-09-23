@@ -14,6 +14,25 @@ description: "JavaScript basics — Syntax, Variables & Operators."
 
 JavaScript is a cross-platform, multi-paradigm (object-oriented, functional and procedural) programming language. In the browser it is used to make web pages interactive — animations, clickable buttons, popup menus, form validation, etc. With Node.js it also runs on servers.
 
+```javascript
+// Same task, 3 paradigms
+
+// Procedural
+function doubleProcedural(arr) {
+  const result = [];
+  for (let i = 0; i < arr.length; i++) result.push(arr[i] * 2);
+  return result;
+}
+
+// Object-oriented
+class Doubler {
+  double(arr) { return arr.map(n => n * 2); }
+}
+
+// Functional
+const doubleFunctional = arr => arr.map(n => n * 2);
+```
+
 JavaScript was created at Netscape in 1995 by Brendan Eich. It borrows some syntax and naming conventions from Java, and was renamed from "LiveScript" to "JavaScript" as a marketing move tied to a Netscape–Sun partnership — not because the two languages are otherwise related.
 
 JavaScript is standardized by Ecma International as **ECMAScript** (ES). Ecma was formerly an acronym for the *European Computer Manufacturers Association*. Versions are named ES5, ES6/ES2015, ES2016 … and a new version is released every year.
