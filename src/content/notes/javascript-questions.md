@@ -274,13 +274,13 @@ function greet() { return 'hi'; }
 
 ### What is the temporal dead zone (TDZ)?
 
-The period between entering a scope and the line where a `let`/`const`/`class` is declared. **The variable is hoisted but cannot be accessed** during this time.
+It's the period between when a variable is hoisted (its scope is created) and when it's initialized (assigned a value).
+
+With `let` and `const`, the variable is hoisted but not initialized. It sits in the TDZ until execution reaches its declaration:
 
 ```js
-{
-  // console.log(x); // ReferenceError: Cannot access 'x' before initialization
-  let x = 5;
-}
+console.log(y); // ReferenceError: Cannot access 'y' before initialization
+let y = 5;
 ```
 
 ### Why do we say let and const are hoisted if we can't access them?
