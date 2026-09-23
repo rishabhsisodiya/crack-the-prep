@@ -257,7 +257,7 @@ console.log(Number.isNaN('abc')); // false
 
 ### What is variable hoisting?
 
-During the memory creation phase, JavaScript allocates memory for declarations **before** running the code, so we can refer to a variable or function declared later without an exception.
+**Hoisting** means we can refer to a variable or function declared later in the code, without getting an exception.
 
 -   **Function declarations** are hoisted with their full body.
 -   **`var`** is hoisted and initialized with `undefined`.
