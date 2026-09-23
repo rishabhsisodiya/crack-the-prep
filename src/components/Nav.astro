@@ -25,6 +25,7 @@ const isActive = (slug: string) => pathname.replace(/\/$/, '').endsWith(`/${slug
         </a>
       </li>
     ))}
+    <li><a href={u('/quiz')} aria-current={pathname.endsWith('/quiz') ? 'page' : undefined}>Quiz</a></li>
     <li><a href={u('/search')} aria-current={pathname.endsWith('/search') ? 'page' : undefined}>Search</a></li>
   </ul>
 </nav>

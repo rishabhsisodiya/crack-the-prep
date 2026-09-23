@@ -4,10 +4,11 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "astro dev",
-    "build": "astro build && pagefind --site dist --output-subdir _pagefind",
+    "dev": "npm run quiz:data && astro dev",
+    "build": "npm run quiz:data && astro build && pagefind --site dist --output-subdir _pagefind",
     "preview": "astro preview",
     "astro": "astro",
+    "quiz:data": "node scripts/generate-quiz-data.mjs",
     "lint:notes": "node scripts/lint-notes.mjs",
     "check:data": "node scripts/check-data.mjs",
     "check:mc": "node scripts/check-machine-coding.mjs",
