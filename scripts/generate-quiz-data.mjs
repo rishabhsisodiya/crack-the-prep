@@ -26,6 +26,7 @@ const SOURCES = [
 ];
 
 const MAX_MCQ_ANSWER_LEN = 320; // plain-text length cap for an answer to be MCQ-eligible
+const MAX_OUTPUT_KEY_LEN = 160; // cap for an output-question key (e.g. "2 1") to be MCQ-eligible
 
 function stripFrontmatter(src) {
   return src.replace(/^---\n[\s\S]*?\n---\n?/, '');
@@ -55,6 +56,34 @@ function plainText(md) {
     .trim();
 }
 
+/**
+ * Output/snippet questions put the code to read *above* a
+ * `<details><summary>Show answer</summary>` block. Split them so the quiz
+ * can show the snippet as part of the question. No <details> → the whole
+ * block is the answer (plain conceptual Q&A).
+ */
+function splitPromptAnswer(block) {
+  const m = block.match(/^([\s\S]*?)<details>\s*<summary>[\s\S]*?<\/summary>([\s\S]*?)<\/details>([\s\S]*)$/);
+  if (!m) return { promptMd: '', answerMd: block };
+  const answerMd = (m[2] + '\n\n' + m[3]).trim();
+  return { promptMd: m[1].trim(), answerMd };
+}
+
+/**
+ * The short, checkable part of an output answer: the first fenced block,
+ * else a leading `inline code` span, else a leading **bold** phrase,
+ * else the first sentence.
+ */
+function outputKey(answerMd) {
+  const fence = answerMd.match(/^```[^\n]*\n([\s\S]*?)```/);
+  if (fence) return fence[1].trim();
+  const code = answerMd.match(/^`([^`]+)`/);
+  if (code) return code[1].trim();
+  const bold = answerMd.match(/^\*\*([^*]+)\*\*/);
+  if (bold) return bold[1].trim();
+  return plainText(answerMd).split(/(?<=[.!?])\s/)[0] ?? '';
+}
+
 function extractQuestions(src, section) {
   const body = stripFrontmatter(src);
   const lines = body.split('\n');
@@ -72,25 +101,35 @@ function extractQuestions(src, section) {
       if (headings[j].level <= h.level) { endIdx = j; break; }
     }
     const endLine = endIdx < headings.length ? headings[endIdx].line : lines.length;
-    const answerMd = lines
+    const block = lines
       .slice(h.line + 1, endLine)
       .join('\n')
       // drop standalone "[Deep dive → …](…)" nav lines — not part of the answer
       .replace(/^\s*\[Deep dive[^\n]*\]\([^)]*\)\s*$/gm, '')
       .trim();
-    if (!answerMd) return; // heading with no body isn't a usable question
+    if (!block) return; // heading with no body isn't a usable question
 
-    const answerPlain = plainText(answerMd);
-    if (!answerPlain) return;
+    const { promptMd, answerMd } = splitPromptAnswer(block);
+    if (!answerMd) return;
 
-    questions.push({
+    const base = {
       id: `${section}-${questions.length + 1}`,
       section,
       question: h.title.replace(/^Q\d+\.\s*/, ''),
+      promptMd,
       answerMd,
-      answerPlain,
-      mcq: answerPlain.length <= MAX_MCQ_ANSWER_LEN,
-    });
+    };
+
+    if (promptMd) {
+      // "what's the output" style: the key is the output itself, not the explanation
+      const key = outputKey(answerMd);
+      questions.push({ ...base, kind: 'output', answerPlain: key, mcq: !!key && key.length <= MAX_OUTPUT_KEY_LEN });
+      return;
+    }
+
+    const answerPlain = plainText(answerMd);
+    if (!answerPlain) return;
+    questions.push({ ...base, kind: 'concept', answerPlain, mcq: answerPlain.length <= MAX_MCQ_ANSWER_LEN });
   });
 
   return questions;

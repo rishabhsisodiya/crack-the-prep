@@ -64,6 +64,7 @@ const LETTERS = ['A', 'B', 'C', 'D'];
 
         <p class="section-tag" id="section-tag"></p>
         <p class="qtext" id="qtext"></p>
+        <div class="prompt answer" id="qprompt" hidden></div>
 
         <button type="button" class="btn-primary btn-full" id="show-options">Think first — show options</button>
         <div class="options" id="options" hidden></div>
@@ -214,6 +215,8 @@ const LETTERS = ['A', 'B', 'C', 'D'];
     margin-bottom: 0.8rem;
   }
   .qtext { font-size: 1.2rem; font-weight: 600; color: var(--white); line-height: 1.4; margin: 0 0 1.4rem; }
+  .prompt:not([hidden]) { display: block; }
+  .prompt { margin-top: -0.6rem; }
 
   .options { display: flex; flex-direction: column; gap: 0.6rem; }
   /* options are appended by client JS, so these rules must be :global —
@@ -253,6 +256,12 @@ const LETTERS = ['A', 'B', 'C', 'D'];
   .options :global(.opt.correct .opt-letter) { border-color: var(--green); color: var(--green); }
   .options :global(.opt.wrong) { border-color: var(--danger); background: rgba(255, 107, 107, 0.1); }
   .options :global(.opt.wrong .opt-letter) { border-color: var(--danger); color: var(--danger); }
+  .options :global(.opt-mono) {
+    font-family: var(--font-mono);
+    font-size: 0.82rem;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
   .options :global(.opt[disabled]) { cursor: default; }
   .options :global(.opt[disabled]:not(.correct):not(.wrong)) { opacity: 0.45; }
 
@@ -311,7 +320,16 @@ const LETTERS = ['A', 'B', 'C', 'D'];
 </style>
 
 <script>
-  type Q = { id: string; section: string; question: string; answerMd: string; answerPlain: string; mcq: boolean };
+  type Q = {
+    id: string;
+    section: string;
+    question: string;
+    promptMd: string;
+    answerMd: string;
+    answerPlain: string;
+    kind: 'output' | 'concept';
+    mcq: boolean;
+  };
   type Data = { sections: Record<string, { label: string; count: number }>; questions: Q[] };
 
   const LETTERS = ['A', 'B', 'C', 'D'];
@@ -364,7 +382,8 @@ const LETTERS = ['A', 'B', 'C', 'D'];
   }
 
   function buildDistractors(q: Q, sectionPool: Q[]): string[] {
-    const candidates = sectionPool.filter((c) => c.id !== q.id && c.mcq);
+    // decoys must be the same kind — an output like "2 1" next to a prose definition gives the answer away
+    const candidates = sectionPool.filter((c) => c.id !== q.id && c.mcq && c.kind === q.kind);
     const shuffled = shuffle(candidates);
     const picked: string[] = [];
     const seen = new Set([q.answerPlain]);
@@ -383,6 +402,9 @@ const LETTERS = ['A', 'B', 'C', 'D'];
     (document.getElementById('bar-fill') as HTMLElement).style.width = `${(idx / pool.length) * 100}%`;
     (document.getElementById('section-tag') as HTMLElement).textContent = SECTION_LABELS[q.section] ?? q.section;
     (document.getElementById('qtext') as HTMLElement).textContent = q.question;
+    const promptEl = document.getElementById('qprompt') as HTMLElement;
+    promptEl.innerHTML = q.promptMd ? mdToHtml(q.promptMd) : '';
+    promptEl.hidden = !q.promptMd;
   }
 
   function renderQuestion() {
@@ -428,7 +450,7 @@ const LETTERS = ['A', 'B', 'C', 'D'];
       btn.type = 'button';
       btn.className = 'opt';
       btn.dataset.correct = String(opt === q.answerPlain);
-      btn.innerHTML = `<span class="opt-letter">${LETTERS[i]}</span><span>${opt.replace(/&/g, '&amp;').replace(/</g, '&lt;')}</span>`;
+      btn.innerHTML = `<span class="opt-letter">${LETTERS[i]}</span><span${q.kind === 'output' ? ' class="opt-mono"' : ''}>${opt.replace(/&/g, '&amp;').replace(/</g, '&lt;')}</span>`;
       btn.addEventListener('click', () => {
         const correct = btn.dataset.correct === 'true';
         [...optionsEl.querySelectorAll<HTMLButtonElement>('button')].forEach((b) => {
