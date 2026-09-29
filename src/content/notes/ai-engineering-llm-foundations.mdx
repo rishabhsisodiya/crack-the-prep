@@ -1,0 +1,342 @@
+---
+title: "How LLMs Work"
+track: "ai-engineering"
+kind: "notes"
+order: 2
+description: "Next-token prediction, tokenization, transformers, attention, embeddings and inference parameters — the LLM internals interviewers actually ask about."
+updated: 2026-09-29
+slug: "llm-foundations"
+---
+
+import Callout from '../../components/Callout.astro';
+
+Every AI-engineering interview eventually probes the same thing: do you understand what the model is actually doing, or are you just calling APIs? This chapter covers the internals that matter in practice — how text becomes tokens, how the Transformer reads them, and which knobs control generation. You do not need the math proofs; you need the mental models and the cost/latency implications.
+
+## LLMs are next-token predictors
+
+A large language model is a function that takes a sequence of tokens and returns a probability distribution over the next token. "Generating text" is just repeating that step: sample a token, append it, repeat. Everything else — chat, code, agents — is scaffolding around this loop. Here is the loop with a toy bigram model so you can run it yourself:
+
+```python
+import random
+from collections import Counter, defaultdict
+
+corpus = "the cat sat on the mat. the dog sat on the log. the cat ate the rat."
+words = corpus.split()
+bigrams = defaultdict(Counter)
+for a, b in zip(words, words[1:]):
+    bigrams[a][b] += 1
+
+def next_word(current: str) -> str:
+    options = bigrams.get(current)
+    if not options:                      # dead end: restart from a random word
+        return random.choice(words)
+    choices, weights = zip(*options.items())
+    return random.choices(choices, weights=weights)[0]
+
+random.seed(7)
+tokens = ["the"]
+for _ in range(12):
+    tokens.append(next_word(tokens[-1]))
+print(" ".join(tokens))
+```
+
+A real LLM runs exactly this loop — predict, sample, append — except the "probability table" is a Transformer with billions of parameters instead of a bigram counter, and sampling uses temperature and top-p (covered below) instead of raw frequency weights.
+
+Two consequences interviewers love. First, the model has no persistent memory of anything outside the tokens you feed it — that is why context windows and retrieval ([RAG](/ai-engineering/rag/)) exist. Second, every capability is statistical pattern completion, which is why the same model can write poetry and also confidently hallucinate a fake citation.
+
+<Callout type="tip">
+If asked "how does ChatGPT work" in an interview, answer in three sentences: it predicts the next token given all previous tokens; it learned those probabilities by training a Transformer on massive text; the chat behavior comes from instruction fine-tuning on top of that base model.
+</Callout>
+
+## Tokenization: text becomes numbers
+
+Models never see characters or words. A tokenizer converts raw text into integer token IDs from a fixed vocabulary. Modern LLMs use byte-pair encoding (BPE) or close variants: start from individual bytes, then repeatedly merge the most frequent adjacent pair until the vocabulary reaches the target size (tens of thousands of tokens).
+
+A few practical rules of thumb. Common words become single tokens (" the"), rare words split into pieces (" tokenization" might be " token" + "ization"), and one token is roughly 0.75 English words — about 4 characters. Code and non-English text tokenize less efficiently, sometimes 2–3x more tokens per word than English prose.
+
+### Why tokenization affects cost, latency, and context
+
+This is the single most interview-relevant tokenization fact. API pricing is per token, not per word (provider options and free tiers are covered in [LLM APIs & Local Models](/ai-engineering/llm-apis/)). A 4,000-token context window holds roughly 3,000 English words — or far fewer in Hindi, code, or JSON with lots of whitespace. Latency also scales with tokens: the model does work per generated token, so a verbose tokenizer choice directly slows responses and burns the context budget. When someone says "the tokenizer matters," they mean: it decides what fits in the window and what you pay.
+
+| Unit | Example | Tokens (approx, cl100k) |
+|---|---|---|
+| Common English word | " the" | 1 |
+| Rare English word | " tokenization" | 2–3 |
+| Code identifier | "getElementById" | 3–5 |
+| Emoji | "🚀" | 2–3 |
+| 1,000 English words | prose paragraph set | ~1,300 |
+
+## The Transformer: attention is the core idea
+
+The Transformer (Vaswani et al., 2017) replaced recurrence with self-attention: every token directly looks at every other token in the sequence and decides how much each one matters for its own representation. No step-by-step chain — the whole sequence is processed in parallel during training, which is what made large-scale training feasible.
+
+The two-minute interview explanation of attention goes like this. For each token, the model creates three vectors: a query (what am I looking for?), a key (what do I contain?), and a value (what do I contribute?). Each token's query is compared against every token's key with a dot product; the scores are normalized into weights; the token's new representation is the weighted sum of all values. In plain terms: "the" in "the animal didn't cross the street because it was too tired" figures out that "it" refers to "animal" by attending strongly to that token.
+
+Multi-head attention runs this process several times in parallel with different learned projections. Each "head" can specialize — one tracks subject-verb agreement, another tracks coreference, another tracks positional patterns. The outputs are concatenated and projected back. Positional encodings (or rotary variants in modern models) are added because attention itself has no notion of order — without them, "dog bites man" and "man bites dog" would look identical.
+
+### See it run: scaled dot-product attention
+
+The whole mechanism is a few lines of arithmetic — dot products, a softmax, a weighted sum. Run this to watch the "it" token resolve to "animal":
+
+```python
+import math
+
+def softmax(xs):
+    m = max(xs)
+    exps = [math.exp(x - m) for x in xs]
+    s = sum(exps)
+    return [e / s for e in exps]
+
+def dot(a, b):
+    return sum(x * y for x, y in zip(a, b))
+
+def attention(queries, keys, values):
+    out = []
+    for q in queries:
+        scores = [dot(q, k) / math.sqrt(len(q)) for k in keys]
+        weights = softmax(scores)
+        out.append([sum(w * v[i] for w, v in zip(weights, values))
+                    for i in range(len(values[0]))])
+    return out
+
+# toy 2-D vectors for three tokens: "animal", "tired", "it"
+keys   = [[1.0, 0.0], [0.0, 1.0], [0.9, 0.1]]
+values = [[1.0, 0.0], [0.0, 1.0], [0.9, 0.1]]
+queries = [[0.9, 0.1]]  # "it" asks: who am I?
+
+result = attention(queries, keys, values)[0]
+print("output vector:", [round(x, 3) for x in result])
+```
+
+The output is dominated by the "animal" and "it" vectors — the query for "it" scores highest against the key for "animal" because their vectors point the same way. That weighted sum *is* coreference resolution, learned end to end. The `math.sqrt(len(q))` scaling keeps dot products from exploding as vectors get wider; without it, the softmax saturates and gradients die.
+
+<Callout type="important">
+Attention cost grows quadratically with sequence length: every token attends to every other token. That O(n²) cost is the fundamental reason context windows are limited and why long-context engineering (sparse attention, KV-cache optimization) is an active field.
+</Callout>
+
+## Embeddings: meaning as geometry
+
+An embedding is a dense vector — typically hundreds to thousands of dimensions — representing a token, word, sentence, or document. The key property: semantically similar items end up close together in vector space, measured by cosine similarity or dot product. Embeddings power semantic search, RAG retrieval, clustering, and recommendations. In practice you rarely train them; you call an embedding model (e.g. via an API or a local sentence-transformer), store the vectors, and query by nearest neighbor. The same vectors that represent "king − man + woman ≈ queen" in demos are what let a RAG system match "refund policy" to a paragraph that never uses the word "refund".
+
+### See it run: nearest-neighbor search with cosine similarity
+
+Retrieval is just "find the stored vector closest to the query vector". This is the entire ranking step of a RAG retriever, in pure Python:
+
+```python
+import math
+
+def cosine(a, b):
+    dotp = sum(x * y for x, y in zip(a, b))
+    na = math.sqrt(sum(x * x for x in a))
+    nb = math.sqrt(sum(x * x for x in b))
+    return dotp / (na * nb)
+
+# toy 3-D embeddings for three indexed documents
+docs = {
+    "refund policy page": [0.90, 0.10, 0.20],
+    "returns & exchanges": [0.85, 0.15, 0.25],
+    "banana bread recipe": [0.10, 0.90, 0.10],
+}
+query = [0.88, 0.12, 0.22]  # embedding of "money back"
+
+ranked = sorted(docs.items(), key=lambda kv: cosine(query, kv[1]), reverse=True)
+for title, vec in ranked:
+    print(f"{title:22s} similarity {cosine(query, vec):.3f}")
+```
+
+The query "money back" ranks the refund documents near 1.0 and the recipe near 0.26, even though neither document contains the words "money" or "back". That is the whole trick behind semantic search: meaning as geometry, measured with a dot product.
+
+## GPT architecture at a high level
+
+GPT-style models are decoder-only Transformers: a stack of identical blocks, each containing masked multi-head self-attention (a token can only attend to earlier tokens, preserving the left-to-right generation order) followed by a feed-forward network, with layer normalization and residual connections around each. "Large" means many blocks, wide vectors, and huge vocabularies — GPT-3 had 96 layers and 175B parameters. Training happens in two phases: pre-training (next-token prediction on trillions of tokens — this builds the world knowledge and language ability) and post-training (supervised instruction fine-tuning plus RLHF/RLAIF — this builds the helpful-assistant behavior). When an interviewer asks why base models ramble but chat models follow instructions, that two-phase story is the answer.
+
+## Inference parameters you must know
+
+These are the knobs every API exposes, and misusing them is a common junior mistake. (For how to wield them in practice — few-shot, chain-of-thought, structured outputs — see the [prompting chapter](/ai-engineering/prompting/).)
+
+| Parameter | What it does | When to use it |
+|---|---|---|
+| temperature | Scales randomness of sampling; 0 is greedy/deterministic, higher is more creative | 0–0.3 for classification, extraction, code; 0.7–1.0 for brainstorming |
+| top-p (nucleus) | Samples from the smallest set of tokens covering p of probability mass | Alternative to temperature; use one or the other, not both |
+| max_tokens | Hard cap on generated tokens | Always set it — bounds cost and latency |
+| stop sequences | Halts generation at a string | Prevent runaway output in structured flows |
+| frequency/presence penalty | Discourages repetition | Long-form generation that loops |
+
+<Callout type="warning">
+Temperature 0 is not perfectly deterministic across providers and hardware, but it is the closest you get. For evals and tests, pin the model version, set temperature 0, and fix the seed if the API supports it.
+</Callout>
+
+## Interview angles
+
+Expect "explain attention in two minutes" — use the query/key/value story above, then mention multi-head specialization and the O(n²) cost. Expect "why does tokenization affect cost" — per-token pricing, tokens-per-word varying by language and content type, and context-window budgeting. A strong follow-up you can volunteer: because of all this, production systems chunk and truncate by tokens (never by characters), and they monitor tokens-per-request as a cost metric, not just latency. Rehearse the full set in the [interview questions drill](/ai-engineering/questions/).
+
+## Free resources (with credit)
+
+- **Andrej Karpathy — "Let's build GPT: from scratch, in code, spelled out"** (YouTube, ~2h). Builds tokenization, attention, and a working GPT in code — the single best internals resource. Credit: Andrej Karpathy. https://www.youtube.com/watch?v=kCc8FmEb1nY
+- **"Attention Is All You Need" — Vaswani et al. (2017)**. The original Transformer paper: attention, multi-head attention, positional encodings. Credit: the authors via arXiv. https://arxiv.org/abs/1706.03762
+- **Hugging Face Transformers — Chat templates docs**. How tokenizers apply chat formats (`apply_chat_template`) — the practical side of tokenization for instruction models. Credit: Hugging Face. https://huggingface.co/docs/transformers/v4.51.3/chat_templating
+
+## Project: build a BPE tokenizer from scratch
+
+You will implement byte-pair encoding in pure Python (no heavy dependencies), train it on a real corpus, and measure exactly how tokenization drives cost and context usage. This mirrors Karpathy's minbpe approach.
+
+**Step 1 — Set up a clean environment.** No heavy dependencies are needed for the tokenizer itself; you will add `tiktoken` later only for comparison.
+
+```bash
+python -m venv bpe-env
+source bpe-env/bin/activate   # Windows: bpe-env\Scripts\activate
+mkdir bpe-project && cd bpe-project
+```
+
+**Step 2 — Implement the core BPE operations.** Create `bpe.py` with `get_stats` (count adjacent pairs), `merge` (replace a pair with a new token id), and a small `BPETokenizer` class with `train`, `encode`, and `decode`.
+
+```python
+# bpe.py — minimal BPE tokenizer, pure Python
+def get_stats(ids, counts=None):
+    counts = {} if counts is None else counts
+    for pair in zip(ids, ids[1:]):
+        counts[pair] = counts.get(pair, 0) + 1
+    return counts
+
+def merge(ids, pair, idx):
+    newids = []
+    i = 0
+    while i < len(ids):
+        if i < len(ids) - 1 and ids[i] == pair[0] and ids[i + 1] == pair[1]:
+            newids.append(idx)
+            i += 2
+        else:
+            newids.append(ids[i])
+            i += 1
+    return newids
+
+class BPETokenizer:
+    def __init__(self):
+        self.merges = {}                       # (int, int) -> int
+        self.vocab = {i: bytes([i]) for i in range(256)}
+
+    def train(self, text, vocab_size):
+        assert vocab_size >= 256
+        ids = list(text.encode("utf-8"))
+        for i in range(vocab_size - 256):
+            stats = get_stats(ids)
+            if not stats:
+                break
+            pair = max(stats, key=stats.get)
+            idx = 256 + i
+            ids = merge(ids, pair, idx)
+            self.merges[pair] = idx
+            self.vocab[idx] = self.vocab[pair[0]] + self.vocab[pair[1]]
+        return ids
+
+    def encode(self, text):
+        ids = list(text.encode("utf-8"))
+        while len(ids) >= 2:
+            stats = get_stats(ids)
+            pair = min(stats, key=lambda p: self.merges.get(p, float("inf")))
+            if pair not in self.merges:
+                break
+            ids = merge(ids, pair, self.merges[pair])
+        return ids
+
+    def decode(self, ids):
+        text_bytes = b"".join(self.vocab[i] for i in ids)
+        return text_bytes.decode("utf-8", errors="replace")
+```
+
+**Step 3 — Get a training corpus and train a ~500-token vocabulary.** Grab a public-domain text with the standard library and train.
+
+```python
+# train.py
+import urllib.request
+from bpe import BPETokenizer
+
+url = "https://www.gutenberg.org/files/1342/1342-0.txt"  # Pride and Prejudice
+raw = urllib.request.urlopen(url).read().decode("utf-8", errors="replace")
+corpus = raw[:200000]
+open("corpus.txt", "w", encoding="utf-8").write(corpus)
+
+tok = BPETokenizer()
+tok.train(corpus, vocab_size=500)
+print("vocab size:", len(tok.vocab), "| merges learned:", len(tok.merges))
+```
+
+Run it with `python train.py`. Training on 200k characters with a naive implementation takes a minute or two — that slowness is itself instructive about why production tokenizers are written in Rust.
+
+**Step 4 — Verify the round-trip.** Encoding then decoding must return the exact original text.
+
+```python
+# roundtrip.py
+from bpe import BPETokenizer
+
+tok = BPETokenizer()
+tok.train(open("corpus.txt", encoding="utf-8").read(), vocab_size=500)
+
+text = "The transformer uses multi-head attention."
+ids = tok.encode(text)
+print("token ids:", ids)
+print("decoded:  ", tok.decode(ids))
+assert tok.decode(ids) == text
+print("round-trip OK —", len(ids), "tokens for", len(text.split()), "words")
+```
+
+**Step 5 — Compare against a production tokenizer.** Install `tiktoken` (OpenAI's BPE implementation) and compare token counts on identical text.
+
+```bash
+pip install tiktoken
+```
+
+```python
+# compare.py
+import tiktoken
+from bpe import BPETokenizer
+
+tok = BPETokenizer()
+tok.train(open("corpus.txt", encoding="utf-8").read(), vocab_size=500)
+enc = tiktoken.get_encoding("cl100k_base")
+
+samples = [
+    "The transformer uses multi-head attention.",
+    "def get_stats(ids, counts=None):",
+    "मशीन लर्निंग बहुत रोचक है",  # Hindi: tokenizes far less efficiently
+]
+for s in samples:
+    mine, theirs = tok.encode(s), enc.encode(s)
+    print(f"text: {s!r}")
+    print(f"  mine ({len(tok.vocab)} vocab): {len(mine)} tokens | tiktoken (100k vocab): {len(theirs)} tokens")
+```
+
+**Step 6 — Measure what tokenization costs you.** Compute tokens-per-word, effective context capacity, and dollar cost.
+
+```python
+# cost_math.py
+import tiktoken
+
+enc = tiktoken.get_encoding("cl100k_base")
+text = open("corpus.txt", encoding="utf-8").read()[:20000]
+
+n_tokens = len(enc.encode(text))
+n_words = len(text.split())
+ratio = n_tokens / n_words
+print(f"tokens per word: {ratio:.2f}")
+print(f"4k context window holds ~{4000 / ratio:.0f} words of English prose")
+
+price_per_mtok = 0.15  # example input price, $ per 1M tokens
+cost_per_1k_words = (1000 * ratio / 1_000_000) * price_per_mtok
+print(f"cost per 1000 words at ${price_per_mtok}/1M tokens: ${cost_per_1k_words:.4f}")
+
+# now the same text with extra whitespace, as sloppy JSON prompts often have
+bloated = text.replace("\n", "\n\n\n")
+print(f"whitespace-bloated version: {len(enc.encode(bloated))} tokens "
+      f"({len(enc.encode(bloated)) / n_tokens:.1f}x the cost)")
+```
+
+If something breaks, check these first. A `urllib` SSL or network error usually means the machine has no internet access — save any plain-text file as `corpus.txt` and skip the download step. If training feels stuck, shrink the corpus to 50,000 characters; the naive `merge` loop scans the whole id list per merge, so 200k characters is already slow — that slowness is itself the lesson about why production tokenizers are written in Rust. If `encode` followed by `decode` does not round-trip, the bug is almost always in `merge` skipping overlapping pairs — re-check the `i += 2` branch. If your token counts are wildly higher than tiktoken's on English text, you probably trained on too little data or set `vocab_size` too low; common words never got merged into single tokens.
+
+### Expected outcome
+
+You have a working BPE tokenizer (train/encode/decode), a measured comparison showing your 500-token vocab produces more tokens than tiktoken's 100k vocab on the same text, and concrete numbers: tokens-per-word for English vs code vs Hindi, effective words-per-context-window, and dollars-per-thousand-words. The whitespace experiment should show a visibly inflated token count — the classic "pretty-printed JSON costs real money" lesson.
+
+### Interview talking points
+
+Say: "I built a BPE tokenizer from scratch, so I can tell you exactly why tokenization matters. Merges are learned from pair frequencies, which is why common words become single tokens and rare scripts fragment. I measured ~1.3 tokens per English word versus much worse for Hindi and code, which means the same 4k window holds far less non-English content — and since APIs bill per token, that fragmentation is a direct cost multiplier. In production I chunk and budget by tokens, never characters, and I strip unnecessary whitespace from prompts."

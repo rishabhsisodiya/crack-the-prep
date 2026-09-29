@@ -17,6 +17,7 @@ worked examples in one place.
 | **System Design** | A framework, the building blocks, worked problems with diagrams |
 | **DSA** | Theory, two dozen patterns, an interview core list, a 450 problem checklist, worked solutions |
 | **Behavioral** | The STAR method and a bank of leadership and teamwork prompts |
+| **AI Engineering** | Python for AI, LLMs, prompts, RAG, agents, memory, voice, MCP, evals, guardrails |
 
 Around 135 notes and question sets. JavaScript, React and Node.js each have a dedicated
 questions drill page. Everything is searchable from any page.

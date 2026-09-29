@@ -1,0 +1,390 @@
+---
+title: "AI Agents and LangGraph"
+track: "ai-engineering"
+kind: "notes"
+order: 6
+description: "AI agents from first principles: the perceive-reason-act loop, tools, ReAct, when not to use an agent, structured outputs with Pydantic, LangGraph state/nodes/edges, and checkpointing — with a full research-agent project."
+updated: 2026-09-29
+slug: "agents"
+---
+
+import Callout from '../../components/Callout.astro';
+
+This chapter turns the RAG pipeline from /ai-engineering/rag/ into something that can act on its own. You will learn what an agent actually is (a loop, not a prompt), when to avoid building one, how LangGraph models that loop as a graph, and how checkpointing gives you persistence, human-in-the-loop approval, and time-travel debugging. Everything here maps directly to "design an AI agent" interview questions.
+
+## What an agent actually is
+
+An agent is a system that uses a language model inside a loop to pursue a goal. A chatbot answers one prompt; an agent keeps going until the job is done. The loop has four phases: perceive (gather state: the goal, conversation history, tool results), reason (the LLM decides the next step), act (call a tool or produce output), and observe (feed the result back into state and loop again).
+
+The loop is the whole idea. If you can explain perceive → reason → act → observe in an interview, you already sound more senior than most candidates who describe agents as "an LLM with tools."
+
+## The loop, written out
+
+Before touching any framework, it helps to see the loop as plain code. This is the mental model everything else in this chapter maps to — and it actually runs, with a scripted stand-in for the LLM so you can watch the loop turn.
+
+```python
+from dataclasses import dataclass
+from typing import Callable
+
+@dataclass
+class Action:
+    kind: str            # "tool" or "finish"
+    tool: str = ""
+    args: dict = None
+    output: str = ""
+
+def perceive(state):
+    return f"Goal: {state['goal']}. History so far: {state['history']}"
+
+class ScriptedLLM:
+    """Pretends to be an LLM: first decides to search, then finishes."""
+    def __init__(self):
+        self.calls = 0
+    def decide(self, observation, tools):
+        self.calls += 1
+        if self.calls == 1:
+            return Action(kind="tool", tool="web_search", args={"q": "pgvector"})
+        return Action(kind="finish", output="Done: found sources on pgvector.")
+
+def run_agent(goal, tools: dict[str, Callable], llm, max_steps=10):
+    state = {"goal": goal, "history": []}
+    for _ in range(max_steps):
+        observation = perceive(state)              # gather context
+        action = llm.decide(observation, tools)     # reason: answer or tool call
+        if action.kind == "finish":
+            return action.output
+        result = tools[action.tool](**action.args) # act
+        state["history"].append((action.args, result))  # observe, then loop
+    return "max steps reached"
+
+def fake_search(q: str) -> str:
+    return f"3 sources about {q}"
+
+print(run_agent("research pgvector", {"web_search": fake_search}, ScriptedLLM()))
+# Done: found sources on pgvector.
+```
+
+A real LLM replaces `ScriptedLLM.decide` — it reads the observation and emits either a tool call or a final answer. Every framework in this chapter — LangChain agents, LangGraph, the OpenAI Agents SDK — is a production-hardened version of this loop with better state management, error handling, and observability. The `max_steps` cap is not optional: without it, a confused model loops forever and bills you for every step.
+
+## Tools: how agents touch the world
+
+An LLM on its own cannot search the web, query a database, or book a flight. Tools are the bridge: plain functions wrapped with a name, a human-readable description, and a JSON schema for their arguments. The model does not execute code; it emits a structured function call, your code executes it, and the result goes back into the model's context as an observation.
+
+Good tool design matters more than model choice. Anthropic's guidance is blunt: give tools clean interfaces, write descriptions the model can act on, and keep the number of tools small enough that the model can reliably pick the right one. A tool named `search_flights` with a clear schema beats five overlapping search tools every time.
+
+In LangChain, a tool is just a decorated function — the docstring becomes the description the model reads, and the type hints become the JSON schema for arguments:
+
+```python
+from langchain_core.tools import tool
+
+@tool
+def search_flights(origin: str, destination: str, date: str) -> str:
+    """Search for available flights. Dates must be YYYY-MM-DD."""
+    # in the project this would call a real API; here it is a stub
+    return f"Found 3 flights {origin}->{destination} on {date}"
+
+print(search_flights.name)        # search_flights
+print(search_flights.description) # Search for available flights. Dates must be YYYY-MM-DD.
+print(search_flights.args)        # {'origin': {'type': 'string'}, 'destination': {'type': 'string'}, 'date': {'type': 'string'}}
+```
+
+When the model wants to act, it emits something equivalent to `{"tool": "search_flights", "args": {"origin": "DEL", ...}}` — function calling is just the model producing structured JSON against this schema, which your code then executes. That is why the docstring matters: it is the documentation the model actually reads when choosing between tools.
+
+## ReAct: reasoning and acting
+
+ReAct (Reason + Act) is the prompting pattern behind most agents: the model interleaves Thought, Action, and Observation steps in its output. It thinks out loud about what to do next, takes one action, reads the observation, and re-plans. This beats asking the model to produce a full multi-step plan upfront, because each step is grounded in real results instead of guesses.
+
+<Callout type="tip">
+In interviews, describe ReAct as "the model commits to one step at a time and re-plans on real observations." That single sentence answers most "how do agents work" follow-ups.
+</Callout>
+
+## When NOT to build an agent
+
+This is the section interviewers actually test. Agents are high-variance systems: every LLM step can fail, errors compound across steps, costs scale with the number of steps, and debugging a 12-step trajectory is painful. Anthropic's "Building Effective AI Agents" makes the key distinction: use a deterministic workflow when the path is known, and an agent only when it is not.
+
+| | Workflow | Agent |
+|---|---|---|
+| Control flow | Fixed path; the LLM fills in steps | The LLM decides the path dynamically |
+| Reliability | High and testable | Lower; needs evals and guardrails |
+| Cost | Predictable per run | Compounds with every step |
+| Debugging | Straightforward | Requires tracing every step |
+| Use when | Steps are known (RAG pipeline, data extraction) | The path cannot be known upfront (research, open-ended coding) |
+
+The senior answer in an interview: "I default to a workflow. I reach for an agent when the number of steps or the tools needed cannot be determined before runtime." Memorize that line; it signals judgment, not just tool knowledge.
+
+## Structured outputs with Pydantic
+
+Agents break when the model returns free text that your code must parse. The fix is to force the model's output into a validated schema before your code ever touches it. Pydantic is the standard way to do this in Python, and it connects directly to the type-hint skills from [the Python chapter](/ai-engineering/python/).
+
+```python
+from pydantic import BaseModel, Field
+from langchain_ollama import ChatOllama
+
+class FlightBooking(BaseModel):
+    origin: str = Field(description="IATA airport code, e.g. DEL")
+    destination: str = Field(description="IATA airport code, e.g. BOM")
+    date: str = Field(description="Travel date as YYYY-MM-DD")
+    passengers: int = Field(ge=1, le=9)
+
+llm = ChatOllama(model="qwen2.5:7b", temperature=0)
+structured = llm.with_structured_output(FlightBooking)
+
+booking = structured.invoke(
+    "Book me a flight from Delhi to Mumbai on 2026-10-15 for 2 people"
+)
+print(booking.model_dump())
+# {'origin': 'DEL', 'destination': 'BOM', 'date': '2026-10-15', 'passengers': 2}
+```
+
+If the model returns anything that does not match the schema, you get a validation error instead of a silent bad booking. This is how the "book a flight" agent stays reliable: tool arguments are validated before execution, every time.
+
+## LangGraph: agents as graphs
+
+LangGraph models the agent loop as a graph, which makes the control flow explicit and debuggable. There are four concepts to learn, and they map one-to-one onto the loop from the start of this chapter.
+
+| Concept | What it is | Example |
+|---|---|---|
+| State | A shared, typed dictionary every node reads and writes | `messages`, `sources`, `topic` |
+| Node | A Python function: state in, state updates out | `plan()`, `search()`, `synthesize()` |
+| Edge | A fixed transition between nodes | `plan` → `search` |
+| Conditional edge | A router function that picks the next node from state | fewer than 3 sources → `search`, else → `synthesize` |
+
+Here is a complete research agent graph. Read it as the loop made visible: plan, then search, then either search again or synthesize, then stop.
+
+```python
+from typing import TypedDict, Annotated, List
+from langgraph.graph import StateGraph, END
+import operator
+
+def web_search(query: str) -> list[str]:
+    # stub for illustration; the project below wires in a real search tool
+    return [f"https://example.com/{query.replace(' ', '-')}-{i}" for i in range(3)]
+
+class AgentState(TypedDict):
+    topic: str
+    messages: Annotated[List[str], operator.add]
+    sources: Annotated[List[str], operator.add]
+
+def plan(state: AgentState):
+    return {"messages": [f"Plan: research '{state['topic']}', need 3+ sources."]}
+
+def search(state: AgentState):
+    urls = web_search(state["topic"])
+    return {"sources": urls, "messages": [f"Collected {len(urls)} sources."]}
+
+def synthesize(state: AgentState):
+    return {"messages": [f"Final report on {state['topic']} from {len(state['sources'])} sources."]}
+
+def route(state: AgentState) -> str:
+    return "search" if len(state["sources"]) < 3 else "synthesize"
+
+g = StateGraph(AgentState)
+g.add_node("plan", plan)
+g.add_node("search", search)
+g.add_node("synthesize", synthesize)
+g.set_entry_point("plan")
+g.add_edge("plan", "search")
+g.add_conditional_edges("search", route, {"search": "search", "synthesize": "synthesize"})
+g.add_edge("synthesize", END)
+app = g.compile()
+
+result = app.invoke({"topic": "vector databases", "messages": [], "sources": []})
+print(result["messages"])
+# ["Plan: research 'vector databases', need 3+ sources.",
+#  'Collected 3 sources.',
+#  'Final report on vector databases from 3 sources.']
+```
+
+The `Annotated[List[str], operator.add]` pattern is how LangGraph merges updates: each node appends to the list instead of overwriting it. Expect an interview question about why state updates do not clobber each other — this is the answer.
+
+## Checkpointing: persistence and human-in-the-loop
+
+A compiled graph is stateless by default. Pass a checkpointer at compile time and every step's state is persisted, keyed by a `thread_id` you supply. That unlocks three production features: resume after a crash, human-in-the-loop approval (pause before a sensitive node, inspect, then resume), and time-travel (re-run from any earlier checkpoint).
+
+```python
+from langgraph.checkpoint.mongodb import MongoDBSaver
+
+# from_conn_string is a context manager: entering it creates the
+# checkpoint collections and indexes, exiting it closes the connection.
+with MongoDBSaver.from_conn_string("mongodb://localhost:27017") as checkpointer:
+    app = g.compile(
+        checkpointer=checkpointer,
+        interrupt_before=["synthesize"],  # pause here for human approval
+    )
+    config = {
+        "configurable": {"thread_id": "research-1"},
+        "recursion_limit": 25,  # safety net so a looping agent cannot run forever
+    }
+    for chunk in app.stream({"topic": "vector databases"}, config):
+        print(chunk)
+    # A human reviews the gathered sources, then resumes:
+    # for chunk in app.stream(None, config):
+    #     print(chunk)
+```
+
+The `recursion_limit` counts every node visit, so a search loop that never reaches three sources raises instead of billing you forever. Tune it to roughly twice the steps you expect a healthy run to take.
+
+<Callout type="important">
+The `thread_id` is your conversation identity. One thread per user session gives you isolated, resumable conversations for free — and it is the same key [the memory chapter](/ai-engineering/memory/) uses to scope recall.
+</Callout>
+
+## Interview angle
+
+Two questions come up constantly. First: "design an agent that books a flight." Walk through it in layers: tools (`search_flights`, `book_flight`, `get_user_preferences`), a Pydantic schema validating booking arguments before execution, the perceive-reason-act loop with a max-step cap, a human-in-the-loop pause before payment, and guardrails such as a price ceiling. Then add the senior touch: explain where you would downgrade parts of it to a deterministic workflow.
+
+Second: "when would you use an agent versus a workflow?" Use the table from earlier in this chapter. Default to a workflow when the steps are known; choose an agent when the number of steps or the tools required cannot be determined upfront; and mention that agents need evals and tracing ([Langfuse, RAGAS](/ai-engineering/production/)) to be production-safe.
+
+## Free resources
+
+These free resources back the concepts in this chapter — credit to their authors:
+
+- Anthropic, "Building Effective AI Agents" — the canonical guide on agents vs workflows, tool design, and when not to use an agent: https://www.anthropic.com/engineering/building-effective-agents
+- OpenAI, "A practical guide to building agents" (PDF) — agent foundations, orchestration patterns, and guardrails: https://cdn.openai.com/business-guides-and-resources/a-practical-guide-to-building-agents.pdf
+- LangChain docs, "Quickstart" — build a first working agent with tools and structured outputs: https://docs.langchain.com/oss/python/langchain/quickstart
+- LangChain Academy, "Introduction to LangGraph" — free course covering graphs, routers, state reducers, streaming, and breakpoints: https://academy.langchain.com/courses/intro-to-langgraph
+- DeepLearning.AI, "AI Agents in LangGraph" — free short course building an agent from scratch, then with LangGraph: https://learn.deeplearning.ai/courses/ai-agents-in-langgraph
+- MongoDB docs, "Integrate MongoDB with LangGraph" — MongoDBSaver checkpointer, human-in-the-loop, and time travel: https://www.mongodb.com/docs/atlas/ai-integrations/langgraph/
+
+## Project: research agent with LangGraph and checkpointing
+
+You will build a research agent that plans, searches the web until it has enough sources, pauses for your approval, then synthesizes a report. It persists every step to MongoDB, so you can interrupt it, resume it, and rewind it. This project exercises every concept in this chapter.
+
+1. **Set up the environment.** Create a virtual environment, install the packages, pull a local model, and start MongoDB locally with Docker. Everything here is free — no API keys needed.
+
+```bash
+python -m venv .venv && source .venv/bin/activate
+pip install langgraph langgraph-checkpoint-mongodb langchain-ollama duckduckgo-search pymongo
+ollama pull qwen2.5:7b
+docker run -d --name mongo -p 27017:27017 mongo:7
+docker ps --filter name=mongo --format "running: {{.Names}}"
+```
+
+Expected output: `running: mongo`. If `ollama` is not found, install it from [ollama.com](https://ollama.com) first. If the `docker ps` check shows nothing, inspect `docker logs mongo` — the most common cause is a stale container with the same name from an earlier run (`docker rm -f mongo`, then retry).
+
+2. **Write the search tool.** This is the agent's "act" capability. The `duckduckgo-search` package needs no API key, which keeps the project free to run.
+
+```python
+from duckduckgo_search import DDGS
+
+def web_search(query: str, max_results: int = 5) -> list[str]:
+    with DDGS() as ddgs:
+        return [r["href"] for r in ddgs.text(query, max_results=max_results)]
+```
+
+3. **Define the state.** One shared, typed dictionary flows through the whole graph.
+
+```python
+from typing import TypedDict, Annotated, List
+import operator
+
+class AgentState(TypedDict):
+    topic: str
+    messages: Annotated[List[str], operator.add]
+    sources: Annotated[List[str], operator.add]
+```
+
+4. **Write the nodes: plan, search, synthesize.** Each node is a plain function that takes state and returns updates.
+
+```python
+from langchain_ollama import ChatOllama
+
+llm = ChatOllama(model="qwen2.5:7b", temperature=0)
+
+def plan(state: AgentState):
+    return {"messages": [f"Plan: research '{state['topic']}'. Need at least 3 sources."]}
+
+def search(state: AgentState):
+    urls = web_search(state["topic"])
+    return {"sources": urls, "messages": [f"Search returned {len(urls)} sources."]}
+
+def synthesize(state: AgentState):
+    prompt = (
+        f"Write a concise research brief on '{state['topic']}' "
+        f"using only these sources: {', '.join(state['sources'])}"
+    )
+    report = llm.invoke(prompt).content
+    return {"messages": [report]}
+```
+
+5. **Wire the graph with a conditional edge.** If the agent has fewer than three sources, it loops back to search; otherwise it moves to synthesis. This is the "agent decides the path" behavior from the theory section.
+
+```python
+from langgraph.graph import StateGraph, END
+
+def route(state: AgentState) -> str:
+    return "search" if len(state["sources"]) < 3 else "synthesize"
+
+g = StateGraph(AgentState)
+g.add_node("plan", plan)
+g.add_node("search", search)
+g.add_node("synthesize", synthesize)
+g.set_entry_point("plan")
+g.add_edge("plan", "search")
+g.add_conditional_edges("search", route, {"search": "search", "synthesize": "synthesize"})
+g.add_edge("synthesize", END)
+```
+
+6. **Add the MongoDB checkpointer and a human-in-the-loop gate.** The agent will pause before synthesis so a human can review the gathered sources. Note the import path — in `langgraph-checkpoint-mongodb` 0.5+, the saver lives under the `langgraph.checkpoint.mongodb` namespace, and `from_conn_string` is a context manager that sets up the checkpoint collections and indexes on entry.
+
+```python
+from langgraph.checkpoint.mongodb import MongoDBSaver
+
+with MongoDBSaver.from_conn_string("mongodb://localhost:27017") as checkpointer:
+    app = g.compile(checkpointer=checkpointer, interrupt_before=["synthesize"])
+    config = {
+        "configurable": {"thread_id": "demo-1"},
+        "recursion_limit": 25,  # safety net against infinite search loops
+    }
+```
+
+If you get `ServerSelectionTimeoutError`, the Mongo container is not reachable — re-run the `docker ps` check from step 1.
+
+7. **Assemble and run the full script.** Save everything from steps 2–6 as `research_agent.py` in order — imports, search tool, state, nodes, graph wiring, then the checkpointer block below. The complete file ends like this:
+
+```python
+# research_agent.py (final section — steps 2-5 above this line)
+from langgraph.checkpoint.mongodb import MongoDBSaver
+
+with MongoDBSaver.from_conn_string("mongodb://localhost:27017") as checkpointer:
+    app = g.compile(checkpointer=checkpointer, interrupt_before=["synthesize"])
+    config = {
+        "configurable": {"thread_id": "demo-1"},
+        "recursion_limit": 25,
+    }
+
+    # Run until the approval gate
+    print("=== running until approval gate ===")
+    for chunk in app.stream({"topic": "pgvector vs Qdrant", "messages": [], "sources": []}, config):
+        print(chunk)
+
+    # Inspect what the agent gathered while paused
+    snapshot = app.get_state(config)
+    print("Sources:", snapshot.values["sources"])
+    print("Paused before:", snapshot.next)  # ('synthesize',)
+
+    # Human approves, then resume
+    print("=== resuming after approval ===")
+    for chunk in app.stream(None, config):
+        print(chunk)
+    print("Final report:", app.get_state(config).values["messages"][-1])
+```
+
+Run it with `python research_agent.py`. Expected output: plan and search chunks streaming by, then `Paused before: ('synthesize',)` with the collected source URLs printed. The script resumes automatically after the inspection print — in a real deployment that resume happens in a separate process after a human clicks approve, using the same `thread_id`.
+
+**8. Demonstrate time-travel.** Add this block inside the `with` statement, after the resume section, or run it as a second script with the same graph definition:
+
+```python
+    # Time-travel: pick an earlier checkpoint and fork history from there
+    history = list(app.get_state_history(config))
+    earlier = history[1].config["configurable"]["checkpoint_id"]
+    rewind_config = {"configurable": {"thread_id": "demo-1", "checkpoint_id": earlier}}
+    print("=== rewinding to an earlier checkpoint ===")
+    for chunk in app.stream(None, rewind_config):
+        print(chunk)
+```
+
+Expected output: the graph re-executes from the earlier checkpoint — you will see the synthesize node run again from the same sources. If `history` has fewer than two entries, the run never got past the first node; check that the search tool returned results (DuckDuckGo occasionally rate-limits — wait a minute and retry, or lower `max_results`).
+
+**Expected outcome.** The agent searches, and if a search returns fewer than three sources it automatically searches again. It then pauses before writing the report; you inspect the sources, approve, and it resumes. Every step is stored in MongoDB under `thread_id = "demo-1"`, so killing the process mid-run loses nothing, and the rewind step proves you can fork history from any checkpoint. The whole project runs free on local models — no API keys anywhere.
+
+**Interview talking points.** Say: "I built a LangGraph research agent with a conditional edge that loops on search until it has enough sources. State is a TypedDict with additive list updates so nodes never clobber each other. I used a MongoDB checkpointer with `interrupt_before` on the synthesis node for human approval, a `recursion_limit` as a safety net against infinite loops, and I demoed time-travel by resuming from an earlier checkpoint_id." Then connect it to the theory: this is the perceive-reason-act loop made explicit as a graph, and the approval gate is exactly the kind of guardrail that makes agents production-viable. [The next chapter](/ai-engineering/memory/) gives this same agent a memory that survives across sessions.

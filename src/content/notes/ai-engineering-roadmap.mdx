@@ -1,0 +1,145 @@
+---
+title: "AI Engineering Roadmap"
+track: "ai-engineering"
+kind: "notes"
+order: 0
+description: "A practical GenAI and LLM engineering roadmap for working engineers: advanced Python, LLM internals, prompting, RAG, agents, memory, and production AI — each chapter with free resources and a hands-on project."
+updated: 2026-09-29
+---
+
+import Callout from '../../components/Callout.astro';
+
+You already know how to ship software. This track is about the layer on top: building products with large language models — RAG pipelines, agents, and the production concerns (evals, observability, guardrails, serving) that AI engineer job descriptions actually screen for. Every chapter pairs theory with free resources and ends with a project you can talk about in interviews.
+
+<Callout type="tip">
+Work the track in order. Each chapter assumes the previous one — the RAG project needs asyncio and Pydantic from chapter 1, and the agents chapter needs the RAG chapter's retrieval patterns.
+</Callout>
+
+## Who This Track Is For
+
+A working software engineer — most likely backend or full-stack — who wants to be hireable for AI engineer, GenAI engineer, or "full-stack + AI" roles. You are comfortable writing Python, you have used APIs, and you do not need ML math: no linear algebra, no training runs, no gradient descent. This track treats the LLM as an API and an engine, and teaches you to build systems around it.
+
+If you are still learning Python, start with the official tutorial first and come back — chapter 1 assumes you can already write working Python.
+
+## Prerequisites
+
+You need less than you think, but these are non-negotiable:
+
+- **Python you can already write.** Functions, classes, virtualenvs, pip. Chapter 1 covers the advanced parts (asyncio, Pydantic) — the rest is assumed.
+- **A machine with Docker.** Ollama, Postgres with pgvector, MongoDB, Neo4j, and Qdrant all run in containers here. No GPU required until the vLLM section, which you can do on a cheap cloud instance.
+- **An LLM API key (optional but recommended).** Most chapters run fully local and free with Ollama. A Gemini free-tier key or a small OpenAI balance makes evals and judge-based metrics much easier.
+- **Comfort reading docs.** The chapters give you the mental model; the linked resources are where you go deeper when something is fuzzy.
+
+## How to Work Through It
+
+Every chapter follows the same loop, and the loop is the method:
+
+1. **Read the theory notes here.** They are written to be interview-complete on their own — the two-minute explanations, the comparison tables, the "when do you use which" framing.
+2. **Go deeper with the free resources only where you are fuzzy.** The links are credited per chapter; you do not need to read everything. A chapter's video or doc is there for the topics where the notes left you unsure.
+3. **Build the chapter project end to end.** This is the non-skippable part. Reading about chunking does not teach you chunking; watching your RAG fail on a paraphrased question does.
+
+Do one chapter at a time, in order. The projects are deliberately cumulative — the RAG app you build in chapter 5 is the app you productionize in chapter 9.
+
+## The Learning Path
+
+Each chapter is a self-contained unit: theory notes, credited free resources, and one hands-on project with detailed steps.
+
+| # | Chapter | Why it matters for jobs | Est. time |
+|---|---------|------------------------|-----------|
+| 1 | [Advanced Python for AI](/ai-engineering/python/) | asyncio, the GIL, and Pydantic show up in every AI backend interview — and in every LangChain/FastAPI codebase you will touch. | 3–4 hrs |
+| 2 | [How LLMs Work](/ai-engineering/llm-foundations/) | Tokenization, attention, and embeddings are the whiteboard fundamentals behind RAG and agent design questions. | 4–6 hrs |
+| 3 | [Prompt Engineering](/ai-engineering/prompting/) | Zero/few-shot, chain-of-thought, and structured outputs are the cheapest way to improve an LLM system — interviewers ask how you would fix a failing prompt. | 3–4 hrs |
+| 4 | [LLM APIs and Local Models](/ai-engineering/llm-apis/) | Calling OpenAI/Gemini APIs, running Ollama locally, and wrapping models in FastAPI is the day-one skill of any AI engineer role. | 4–5 hrs |
+| 5 | [RAG](/ai-engineering/rag/) | Retrieval-augmented generation is the most-asked system-design topic in AI interviews: chunking, embeddings, vector stores, retrieval quality. | 6–8 hrs |
+| 6 | [AI Agents with LangGraph](/ai-engineering/agents/) | Agents are the current hiring wave. State graphs, tool calling, and routing are what "agentic AI" questions are really about. | 6–8 hrs |
+| 7 | [Agent Memory](/ai-engineering/memory/) | Short-term vs long-term vs semantic memory, Mem0, and graph memory separate toy agents from ones that remember users. | 4–5 hrs |
+| 8 | [Voice, Multimodal, and MCP](/ai-engineering/voice-multimodal/) | Voice pipelines, vision-language models, and the Model Context Protocol are the newest surface area — a strong differentiator in interviews. | 5–6 hrs |
+| 9 | [Production AI](/ai-engineering/production/) | Evals, observability, guardrails, and serving turn a demo into a product — and senior-level interviews probe these hardest. | 6–8 hrs |
+| 10 | [Interview Questions Drill](/ai-engineering/questions/) | Rapid-fire Q&A across the whole track to rehearse before interviews. | 2–3 hrs |
+
+That is roughly 45–60 hours total: six to eight weeks at an hour a day, or two focused weekends per milestone if you batch chapters.
+
+## The Cumulative Project Arc
+
+You do not build nine disconnected toys. You build one system, layer by layer, and each chapter's project extends the last:
+
+- **Chapter 4:** a FastAPI gateway streaming responses from a local model — your serving layer.
+- **Chapter 5:** chat-with-your-PDFs on pgvector — retrieval replaces the bare prompt.
+- **Chapter 6:** a LangGraph research agent with checkpointing — the agent decides when to retrieve.
+- **Chapter 7:** the agent gains long-term memory with Mem0 — it remembers you across sessions.
+- **Chapter 8:** a voice interface and an MCP server — new ways in and out.
+- **Chapter 9:** Langfuse tracing, RAGAS evals, a NeMo guardrail, and a CI gate — the whole thing becomes production-shaped.
+
+By the end you have a streaming chat UI over a RAG pipeline backed by an agent with memory, all observable, evaluated, and guarded. That is a portfolio project and an interview story in one: "I built this, measured it, and hardened it."
+
+## Interview Prep
+
+When you can explain each chapter's core idea in two minutes and demo its project, you are ready. Use the [Interview Questions Drill](/ai-engineering/questions/) as the final gate — thirty questions across the track with short speakable answers. If you can answer all of them without notes, walk into the interview.
+
+For system-design rounds, the highest-leverage chapters are RAG, agents, and production: "design a chat-with-docs system," "design an agent that does X," and "how would you take this to production" cover most AI interview loops.
+
+<Callout type="note">
+You do not need the paid course this track is mapped from. Every concept links to a free resource, and every resource is credited in the Sources section below.
+</Callout>
+
+## Sources and Credits
+
+Theory in this track distills these free resources — go deeper at the source.
+
+### Advanced Python for AI
+
+- [asyncio documentation](https://docs.python.org/3/library/asyncio.html)
+- [FastAPI concurrency and async/await explainer](https://fastapi.tiangolo.com/async/)
+- [Concurrency in Python — freeCodeCamp](https://www.freecodecamp.org/news/concurrency-in-python/)
+- [Pydantic documentation](https://docs.pydantic.dev/latest/)
+- [Pydantic Crash Course — TechSimPlus (YouTube)](https://www.youtube.com/watch?v=7Op2zRkc0Ho)
+
+### How LLMs Work
+
+- [Let's build GPT: from scratch, in code — Andrej Karpathy (YouTube)](https://www.youtube.com/watch?v=kCc8FmEb1nY)
+
+### Prompt Engineering
+
+- [Anthropic prompt engineering overview](https://docs.anthropic.com/en/docs/build-with-claude/prompt-engineering/overview)
+
+### LLM APIs and Local Models
+
+- [Ollama documentation](https://docs.ollama.com)
+- [OpenWebUI quick start](https://docs.openwebui.com/getting-started/quick-start/)
+- [FastAPI documentation](https://fastapi.tiangolo.com/)
+
+### RAG
+
+- [LangChain RAG documentation](https://docs.langchain.com/oss/python/langchain/rag)
+- [LLM Zoomcamp — DataTalksClub (GitHub)](https://github.com/DataTalksClub/llm-zoomcamp)
+
+### AI Agents
+
+- [Building Effective AI Agents — Anthropic Engineering](https://www.anthropic.com/engineering/building-effective-agents)
+- [LangChain quickstart](https://docs.langchain.com/oss/python/langchain/quickstart)
+- [OpenAI Agents SDK documentation](https://openai.github.io/openai-agents-python/)
+- [Introduction to LangGraph — LangChain Academy](https://academy.langchain.com/courses/intro-to-langgraph)
+
+### Agent Memory
+
+- [Mem0 Python quickstart](https://docs.mem0.ai/open-source/python-quickstart)
+- [Cypher Fundamentals — Neo4j GraphAcademy](https://graphacademy.neo4j.com/courses/cypher-fundamentals/?ref=vscode-learn)
+
+### Voice, Multimodal, and MCP
+
+- [Model Context Protocol documentation](https://modelcontextprotocol.io/docs/getting-started/intro)
+- [MCP Course — Hugging Face](https://huggingface.co/learn/mcp-course/en/unit0/introduction)
+
+### Production AI
+
+- [Langfuse documentation](https://langfuse.com/docs)
+- [RAGAS documentation](https://docs.ragas.io/)
+- [vLLM documentation](https://docs.vllm.ai)
+- [pgvector (GitHub)](https://github.com/pgvector/pgvector)
+- [NeMo Guardrails documentation](https://docs.nvidia.com/nemo/guardrails)
+- [Vercel AI SDK documentation](https://ai-sdk.dev/docs/)
+
+### General Deep Dives
+
+- [DeepLearning.AI short courses](https://www.deeplearning.ai/short-courses/)
+- [LLM Course — Hugging Face](https://huggingface.co/learn/llm-course)

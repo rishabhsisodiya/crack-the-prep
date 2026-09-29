@@ -11,7 +11,7 @@ export const SITE = {
   base: ROOT,
   title: 'CrackThePrep — Full-Stack Interview Preparation',
   description:
-    'Free, practitioner-grade interview preparation for full-stack engineers: JavaScript, React, Node.js, system design, DSA and behavioral — notes, questions and worked examples in one place.',
+    'Free, practitioner-grade interview preparation for full-stack engineers: JavaScript, React, Node.js, system design, DSA, AI engineering and behavioral — notes, questions and worked examples in one place.',
 } as const;
 
 export type Track = {
@@ -51,6 +51,13 @@ export const TRACKS: Track[] = [
     title: 'Node.js',
     blurb: 'Runtime model, modules, Express, middleware, auth and backend fundamentals.',
     badge: '⬢',
+    hasQuestions: true,
+  },
+  {
+    slug: 'ai-engineering',
+    title: 'AI Engineering',
+    blurb: 'GenAI & LLM engineering — Python for AI, prompts, RAG, agents, memory, voice, MCP, evals, guardrails. Theory, free resources and a build project in every chapter.',
+    badge: 'New',
     hasQuestions: true,
   },
   {

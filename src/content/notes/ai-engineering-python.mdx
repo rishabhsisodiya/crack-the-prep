@@ -1,0 +1,349 @@
+---
+title: "Advanced Python for AI"
+track: "ai-engineering"
+kind: "notes"
+order: 1
+slug: "python"
+description: "asyncio, threads vs processes vs the GIL, and Pydantic v2 — the Python you actually need for AI backends, RAG pipelines, and agent frameworks, plus an async batch-inference project."
+updated: 2026-09-29
+---
+
+import Callout from '../../components/Callout.astro';
+
+AI backends are I/O-bound: your code spends most of its time waiting on LLM API calls, embedding requests, and vector database queries. That makes asyncio, concurrency models, and Pydantic (the validation layer under FastAPI, LangChain, and every agent framework) the highest-leverage Python you can learn for AI engineering interviews.
+
+## asyncio: One Thread, Many Waits
+
+asyncio runs many coroutines on a single thread using an event loop. When a coroutine hits `await`, it yields control so other work can run while it waits — perfect for fanning out LLM API calls.
+
+```python
+import asyncio
+
+async def fetch_one(prompt: str) -> str:
+    await asyncio.sleep(0.1)  # stands in for an LLM API call
+    return f"answer to: {prompt}"
+
+async def main() -> None:
+    prompts = [f"question {i}" for i in range(10)]
+    results = await asyncio.gather(*(fetch_one(p) for p in prompts))
+    print(results)
+
+asyncio.run(main())
+```
+
+`asyncio.gather` schedules all coroutines concurrently and returns results in order. For production code, bound the concurrency with a semaphore so you do not hammer the API or blow past rate limits:
+
+```python
+import asyncio
+
+semaphore = asyncio.Semaphore(5)
+
+async def fetch_limited(prompt: str) -> str:
+    async with semaphore:
+        return await fetch_one(prompt)
+```
+
+When you must call blocking, CPU-bound code from async code, offload it with `run_in_executor` so it does not stall the event loop:
+
+```python
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
+
+def cpu_heavy(n: int) -> int:
+    return sum(i * i for i in range(n))
+
+async def main() -> None:
+    loop = asyncio.get_running_loop()
+    with ThreadPoolExecutor() as pool:
+        result = await loop.run_in_executor(pool, cpu_heavy, 10_000_000)
+    print(result)
+```
+
+### Never await forever: timeouts
+
+LLM calls hang. Wrap every external call in `asyncio.wait_for` so one slow provider cannot stall the whole batch:
+
+```python
+import asyncio
+
+async def flaky_call() -> str:
+    await asyncio.sleep(10)
+    return "finally"
+
+async def main() -> None:
+    try:
+        result = await asyncio.wait_for(flaky_call(), timeout=2.0)
+    except TimeoutError:
+        result = "fell back to default"
+    print(result)
+
+asyncio.run(main())
+```
+
+`asyncio.wait_for` cancels the inner coroutine on timeout and raises `TimeoutError` (an alias of `asyncio.TimeoutError` since Python 3.11). The pattern to remember for interviews: a semaphore bounds concurrency, `wait_for` bounds latency, and an executor absorbs blocking code. For fire-and-forget background work, `asyncio.create_task()` schedules a coroutine immediately and returns a `Task` you can await or cancel later — `gather` is for "run these and give me all results", `create_task` is for "start this now, I will deal with it later".
+
+<Callout type="important">
+The event loop is single-threaded: never call blocking I/O (like `requests.get` or `time.sleep`) inside a coroutine. Use async libraries (`httpx.AsyncClient`, `asyncpg`) or push blocking calls into an executor.
+</Callout>
+
+## Threads, Processes, and the GIL
+
+The Global Interpreter Lock (GIL) lets only one thread execute Python bytecode at a time. That sounds damning, but it only bites CPU-bound work. Threads still help I/O-bound work because a thread waiting on network I/O releases the GIL.
+
+| Model | Best for | GIL impact | Memory |
+|-------|----------|------------|--------|
+| `asyncio` (coroutines) | Many concurrent I/O-bound calls (LLM APIs, embeddings) | None — single thread by design | Shared, cheapest |
+| Threads (`threading`, executors) | I/O-bound work, or wrapping blocking libraries | Released during I/O; hurts CPU-bound work | Shared — use `Lock` against race conditions |
+| Processes (`multiprocessing`) | CPU-bound work (chunking, CPU embedding batches) | None — each process has its own GIL | Separate — communicate via `Queue` or shared `Value` |
+
+Interview one-liners: "The GIL is a mutex around the interpreter — it serializes CPU-bound threads but not I/O-bound ones." "I would use asyncio for fan-out LLM calls, threads for blocking legacy clients, and processes for CPU-heavy preprocessing." Python 3.13's free-threaded build is changing this story — worth mentioning as a follow-up if the interviewer digs deeper.
+
+## Pydantic v2: Validation as Code
+
+Pydantic turns type annotations into runtime validation. FastAPI request bodies, LangChain structured outputs, and agent tool schemas are all Pydantic models under the hood.
+
+```python
+from pydantic import BaseModel, Field, field_validator
+
+class InferenceRequest(BaseModel):
+    prompt: str = Field(min_length=1, max_length=4000)
+    temperature: float = Field(default=0.7, ge=0.0, le=2.0)
+    max_tokens: int = Field(default=512, gt=0)
+
+    @field_validator("prompt")
+    @classmethod
+    def no_empty_prompt(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("prompt must not be blank")
+        return v.strip()
+
+class InferenceResponse(BaseModel):
+    answer: str
+    tokens_used: int = Field(ge=0)
+    model: str
+
+req = InferenceRequest(prompt="  hello  ", temperature=1.5)
+print(req.model_dump())       # dict
+print(req.model_dump_json())  # JSON string
+```
+
+Nested models compose — this is exactly how structured LLM output works:
+
+```python
+from pydantic import BaseModel
+
+class CitedAnswer(BaseModel):
+    answer: str
+    citations: list[str]
+    confidence: float
+```
+
+A model can be built straight from an LLM's JSON response with `CitedAnswer.model_validate(data)` — the pattern behind structured outputs in the [agents chapter](/ai-engineering/agents/).
+
+`model_config` sets model-wide behavior, and `model_validator` checks relationships between fields. Catch `ValidationError` at API boundaries — its `.errors()` output is structured and machine-readable:
+
+```python
+from pydantic import BaseModel, ConfigDict, ValidationError, model_validator
+
+class ChatTurn(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    role: str
+    content: str
+
+class TokenBudget(BaseModel):
+    prompt_tokens: int
+    max_tokens: int
+
+    @model_validator(mode="after")
+    def budget_fits(self):
+        if self.prompt_tokens >= self.max_tokens:
+            raise ValueError("prompt already exceeds max_tokens")
+        return self
+
+try:
+    TokenBudget(prompt_tokens=900, max_tokens=512)
+except ValidationError as e:
+    print(e.errors()[0]["msg"])  # prompt already exceeds max_tokens
+
+print(ChatTurn(role="user", content="  hello  ").model_dump())
+# {'role': 'user', 'content': 'hello'} — whitespace stripped by config
+```
+
+<Callout type="tip">
+In interviews, connect Pydantic to the bigger picture: "I use Pydantic models as the contract between the LLM and my code — the model defines the JSON schema I ask the LLM to produce, and validation catches hallucinations in structure before they reach the user."
+</Callout>
+
+## Free Resources
+
+- [asyncio documentation](https://docs.python.org/3/library/asyncio.html) — the canonical reference for the event loop, tasks, and synchronization primitives.
+- [FastAPI async explainer](https://fastapi.tiangolo.com/async/) — plain-English guide to concurrency vs parallelism and `async def` vs `def`.
+- [Concurrency in Python — freeCodeCamp](https://www.freecodecamp.org/news/concurrency-in-python/) — threads, processes, async, and the GIL with runnable examples.
+- [Pydantic documentation](https://docs.pydantic.dev/latest/) — BaseModel, fields, validators, nested models, serialization.
+- [Pydantic Crash Course — TechSimPlus (YouTube)](https://www.youtube.com/watch?v=7Op2zRkc0Ho) — about an hour, timestamped chapters.
+
+## Project: Async Batch Inference Client with Pydantic Validation
+
+Build a client that fans out prompts to any OpenAI-compatible endpoint (OpenAI, Gemini via base URL, Ollama, vLLM), validates every response with Pydantic, retries failures, and benchmarks sync vs threaded vs async. This is a miniature version of the ingestion and eval harnesses real AI teams run.
+
+### Step 1 — Set up the environment
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install openai pydantic httpx
+export OPENAI_API_KEY="your-key-here"
+```
+
+Any OpenAI-compatible base URL works — point `base_url` at Ollama (`http://localhost:11434/v1`) or vLLM to run this for free locally (setup covered in [LLM APIs & Local Models](/ai-engineering/llm-apis/)).
+
+### Step 2 — Define the Pydantic models
+
+```python
+from pydantic import BaseModel, Field, field_validator
+
+class BatchItem(BaseModel):
+    id: str = Field(min_length=1)
+    prompt: str = Field(min_length=1, max_length=4000)
+
+class ScoredAnswer(BaseModel):
+    id: str
+    answer: str
+    model: str
+    prompt_tokens: int = Field(ge=0)
+    completion_tokens: int = Field(ge=0)
+
+    @field_validator("answer")
+    @classmethod
+    def answer_not_blank(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("empty answer from model")
+        return v
+```
+
+### Step 3 — Write the async client with bounded concurrency
+
+```python
+import asyncio
+from openai import AsyncOpenAI
+
+client = AsyncOpenAI()  # reads OPENAI_API_KEY; pass base_url for Ollama/vLLM
+semaphore = asyncio.Semaphore(5)
+
+async def infer_one(item: BatchItem) -> ScoredAnswer:
+    async with semaphore:
+        resp = await client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": item.prompt}],
+        )
+    choice = resp.choices[0].message.content or ""
+    usage = resp.usage
+    return ScoredAnswer(
+        id=item.id,
+        answer=choice,
+        model=resp.model,
+        prompt_tokens=usage.prompt_tokens if usage else 0,
+        completion_tokens=usage.completion_tokens if usage else 0,
+    )
+
+async def run_batch(items: list[BatchItem]) -> list[ScoredAnswer]:
+    return await asyncio.gather(*(infer_one(i) for i in items))
+```
+
+### Step 4 — Add retry with exponential backoff
+
+```python
+import asyncio
+import random
+
+async def infer_with_retry(item: BatchItem, attempts: int = 4) -> ScoredAnswer:
+    delay = 1.0
+    for attempt in range(attempts):
+        try:
+            return await infer_one(item)
+        except Exception:
+            if attempt == attempts - 1:
+                raise
+            await asyncio.sleep(delay + random.uniform(0, 0.5))
+            delay *= 2
+    raise RuntimeError("unreachable")
+```
+
+Swap `infer_one` for `infer_with_retry` inside `run_batch`. Retries handle the 429s you will hit when benchmarking at high concurrency.
+
+### Step 5 — Parse structured JSON output into the model
+
+Ask the model for JSON and validate it — the structured-output pattern from the [agents chapter](/ai-engineering/agents/):
+
+```python
+import json
+
+class ExtractedFacts(BaseModel):
+    facts: list[str]
+    topic: str
+
+async def extract_facts(text: str) -> ExtractedFacts:
+    resp = await client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {"role": "system", "content": "Return JSON only."},
+            {"role": "user", "content": "Extract key facts as topic plus facts list. Text: " + text},
+        ],
+        response_format={"type": "json_object"},
+    )
+    data = json.loads(resp.choices[0].message.content or "{}")
+    return ExtractedFacts.model_validate(data)
+```
+
+### Step 6 — Benchmark sync vs threaded vs async
+
+```python
+import time
+from concurrent.futures import ThreadPoolExecutor
+from openai import OpenAI
+
+sync_client = OpenAI()
+items = [BatchItem(id=str(i), prompt="Say hello in one sentence.") for i in range(20)]
+
+def sync_one(item: BatchItem) -> str:
+    r = sync_client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "user", "content": item.prompt}],
+    )
+    return r.choices[0].message.content or ""
+
+start = time.perf_counter()
+[sync_one(i) for i in items]
+print("sync:", round(time.perf_counter() - start, 2), "s")
+
+start = time.perf_counter()
+with ThreadPoolExecutor(max_workers=5) as pool:
+    list(pool.map(sync_one, items))
+print("threads:", round(time.perf_counter() - start, 2), "s")
+
+start = time.perf_counter()
+asyncio.run(run_batch(items))
+print("async:", round(time.perf_counter() - start, 2), "s")
+```
+
+### Step 7 — What to observe
+
+Run the benchmark and note three things: async and threads should finish in roughly the same wall-clock time for 20 I/O-bound calls (both dodge the GIL because the wait is network I/O); async uses far less memory than 20 threads; and pushing the semaphore past the provider's rate limit triggers the retries you built in step 4. Try semaphore values of 2, 5, and 20 and record where throughput stops improving — that is the number you would put in a design doc.
+
+### Troubleshooting the project
+
+| Symptom | Likely cause | Fix |
+|---|---|---|
+| `401 AuthenticationError` on first run | `OPENAI_API_KEY` not exported in this shell | Run `export OPENAI_API_KEY=...`, verify with `echo $OPENAI_API_KEY`, re-run |
+| `Connection refused` against Ollama | Ollama is not serving, or wrong port | Run `ollama serve` in another terminal; use `base_url="http://localhost:11434/v1"` |
+| Async benchmark barely beats sync | Too few items, or semaphore too small | Use 20+ items; the async win appears when network wait dominates compute |
+| `ValidationError` on every structured response | Model wraps JSON in markdown fences | Strengthen the system prompt: "return raw JSON only, no markdown, no commentary" |
+| Retries never trigger | Provider is not rate-limiting you | Raise the semaphore to 20 and watch the 429s arrive — then confirm backoff recovers |
+
+## Expected Outcome
+
+You have a reusable harness: a `run_batch` function that takes validated prompts, fans them out with bounded concurrency, retries on rate limits, and returns validated, typed results. The same shape powers [RAG](/ai-engineering/rag/) ingestion (embed 10k chunks), [production](/ai-engineering/production/) eval harnesses (score 500 Q&A pairs), and [agent](/ai-engineering/agents/) batch jobs in the later chapters.
+
+## Interview Talking Points
+
+Rehearse these out loud — they map directly to common AI backend interview questions. "Why asyncio over threads here?" — one event loop, no per-thread stack memory, no lock discipline, and the workload is I/O-bound so the GIL never binds. "How do you handle rate limits?" — bounded concurrency with a semaphore plus exponential backoff with jitter, and validation on the way back in. "How do you trust LLM output?" — I define the JSON contract as a Pydantic model, request `json_object` format, and `model_validate` every response so malformed output fails loudly instead of corrupting downstream data.

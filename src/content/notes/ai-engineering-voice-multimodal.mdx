@@ -1,0 +1,403 @@
+---
+title: "Voice, Multimodal, MCP and Agent SDK"
+track: "ai-engineering"
+kind: "notes"
+order: 8
+slug: "voice-multimodal"
+description: "Voice agents (chained vs speech-to-speech), multimodal LLMs, the Model Context Protocol, and the OpenAI Agents SDK — with two hands-on projects."
+updated: 2026-09-29
+---
+
+import Callout from '../../components/Callout.astro';
+
+Voice interfaces, multimodal inputs, the Model Context Protocol, and the OpenAI Agents SDK are the newest layer of AI engineering — and the least covered by tutorials. This chapter gives you the mental models interviewers expect, plus two projects you can demo.
+
+## Voice Agents: Chained vs Speech-to-Speech
+
+A voice agent turns speech into an answer and back into speech. There are two architectures, and knowing when to pick each is a common senior-interview question.
+
+### The Chained Pipeline
+
+The pragmatic default: speech-to-text (STT), then your normal LLM/agent step, then text-to-speech (TTS). The five stages:
+
+1. **VAD (voice activity detection)** — detect when the user stopped talking so you know when to respond.
+2. **STT** — transcribe audio to text (Whisper, faster-whisper).
+3. **LLM** — your agent or RAG pipeline, unchanged from text chat.
+4. **TTS** — synthesize the reply (Piper, OpenAI TTS, ElevenLabs).
+5. **Playback** — with barge-in handling so users can interrupt.
+
+Chained wins for most teams because every stage is inspectable: you can read the transcript, swap any component, and reuse your text evals directly.
+
+### Speech-to-Speech (S2S)
+
+One model handles audio in and audio out (for example, the OpenAI Realtime API). Latency drops to roughly 300–500ms because there is no text serialization between stages, and the model hears tone and prosody. The cost: harder to debug, model lock-in, and evals are harder without a text transcript to score.
+
+|  | Chained (STT → LLM → TTS) | Speech-to-speech |
+|---|---|---|
+| Typical turn latency | 2–4 s | 0.3–0.8 s |
+| Debuggability | High — inspect text at each stage | Low — audio in, audio out |
+| Component choice | Any STT / LLM / TTS | Single provider model |
+| Evals | Reuse text evals | Need audio evals |
+| Best for | Support bots, IVR replacement, most products | Real-time conversation |
+
+<Callout type="tip">Interview line: "Chained is the default because each stage is independently testable. S2S wins only when sub-second latency is the product requirement."</Callout>
+
+## Multimodal: Sending Images to LLMs
+
+Vision-language models (VLMs) accept images alongside text. In the OpenAI chat format, an image is just another content part in the message — no special API needed:
+
+```python
+from openai import OpenAI
+
+client = OpenAI()  # or base_url="https://generativelanguage.googleapis.com/v1beta/openai/" for Gemini
+
+response = client.chat.completions.create(
+    model="gpt-4o-mini",
+    messages=[
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "What is shown in this image? Answer in one sentence."},
+                {"type": "image_url", "image_url": {"url": "https://example.com/invoice.png"}},
+            ],
+        }
+    ],
+    max_tokens=100,
+)
+print(response.choices[0].message.content)
+```
+
+Local files go in as base64 data URLs — same message shape, different URL scheme:
+
+```python
+import base64
+from openai import OpenAI
+
+client = OpenAI()
+
+with open("invoice.png", "rb") as f:
+    b64 = base64.b64encode(f.read()).decode("utf-8")
+
+response = client.chat.completions.create(
+    model="gpt-4o-mini",
+    messages=[
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Extract the total amount from this invoice."},
+                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}},
+            ],
+        }
+    ],
+    max_tokens=100,
+)
+print(response.choices[0].message.content)
+```
+
+Two practical notes. First, resize large images before sending — most providers downscale past a limit anyway, and you pay per image token. Second, watch token cost: images are tokenized into patches, so a large image can cost 1000+ tokens. Classic interview use cases: invoice/document parsing, UI screenshot to code, and visual QA.
+
+## Model Context Protocol (MCP)
+
+MCP is an open standard (from Anthropic) for connecting AI apps to external tools and data — "USB-C for AI". Before MCP, every agent framework had its own tool format; MCP standardizes discovery and invocation so one server works with any host.
+
+### Architecture: Host, Client, Server
+
+The three roles are deliberately split:
+
+- **Host**: the AI application the user interacts with (Claude Desktop, your agent, an IDE).
+- **Client**: a protocol client living inside the host — one client per server connection.
+- **Server**: exposes capabilities to the client.
+
+A server exposes three primitives: **tools** (functions the model can call, like `get_weather`), **resources** (data the model can read via URIs, like `notes://standup/2026-09-29`), and **prompts** (reusable prompt templates the host can fetch, like a `summarize-thread` template). Tools are model-invoked, resources are app-read, prompts are user-selected — that division is worth stating verbatim in an interview.
+
+### Transports
+
+**stdio** is for local servers — the host spawns the server as a subprocess. **Streamable HTTP** (with legacy SSE) is for remote servers. Rule of thumb: stdio in development, HTTP in production.
+
+<Callout type="warning">Tools execute code, and tool descriptions are untrusted model input. Only connect MCP servers you trust — a malicious server is a prompt-injection surface.</Callout>
+
+## OpenAI Agents SDK
+
+The OpenAI Agents SDK is a lightweight Python SDK for building agents: an `Agent` has instructions and tools, and a `Runner` executes the loop. Compared to LangGraph (graph orchestration with state and checkpointing), the Agents SDK is primitives — faster to start, less built-in state management.
+
+```python
+from agents import Agent, Runner, function_tool
+
+@function_tool
+def get_weather(city: str) -> str:
+    """Return the current weather for a city."""
+    return f"Weather in {city}: 24C and clear."
+
+agent = Agent(
+    name="Assistant",
+    instructions="You are helpful. Use tools when needed.",
+    tools=[get_weather],
+)
+
+result = Runner.run_sync(agent, "What is the weather in Jaipur?")
+print(result.final_output)
+```
+
+### Hosted Tools and Agents-as-Tools
+
+Hosted tools (`WebSearchTool`, `FileSearchTool`, `CodeInterpreterTool`, `HostedMCPTool`) run on OpenAI's side — no local execution. Agents-as-tools lets a triage agent delegate to specialists:
+
+```python
+from agents import Agent
+
+support_agent = Agent(name="Support", instructions="Answer support questions.")
+
+triage = Agent(
+    name="Triage",
+    instructions="Route the user to the right specialist.",
+    tools=[support_agent.as_tool(tool_name="support", tool_description="Handle support questions.")],
+)
+```
+
+### Voice Pipeline
+
+The SDK also ships a `VoicePipeline` implementing the chained pattern — STT, then your agent workflow, then TTS — in one abstraction:
+
+```python
+import asyncio
+
+import numpy as np
+import sounddevice as sd
+from agents import Agent
+from agents.voice import AudioInput, SingleAgentVoiceWorkflow, VoicePipeline
+
+agent = Agent(
+    name="Assistant",
+    instructions="You are speaking to a human, so be polite and concise.",
+    model="gpt-4o-mini",
+)
+
+async def main():
+    pipeline = VoicePipeline(workflow=SingleAgentVoiceWorkflow(agent))
+
+    # 3 seconds of microphone audio as int16 samples (replace with real mic input)
+    buffer = np.zeros(24000 * 3, dtype=np.int16)
+    result = await pipeline.run(AudioInput(buffer=buffer))
+
+    player = sd.OutputStream(samplerate=24000, channels=1, dtype=np.int16)
+    player.start()
+    async for event in result.stream():
+        if event.type == "voice_stream_event_audio":
+            player.write(event.data)
+
+asyncio.run(main())
+```
+
+Install the voice extra first: `pip install 'openai-agents[voice]' sounddevice`. The workflow slot takes any agent — including one with tools and handoffs — so your existing text agent becomes a voice agent without changing its logic. The full quickstart is linked in the resources below.
+
+## Free Resources
+
+These are the free references this chapter is built on — credit where due:
+
+- **OpenAI Agents SDK — Voice Pipeline Quickstart** (OpenAI docs) — the chained STT → agent → TTS pattern with a full Python example — https://openai.github.io/openai-agents-python/voice/quickstart/
+- **Building AI Voice Agents for Production** (DeepLearning.AI, free short course) — STT/LLM/TTS components, modular vs S2S trade-offs, latency optimization — https://www.deeplearning.ai/short-courses/building-ai-voice-agents-for-production/
+- **Hugging Face Transformers — Image-text-to-text guide** (Hugging Face docs) — sending images to VLMs: chat templates, pipelines, streaming — https://huggingface.co/docs/transformers/main/en/tasks/image_text_to_text
+- **What is the Model Context Protocol?** (official MCP docs) — the canonical intro plus the architecture page — https://modelcontextprotocol.io/docs/getting-started/intro
+- **Hugging Face MCP Course** (free, built with Anthropic) — MCP fundamentals and architecture, hands-on units with the official SDKs — https://huggingface.co/learn/mcp-course/en/unit0/introduction
+- **MCP Python SDK docs** (official) — minimal server example, tools/resources, transports — https://py.sdk.modelcontextprotocol.io/
+- **OpenAI Agents SDK docs** (official) — agents, Runner, concepts index — https://openai.github.io/openai-agents-python/
+- **OpenAI Agents SDK — Tools** (official) — hosted tools, function tools, agents-as-tools — https://openai.github.io/openai-agents-python/tools
+
+## Project A: Chained Voice Assistant
+
+A push-to-talk loop: record 5 seconds, transcribe, ask the LLM, speak the reply — with per-stage latency measurement.
+
+**Step 1 — Install.**
+
+```bash
+pip install openai sounddevice soundfile numpy
+```
+
+<Callout type="note">`sounddevice` needs the PortAudio system library: `apt install libportaudio2` on Debian/Ubuntu, `brew install portaudio` on macOS.</Callout>
+
+**Step 2 — Write the assistant.** Save as `voice_assistant.py`. The `OpenAI()` client works against any OpenAI-compatible endpoint — point `base_url` at your chapter 4 FastAPI gateway (/ai-engineering/llm-apis/) to run this fully local.
+
+```python
+import io
+import time
+
+import sounddevice as sd
+import soundfile as sf
+from openai import OpenAI
+
+client = OpenAI()  # reads OPENAI_API_KEY from the environment
+
+SAMPLE_RATE = 16000
+DURATION_S = 5
+
+def record(seconds=DURATION_S):
+    print("Recording... speak now")
+    audio = sd.rec(int(seconds * SAMPLE_RATE), samplerate=SAMPLE_RATE, channels=1, dtype="int16")
+    sd.wait()
+    buf = io.BytesIO()
+    sf.write(buf, audio, SAMPLE_RATE, format="WAV")
+    buf.seek(0)
+    buf.name = "input.wav"
+    return buf
+
+def transcribe(audio_file):
+    start = time.perf_counter()
+    text = client.audio.transcriptions.create(model="whisper-1", file=audio_file).text
+    return text, time.perf_counter() - start
+
+def think(prompt):
+    start = time.perf_counter()
+    reply = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {"role": "system", "content": "Answer in two sentences or less."},
+            {"role": "user", "content": prompt},
+        ],
+    ).choices[0].message.content
+    return reply, time.perf_counter() - start
+
+def speak(text):
+    start = time.perf_counter()
+    audio = client.audio.speech.create(
+        model="tts-1", voice="alloy", input=text, response_format="wav"
+    )
+    # WAV requested explicitly: the default MP3 output is not reliably
+    # decodable by soundfile, which would break playback below.
+    data, sr = sf.read(io.BytesIO(audio.read()))
+    sd.play(data, sr)
+    sd.wait()
+    return time.perf_counter() - start
+
+if __name__ == "__main__":
+    timings = {}
+    clip = record()
+    question, timings["stt"] = transcribe(clip)
+    print("You said:", question)
+    answer, timings["llm"] = think(question)
+    print("Assistant:", answer)
+    timings["tts"] = speak(answer)
+    print("Latency (s):", {k: round(v, 2) for k, v in timings.items()})
+    print("Total:", round(sum(timings.values()), 2))
+```
+
+**Step 3 — Run it.**
+
+```bash
+export OPENAI_API_KEY="your-key-here"
+python voice_assistant.py
+```
+
+Speak for five seconds when prompted, then listen to the reply. Expected console output: `Recording... speak now`, then `You said: <your words>`, `Assistant: <two-sentence reply>`, and the latency table.
+
+If it fails, match the symptom: an `OSError` mentioning PortAudio means the system library is missing (see the note in step 1); `openai.AuthenticationError` means the API key is missing or wrong — the client reads `OPENAI_API_KEY` from the environment, so export it in the same shell; silence on playback with no error usually means the wrong output device — list devices with `python -c "import sounddevice as sd; print(sd.query_devices())"` and set `sd.default.device` to your speakers.
+
+**Step 4 — Measure and analyze.** Fill in this table with your numbers and note which stage dominates:
+
+| Stage | What it does | Your latency |
+|---|---|---|
+| Recording | fixed 5s capture window | 5.0 s |
+| STT | Whisper transcription |  |
+| LLM | chat completion |  |
+| TTS | speech synthesis |  |
+
+Then answer: where would S2S win? It removes the two text-serialization hops and lets the model start "speaking" sooner — but your STT and TTS model-call costs remain in some form. That the transcript at each stage is plain text is also the chained architecture's superpower: you can score every stage with the text evals from /ai-engineering/production/ instead of building audio evals.
+
+**Expected outcome:** a working push-to-talk voice loop and a completed latency table showing which stage dominates your setup.
+
+**Interview talking points:**
+
+- "I built a chained voice assistant and measured per-stage latency — STT and TTS dominated, which is exactly the problem S2S solves."
+- "Chained let me reuse my text evals and swap any component; I would only move to S2S if the product needed sub-second turns."
+- "Humans tolerate about a one-second conversational gap. Chained at 2–4 seconds needs streaming tricks: stream STT partials, stream LLM tokens straight into TTS."
+
+## Project B: MCP Server and Client
+
+A tiny MCP server exposing a tool, called through the standard MCP client — no custom glue code.
+
+**Step 1 — Install.**
+
+```bash
+pip install "mcp[cli]"
+```
+
+**Step 2 — Write the server.** Save as `weather_server.py`:
+
+```python
+from mcp.server.fastmcp import FastMCP
+
+mcp = FastMCP("demo-weather")
+
+@mcp.tool()
+def get_weather(city: str) -> str:
+    """Return a weather report for the given city."""
+    return f"Weather in {city}: 24C, clear skies."
+
+if __name__ == "__main__":
+    mcp.run()
+```
+
+**Step 3 — Write the client and call the tool.** Save as `weather_client.py`:
+
+```python
+import asyncio
+
+from mcp import ClientSession, StdioServerParameters
+from mcp.client.stdio import stdio_client
+
+async def main():
+    params = StdioServerParameters(command="python", args=["weather_server.py"])
+    async with stdio_client(params) as (read, write):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            tools = await session.list_tools()
+            print("Tools:", [t.name for t in tools.tools])
+            result = await session.call_tool("get_weather", {"city": "Jaipur"})
+            print("Result:", result.content[0].text)
+
+asyncio.run(main())
+```
+
+Run it from the directory containing both files:
+
+```bash
+python weather_client.py
+```
+
+Expected output: `Tools: ['get_weather']` followed by `Result: Weather in Jaipur: 24C, clear skies.` Compare this with the hand-rolled tool loop in /ai-engineering/agents/ — MCP replaces the custom glue with a standard protocol, and `list_tools()` is the discovery step your hand-rolled loop was missing.
+
+**Step 4 — Explain the split.** In this setup your script is the **host**, `ClientSession` is the **client**, and `weather_server.py` is the **server**. Notice `list_tools()` — the client discovers the tool's name, description, and JSON schema at runtime. That standardized discovery is the whole point: no hand-written tool glue, and the same server works with Claude Desktop, VS Code, or any MCP host.
+
+**Step 5 — Bonus: expose a resource and a prompt.** Tools are only one primitive. Add these to `weather_server.py`:
+
+```python
+@mcp.resource("notes://cities")
+def city_notes() -> str:
+    """A readable list of cities this server knows about."""
+    return "Jaipur: hot and dry. Mumbai: humid. Bengaluru: pleasant."
+
+@mcp.prompt()
+def summarize_city(city: str) -> str:
+    """A reusable prompt template for city summaries."""
+    return f"Summarize the key facts about {city} in two bullet points."
+```
+
+Then extend the client to discover them — add this inside the `ClientSession` block in `weather_client.py`:
+
+```python
+resources = await session.list_resources()
+print("Resources:", [str(r.uri) for r in resources.resources])
+prompts = await session.list_prompts()
+print("Prompts:", [p.name for p in prompts.prompts])
+data = await session.read_resource("notes://cities")
+print("Resource text:", data.contents[0].text)
+```
+
+Expected output: the resource URI `notes://cities`, the prompt name `summarize_city`, and the city text. If `list_resources()` returns nothing, the decorators were added after the server started or to the wrong file — they must be registered before `mcp.run()` executes.
+
+**Expected outcome:** a running MCP server, a client that discovers and calls its tool, and a one-paragraph explanation of the host/client/server split you can recite.
+
+**Interview talking points:**
+
+- "MCP standardizes tool discovery — the client lists tools at runtime instead of hardcoding schemas, so one server works across hosts."
+- "stdio for local development, Streamable HTTP for remote servers — I can explain the trade-off."
+- "Tool descriptions are untrusted input to the model, so I only connect servers I trust."

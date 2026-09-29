@@ -17,7 +17,7 @@ interface Props {
 
 const { id, code, spec } = Astro.props;
 const workerUrl = `${u('/runner/worker.js')}?v=${import.meta.env.PROD ? BUILD_ID : 'dev'}`;
-// JSON inside <script>: escape "<" so "</script>" in code cannot end the tag.
+// Escape "<" in the JSON payload so a closing tag inside code samples cannot terminate the script element.
 const payload = JSON.stringify({ code, spec }).replace(/</g, '\\u003c');
 ---
 

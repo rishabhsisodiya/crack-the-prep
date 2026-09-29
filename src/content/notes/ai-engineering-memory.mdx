@@ -1,0 +1,344 @@
+---
+title: "Agent Memory"
+track: "ai-engineering"
+kind: "notes"
+order: 7
+description: "Give agents a memory that lasts: short-term vs long-term vs semantic vs episodic memory, Mem0, vector stores, and graph memory with Neo4j and Kuzu — plus a hands-on memory project."
+updated: 2026-09-29
+slug: "memory"
+---
+
+import Callout from '../../components/Callout.astro';
+
+The agent from /ai-engineering/agents/ is smart but amnesiac: start a new session and it forgets your name, your project, and everything you taught it. This chapter fixes that. You will learn the five memory types interviewers expect you to name, how Mem0 adds a persistent memory layer, and when graph memory beats vector memory — then you will wire memory into the chapter 6 agent and prove it recalls across sessions.
+
+## Why agents forget (and why it matters)
+
+A language model only knows what is in its current context window. Every turn re-sends the conversation history, which means three problems compound over time: the window is finite, so old facts fall out; the window is expensive, so long histories burn tokens and latency; and the model has no notion of "important" — a critical fact from turn 2 is treated the same as small talk from turn 40. Memory is the discipline of persisting the useful bits outside the prompt and retrieving only what the current turn needs.
+
+## The five memory types
+
+Interviewers love asking candidates to enumerate these. Learn the table, not just the names — the examples are what make your answer credible.
+
+| Type | What it stores | Example |
+|---|---|---|
+| Short-term / working | The current conversation, inside the context window | The last 10 messages |
+| Long-term | Facts that persist across sessions | "The user's name is Rishabh" |
+| Semantic | General knowledge about the world or the user | "The user prefers morning deployments" |
+| Episodic | Specific past events with context | "Last Tuesday's deploy failed on a migration" |
+| Procedural | How to do things: skills and playbooks | "The release checklist for this repo" |
+
+Short-term memory is just prompt engineering. Everything else needs infrastructure: a place to write facts, a way to find the relevant ones, and a policy for when facts go stale. That infrastructure is what the rest of this chapter covers.
+
+Two cheap tricks extend short-term memory before you need any of that infrastructure. A sliding window keeps only the last N messages, which bounds cost but still drops old facts. Summarization compresses the dropped tail into a running summary ("so far the user asked about X and decided Y") that stays pinned in context. Both are lossy — the moment a fact must survive a dropped window or a restarted process, you need real long-term memory.
+
+## Mem0: a memory layer for agents
+
+Mem0 is an open-source memory layer purpose-built for agents. Its API is deliberately small: `add()` extracts and stores memories from a conversation, `search()` retrieves the relevant ones, and everything is scoped by `user_id` so one deployment can serve many users without leaking memories between them. Under the hood it uses an LLM to decide what is worth remembering, an embedder to make it searchable, and a vector store to hold it.
+
+```python
+from mem0 import Memory
+
+m = Memory.from_config({
+    "llm": {"provider": "openai", "config": {"model": "gpt-4o-mini"}},
+    "embedder": {"provider": "openai", "config": {"model": "text-embedding-3-small"}},
+    "vector_store": {
+        "provider": "qdrant",
+        "config": {"collection_name": "memories", "path": "/tmp/qdrant"},
+    },
+})
+
+m.add("My name is Rishabh and I am learning LangGraph.", user_id="rishabh")
+
+results = m.search("What is the user's name?", user_id="rishabh")
+print(results["results"][0]["memory"])
+# My name is Rishabh and I am learning LangGraph.
+```
+
+The pattern you will reuse in the project: after each turn, call `add()` with the conversation; before each turn, call `search()` with the user's message and inject the returned memories into the agent's state. The snippet assumes `OPENAI_API_KEY` is set in your environment — Mem0 calls an LLM to decide what is worth extracting and an embedder to make it searchable, so both calls are billed like normal API usage.
+
+<Callout type="tip">
+Scoping every call with <code>user_id</code> is multi-tenancy for free. In an interview, mention it unprompted — it shows you think about production concerns, not just demos.
+</Callout>
+
+## Keeping memory honest: updates, expiry, and user control
+
+A memory that only grows is a liability: people change editors, projects end, preferences flip. Mem0 memories are addressable, so corrections are explicit rather than hopeful. Search for the stale fact, grab its id, and update it:
+
+```python
+found = memory.search("user's editor", user_id=USER_ID)["results"]
+memory_id = found[0]["id"]
+memory.update(memory_id, "The user switched editors from VS Code to Neovim.")
+```
+
+Three policies separate toy memory from production memory. First, updates must beat duplicates: when `add()` extracts a fact that contradicts a stored one, update the old record instead of appending a second one (Mem0 does this automatically, but verify it in your traces). Second, expire ruthlessly: time-bound facts like "the deploy is Friday" need a TTL or they become landmines. Third, make memory inspectable: expose what the agent remembers about the user in your UI, with a delete button. Users forgive a wrong memory they can see and fix; they do not forgive one they cannot.
+
+## Vector databases as memory
+
+Semantic recall is the workhorse of agent memory: embed the incoming message, run a nearest-neighbor search over stored memories, and inject the top matches into context. This handles "find the conversation where we discussed refunds" beautifully. Qdrant (used above, runs locally from a directory) and pgvector (vectors inside Postgres, alongside your relational data) are the two most common choices. Embeddings and vector search are covered in depth in /ai-engineering/rag/ — the mechanics are identical, only the payload changes from document chunks to memories. The failure mode to know: vector search is similarity, not truth — it returns what looks related, which is why the next section exists.
+
+Under the hood, "memory" here is just a collection of vectors with text payloads. This is what Mem0 manages for you, shown raw with `qdrant-client`:
+
+```python
+from qdrant_client import QdrantClient
+from qdrant_client.models import Distance, VectorParams, PointStruct
+
+client = QdrantClient(path="/tmp/qdrant_manual")  # local mode, no server
+client.create_collection(
+    "facts",
+    vectors_config=VectorParams(size=4, distance=Distance.COSINE),
+)
+
+client.upsert("facts", points=[
+    PointStruct(id=1, vector=[0.9, 0.1, 0.0, 0.2],
+                payload={"text": "Rishabh prefers morning deploys"}),
+    PointStruct(id=2, vector=[0.1, 0.9, 0.2, 0.0],
+                payload={"text": "The site is built with Astro"}),
+])
+
+hits = client.query_points(
+    "facts", query=[0.85, 0.12, 0.05, 0.18], limit=1
+).points
+print(hits[0].payload["text"])
+# Rishabh prefers morning deploys
+```
+
+Real embeddings have hundreds or thousands of dimensions instead of four, but the operations — upsert a vector with a payload, query by a new vector, take the nearest — are exactly the same.
+
+## Graph memory: when relationships matter
+
+Vectors struggle with multi-hop questions like "which projects does Rishabh's teammate work on?" A knowledge graph stores entities and their relationships explicitly, so that query is a traversal, not a similarity guess. Graph memory also wins on explainability: you can show the exact path of relationships behind an answer. Neo4j is the established graph database (with a managed cloud option); Kuzu is an embedded, in-process graph database that is ideal for side projects because there is no server to run.
+
+|  | Vector memory | Graph memory |
+|---|---|---|
+| Question shape | "find things similar to X" | "how are X and Y connected" |
+| Multi-hop | No — similarity is single-step | Yes — traverse relationships |
+| Explainability | Scores, hard to narrate | The path itself is the explanation |
+| Writes | Upsert a vector | CREATE/MERGE nodes and relationships |
+| Best for | Fuzzy recall over text | Entities, org charts, dependencies |
+
+Most serious systems use both: vectors for "what did we discuss about refunds", graphs for "who owns the billing service".
+
+## Cypher in five minutes
+
+Cypher is Neo4j's query language. You need three verbs: `MATCH` reads, `CREATE` writes, and `MERGE` means get-or-create. That is enough to model and query a small memory graph.
+
+```cypher
+CREATE (u:User {name: 'Rishabh'})
+CREATE (p:Project {name: 'CrackThePrep'})
+CREATE (u)-[:WORKS_ON]->(p)
+MERGE (t:Topic {name: 'LangGraph'})
+CREATE (u)-[:LEARNING]->(t)
+CREATE (pref:Preference {key: 'editor', value: 'VS Code'})
+CREATE (u)-[:PREFERS]->(pref)
+```
+
+```cypher
+MATCH (u:User {name: 'Rishabh'})-[:PREFERS]->(pref:Preference)
+RETURN pref.key, pref.value
+```
+
+Read the second query out loud: "match the user named Rishabh, follow the PREFERS relationship, return the preference." If you can narrate a Cypher query like that in an interview, the syntax details matter less.
+
+The power move is the multi-hop query — the one vectors cannot answer. "Which topics is Rishabh learning that his teammate is also learning?"
+
+```cypher
+MATCH (u:User {name: 'Rishabh'})-[:LEARNING]->(t:Topic)<-[:LEARNING]-(mate:User)
+WHERE mate <> u
+RETURN mate.name AS teammate, t.name AS shared_topic
+```
+
+Two hops, exact answer, and the returned path explains itself. That is the whole case for graph memory in one query.
+
+## Interview angle
+
+Expect: "how would you give an agent long-term memory?" Answer in three steps: extract facts after each turn with something like Mem0, retrieve the top-k relevant memories before each turn and inject them into agent state, and scope everything by user so tenants never mix. Add the senior details: expire or version stale facts, and keep a human-readable log of what was remembered so users can correct it.
+
+Also expect: "when does graph memory beat vector memory?" Answer: when the question is about entities and relationships rather than similarity — org charts, project dependencies, "who knows what." Graphs give you exact traversals and explainable paths; vectors give you fuzzy similarity. Most serious systems use both.
+
+## Free resources
+
+These free resources back the concepts in this chapter — credit to their authors:
+
+- Mem0 docs, "Python SDK Quickstart" — install, add/search/update memories scoped by user_id, wiring into LangChain/LangGraph: https://docs.mem0.ai/open-source/python-quickstart
+- Mem0 docs, "How Mem0 Organizes Memory" — short-term vs long-term, factual, episodic, and semantic memory: https://github.com/whtelight/mem0/blob/HEAD/docs/core-concepts/memory-types.mdx
+- Neo4j GraphAcademy, "Cypher Fundamentals" — free hands-on course with a live sandbox: https://graphacademy.neo4j.com/courses/cypher-fundamentals/?ref=vscode-learn
+- Neo4j GraphAcademy, "Context Graphs: Agent Memory" — free course on persistent agent memory with Neo4j: http://graphacademy.neo4j.com/courses/genai-context-graphs
+- Kuzu docs, "Create Your First Graph" — embedded graph database quickstart with Cypher from Python: https://kuzudb.github.io/docs/get-started/
+
+## Project: give your agent a memory
+
+You will extend the research agent from /ai-engineering/agents/ so it remembers you across sessions, then build a parallel graph-memory track in Neo4j. By the end you will have a demo that proves recall: tell the agent something in session one, open a fresh session, and watch it remember.
+
+1. **Install the memory stack.** Mem0 plus a local Qdrant vector store keeps everything runnable on your machine.
+
+```bash
+python -m venv .venv && source .venv/bin/activate
+pip install mem0ai qdrant-client langgraph langchain-openai
+export OPENAI_API_KEY="sk-your-key-here"
+```
+
+If `pip install mem0ai` fails, check you are on Python 3.9 or newer (`python --version`) — Mem0 will not install on older interpreters. If `import mem0` later fails with a missing-module error, you probably installed into the system Python instead of the venv: re-run with the venv activated and confirm with `which python`. Never commit a real key: use a throwaway project key, and add `.env` to `.gitignore` if you move the export into a file.
+
+2. **Write the memory helper.** Two functions: one stores the turn, one recalls what is relevant. Both are scoped to a user id.
+
+```python
+from mem0 import Memory
+
+memory = Memory.from_config({
+    "llm": {"provider": "openai", "config": {"model": "gpt-4o-mini"}},
+    "embedder": {"provider": "openai", "config": {"model": "text-embedding-3-small"}},
+    "vector_store": {
+        "provider": "qdrant",
+        "config": {"collection_name": "agent_memories", "path": "/tmp/qdrant"},
+    },
+})
+
+USER_ID = "rishabh"
+
+def remember_turn(user_msg: str, agent_msg: str):
+    memory.add(
+        [{"role": "user", "content": user_msg},
+         {"role": "assistant", "content": agent_msg}],
+        user_id=USER_ID,
+    )
+
+def recall(query: str, limit: int = 5) -> str:
+    results = memory.search(query, user_id=USER_ID, limit=limit)
+    return "\n".join(r["memory"] for r in results["results"])
+```
+
+Verify the round trip before wiring anything. Save the helper as `memory_layer.py`, then run:
+
+```bash
+python -c "
+from memory_layer import remember_turn, recall
+remember_turn('My name is Rishabh.', 'Nice to meet you, Rishabh.')
+print(recall('What is the user name?'))
+"
+```
+
+Expected output: a line containing your name. If `recall` returns an empty string, the `add()` call has not finished indexing — wait a few seconds and retry; the extraction LLM call is the slow part. If you get an authentication error, `OPENAI_API_KEY` is missing or invalid in this shell.
+
+3. **Wire memory into the chapter 6 agent.** You will reuse the chapter 6 project from /ai-engineering/agents/ — its `web_search`, `llm`, `plan`, `search`, and `route` — and add two things: a `recall` node that runs first and injects memories into state, and a memory-aware `synthesize` that persists the turn after writing the report. Save your chapter 6 project as `agent_ch6.py` in the same directory (or adjust the import below to match your filename), then save this as `agent_with_memory.py` alongside it.
+
+```python
+from typing import TypedDict, Annotated, List
+import operator
+
+from langgraph.graph import StateGraph, END
+from langgraph_checkpoint_mongodb import MongoDBSaver
+
+from memory_layer import remember_turn, recall
+from agent_ch6 import web_search, llm, plan, search, route  # your chapter 6 code
+
+class AgentState(TypedDict):  # chapter 6 state, extended with memory fields
+    topic: str
+    user_message: str
+    recalled: str
+    messages: Annotated[List[str], operator.add]
+    sources: Annotated[List[str], operator.add]
+
+def recall_node(state: AgentState):
+    mems = recall(state["user_message"])
+    note = f"Relevant memories about the user:\n{mems}" if mems else "No relevant memories."
+    return {"recalled": note, "messages": [note]}
+
+def synthesize_with_memory(state: AgentState):
+    prompt = (
+        f"{state['recalled']}\n\n"
+        f"Write a concise research brief on '{state['topic']}' "
+        f"using only these sources: {', '.join(state['sources'])}"
+    )
+    report = llm.invoke(prompt).content
+    remember_turn(state["user_message"], report)
+    return {"messages": [report]}
+
+checkpointer = MongoDBSaver.from_conn_string("mongodb://localhost:27017")
+
+g = StateGraph(AgentState)
+g.add_node("recall", recall_node)
+g.add_node("plan", plan)
+g.add_node("search", search)
+g.add_node("synthesize", synthesize_with_memory)
+g.set_entry_point("recall")
+g.add_edge("recall", "plan")
+g.add_edge("plan", "search")
+g.add_conditional_edges("search", route, {"search": "search", "synthesize": "synthesize"})
+g.add_edge("synthesize", END)
+app = g.compile(checkpointer=checkpointer)
+```
+
+Two deliberate choices. The `recall` node is the new entry point, so every run starts by loading memory — planning and search then work with the enriched state for free. And the compile drops chapter 6's `interrupt_before` approval gate: this demo needs to run end to end so you can watch memory work; add the gate back once it does. Sessions stay isolated by `thread_id` while memories are shared per `user_id`.
+
+If the `agent_ch6` import fails, your chapter 6 code is not saved as a module yet — paste the `web_search`, `llm`, `plan`, `search`, and `route` definitions from that chapter above the graph assembly instead. If compile raises a connection error, MongoDB is not running — start it with `docker run -d -p 27017:27017 mongo:7` first.
+
+4. **Demo: two sessions, one memory.** In session one, teach the agent. In session two — a brand-new `thread_id` — ask it what it knows. Save as `memory_demo.py` and run it with `python memory_demo.py`.
+
+```python
+from agent_with_memory import app
+
+def run(thread_id, topic, user_message):
+    print(f"\n=== {thread_id}: {user_message} ===")
+    for chunk in app.stream(
+        {"topic": topic, "user_message": user_message},
+        {"configurable": {"thread_id": thread_id}},
+    ):
+        for node, update in chunk.items():
+            for msg in update.get("messages", []):
+                print(f"[{node}] {str(msg)[:200]}")
+
+# Session 1: teach the agent
+run("s1", "LangGraph checkpointing",
+    "My name is Rishabh. I am preparing for AI engineer interviews.")
+
+# Session 2: fresh thread, same user — the agent should recall without being told
+run("s2", "LangGraph checkpointing",
+    "What is my name and what am I preparing for?")
+```
+
+Expected output: in session `s2`, the `[recall]` line prints your name and interview goal even though thread `s2` never saw them, and the final report addresses you by name. If session 2 shows "No relevant memories", the `add()` from session 1 had nothing to extract — check that session 1's `user_message` contained a clear fact, and confirm the verification in step 2 passes. The web search in each session may take a while; the recall line appears first, which is the part that matters.
+
+5. **Bonus: the graph track.** Start Neo4j in Docker, then model the same facts as a graph and query them back. Open the Neo4j browser at http://localhost:7474 (login `neo4j` / `password`) and run each statement.
+
+```bash
+docker run -d --name neo4j -p 7474:7474 -p 7687:7687 \
+  -e NEO4J_AUTH=neo4j/password neo4j:5
+```
+
+```cypher
+CREATE (u:User {name: 'Rishabh'})
+CREATE (p:Project {name: 'CrackThePrep', stack: 'Astro'})
+CREATE (u)-[:WORKS_ON]->(p)
+MERGE (t1:Topic {name: 'LangGraph'})
+MERGE (t2:Topic {name: 'RAG'})
+CREATE (u)-[:LEARNING]->(t1)
+CREATE (u)-[:LEARNING]->(t2)
+CREATE (pref1:Preference {key: 'editor', value: 'VS Code'})
+CREATE (pref2:Preference {key: 'goal', value: 'AI engineer interviews'})
+CREATE (u)-[:PREFERS]->(pref1)
+CREATE (u)-[:PREFERS]->(pref2)
+MERGE (mate:User {name: 'Priya'})
+MERGE (t3:Topic {name: 'MCP'})
+CREATE (u)-[:LEARNING]->(t3)
+CREATE (mate)-[:LEARNING]->(t3)
+```
+
+Now the queries — first the single-hop preference lookup, then the multi-hop query that justifies graph memory:
+
+```cypher
+MATCH (u:User {name: 'Rishabh'})-[:PREFERS]->(pref:Preference)
+RETURN pref.key AS preference, pref.value AS value
+```
+
+```cypher
+MATCH (u:User {name: 'Rishabh'})-[:LEARNING]->(t:Topic)<-[:LEARNING]-(mate:User)
+WHERE mate <> u
+RETURN mate.name AS teammate, t.name AS shared_topic
+```
+
+Expected output: the second query returns one row — `Priya`, `MCP`. If the browser cannot connect, Docker may not have finished starting (wait 30 seconds and retry) or port 7687 is taken by another Neo4j container (`docker rm -f neo4j` and re-run). If a `CREATE` complains the node already exists, you re-ran the block — run `MATCH (n) DETACH DELETE n` to wipe and start over.
+
+**Expected outcome.** After session one, Mem0 holds facts like your name and your interview goal. Session two opens with an empty conversation but the recall node injects those facts, so the agent answers personally without being told again. The Neo4j bonus gives you a queryable graph where "what does the user prefer?" is an exact traversal — and the multi-hop query proves the case vectors cannot make: shared learning topics between two users in one traversal.
+
+**Interview talking points.** Say: "I extended a LangGraph agent with a Mem0 memory layer: after each turn I persist the conversation scoped by user_id, and before each turn I retrieve the top relevant memories and inject them into agent state. Sessions stay isolated by thread_id while memories are shared per user. I also built a graph-memory track in Neo4j, because for entity-relationship questions like 'who works on what' a Cypher traversal beats vector similarity and the answer path is explainable." Name the five memory types when asked, and be ready to discuss stale-fact expiry as the follow-up senior question.

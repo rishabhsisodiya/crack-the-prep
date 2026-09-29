@@ -1,0 +1,417 @@
+---
+title: "LLM APIs and Local Models"
+track: "ai-engineering"
+kind: "notes"
+order: 4
+description: "Call LLM APIs from Python (OpenAI, Gemini), understand OpenAI-compatible endpoints, and run models locally with Ollama — then wrap a local model in a FastAPI service."
+updated: 2026-09-29
+slug: "llm-apis"
+---
+
+import Callout from '../../components/Callout.astro';
+
+Every AI feature is an API call plus plumbing. This chapter covers calling hosted LLM APIs from Python, what "OpenAI-compatible" endpoints buy you, and running models locally with Ollama — the two skills behind every demo, prototype, and take-home in AI engineering interviews.
+
+## Why this chapter matters for interviews
+
+Interviewers rarely ask you to recite API docs. They ask you to build: "add a chat endpoint to this service," "make it work with a local model so we don't pay per token," "swap providers without rewriting the app." The concepts below — chat completions, streaming, and provider abstraction through OpenAI-compatible APIs — are the vocabulary those tasks are phrased in.
+
+## OpenAI API basics
+
+The OpenAI chat completions API is the reference design the whole ecosystem copied. You send a list of messages with roles (`system`, `user`, `assistant`) and get back the assistant's reply. Set your key once as an environment variable and never hardcode it.
+
+```python
+import os
+from openai import OpenAI
+
+client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+
+response = client.chat.completions.create(
+    model="gpt-4o-mini",
+    messages=[
+        {"role": "system", "content": "You are a concise assistant."},
+        {"role": "user", "content": "Explain REST in one sentence."},
+    ],
+    temperature=0.2,
+)
+print(response.choices[0].message.content)
+```
+
+For chat UIs you stream tokens as they arrive instead of waiting for the full reply. Streaming is what makes an app feel instant, and interviewers love asking how you would implement it.
+
+```python
+import os
+from openai import OpenAI
+
+client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+
+stream = client.chat.completions.create(
+    model="gpt-4o-mini",
+    messages=[{"role": "user", "content": "Count to five slowly."}],
+    stream=True,
+)
+for chunk in stream:
+    token = chunk.choices[0].delta.content
+    if token:
+        print(token, end="", flush=True)
+```
+
+## Gemini through the OpenAI-compatible endpoint
+
+Google exposes Gemini behind an OpenAI-compatible endpoint, so the same `openai` Python client works — you only change the `base_url` and the key. This is the pattern from Google's own docs and it is worth memorizing.
+
+```python
+import os
+from openai import OpenAI
+
+client = OpenAI(
+    api_key=os.environ["GEMINI_API_KEY"],
+    base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+)
+
+response = client.chat.completions.create(
+    model="gemini-2.0-flash",
+    messages=[{"role": "user", "content": "Explain REST in one sentence."}],
+)
+print(response.choices[0].message.content)
+```
+
+Gemini has a generous free tier, which makes it the cheapest way to experiment with a strong hosted model while learning.
+
+## What "OpenAI-compatible" really means
+
+"OpenAI-compatible" means a server implements the same HTTP contract as the OpenAI API: `POST /v1/chat/completions` with `model`, `messages`, and `stream`, returning the same JSON shape. Any client written against OpenAI — the Python SDK, LangChain, OpenWebUI — works against it unchanged. That is the whole trick: the provider becomes a configuration value, not a code change.
+
+| Provider | Base URL | Auth | Notes |
+| --- | --- | --- | --- |
+| OpenAI | https://api.openai.com/v1 | API key, paid | Reference implementation |
+| Gemini | https://generativelanguage.googleapis.com/v1beta/openai/ | API key, free tier | Same client, different base_url |
+| Ollama | http://localhost:11434/v1 | none | Local models, free, OpenAI-compatible |
+| vLLM | http://localhost:8000/v1 | optional | GPU serving for production |
+
+The vLLM row points at the production story — continuous batching, prefix caching, and serving at scale are covered in the [production chapter](/ai-engineering/production/). For local development, Ollama is the simpler default.
+
+## Running models locally with Ollama
+
+Ollama runs open models on your own machine behind a local REST API. Pull a model once, then chat with it from the terminal or from code. For learning, small instruct models like `qwen2.5:7b` or `llama3.1:8b` are the sweet spot — they run on a laptop and are good enough for RAG and agent experiments.
+
+```bash
+# install from https://ollama.com, then:
+ollama pull qwen2.5:7b
+ollama run qwen2.5:7b "Explain recursion in one sentence."
+ollama list
+```
+
+Ollama's native API lives at `POST /api/chat`. It accepts messages in the same role and content shape, and streams newline-delimited JSON when you ask it to.
+
+```bash
+curl -s http://localhost:11434/api/chat -d '{
+  "model": "qwen2.5:7b",
+  "stream": false,
+  "messages": [{"role": "user", "content": "Explain recursion in one sentence."}]
+}' | python3 -c "import sys, json; print(json.load(sys.stdin)['message']['content'])"
+```
+
+You can customize a model with a Modelfile — a short recipe that sets the base model and a system prompt.
+
+```text
+FROM qwen2.5:7b
+SYSTEM "You are a concise senior engineer. Answer in at most three sentences."
+```
+
+```bash
+ollama create concise-coder -f Modelfile
+ollama run concise-coder "What is a vector database?"
+```
+
+## OpenWebUI: a local ChatGPT
+
+OpenWebUI is an open-source chat interface that talks to Ollama. One Docker command gives you a ChatGPT-like UI over your local models — useful for quick prompt experiments without writing code.
+
+```bash
+docker run -d -p 3000:8080 \
+  -e OLLAMA_BASE_URL=http://host.docker.internal:11434 \
+  -v open-webui:/app/backend/data \
+  --name open-webui ghcr.io/open-webui/open-webui:main
+```
+
+Open http://localhost:3000, create a local account, and pick a pulled model from the dropdown. OpenWebUI also speaks to any OpenAI-compatible endpoint, which you will use in the project below.
+
+## Hugging Face Hub
+
+The Hugging Face Hub is where open models live. For chat and instruction-following work, look for "instruct" variants (for example `google/gemma-2-9b-it`) — base models without instruction tuning ramble instead of answering. The `huggingface-cli` downloads models and shows what you have cached.
+
+```bash
+pip install -U "huggingface_hub[cli]"
+hf auth login
+hf download google/gemma-2-9b-it
+hf cache scan
+```
+
+Most interview-relevant work uses models through Ollama or an API rather than raw Hub downloads, but knowing how to find and fetch an instruct model is table stakes.
+
+## Timeouts, retries, and rate limits
+
+Three settings separate a demo from something you can ship. Set a timeout so a hung provider fails fast instead of hanging your request thread. Let the SDK retry transient failures (429 rate limits, 5xx) with backoff — the `openai` client does this by default. And treat 429s as a signal to slow down: batch work, add a semaphore, and respect `retry-after` headers rather than hammering through.
+
+```python
+import os
+from openai import OpenAI
+
+client = OpenAI(
+    api_key=os.environ["OPENAI_API_KEY"],
+    timeout=30.0,      # fail fast instead of hanging forever
+    max_retries=3,     # SDK retries 429/5xx with exponential backoff
+)
+
+response = client.chat.completions.create(
+    model="gpt-4o-mini",
+    messages=[{"role": "user", "content": "Explain REST in one sentence."}],
+)
+print(response.choices[0].message.content)
+```
+
+For streaming calls, wrap the whole stream in an overall deadline as well — a stream that stalls mid-token should not hold a worker forever. Interview angle: "your LLM calls are timing out in production, what do you check" — timeouts, retry budgets, rate-limit headers, then whether the call should be async or queued.
+
+## Cost: free tiers vs local
+
+<Callout type="tip">
+Learning budget, cheapest first: local models with Ollama cost nothing after download — do all your RAG and agent experiments there. Gemini's free tier covers hosted-model experiments. Only reach for paid OpenAI calls when you need frontier quality or are validating something for production.
+</Callout>
+
+The practical rule is simple: prototype locally, evaluate honestly, and only pay for tokens when the quality difference justifies it. Being able to say this in an interview signals you have shipped things with real bills attached.
+
+## Free resources
+
+These are the sources this chapter is built on — credit where it is due, and all free:
+
+- OpenAI developer quickstart — API keys and your first API call: https://developers.openai.com/api/docs/quickstart
+- Google Gemini docs, OpenAI compatibility — the base_url pattern: https://ai.google.dev/gemini-api/docs/openai
+- Ollama docs — models, CLI, and the REST API reference: https://docs.ollama.com
+- OpenWebUI quickstart — Docker setup and connecting to Ollama: https://docs.openwebui.com/getting-started/quick-start/
+- Hugging Face docs hub — Hub guides, CLI tools, Transformers reference: https://huggingface.co/docs
+- Hugging Face LLM course — free course covering models, tokenizers, and fine-tuning: https://huggingface.co/learn/llm-course
+
+## Project: FastAPI service wrapping a local LLM
+
+You will build a small gateway service: a FastAPI app that exposes a simple `/chat` endpoint and an OpenAI-compatible `/v1/chat/completions` endpoint, both backed by a local Ollama model, with token streaming and API-key auth. This service becomes the generator in the RAG pipeline you build in the [RAG chapter](/ai-engineering/rag/).
+
+### Step 1: Install Ollama and pull a model
+
+Install Ollama from the docs for your OS, then pull a small instruct model. The 7–8B models below run comfortably on a modern laptop.
+
+```bash
+ollama pull qwen2.5:7b
+ollama run qwen2.5:7b "Reply with the word OK."
+```
+
+Expect the model to print OK and drop you into an interactive prompt — type `/bye` to exit. If `ollama run` hangs, the daemon is not running: on macOS/Windows start the Ollama app, on Linux run `ollama serve` in another terminal, then retry.
+
+### Step 2: Create a virtual environment and install dependencies
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install fastapi "uvicorn[standard]" httpx pydantic
+```
+
+### Step 3: Build the service
+
+Save this as `app.py`. It defines Pydantic request and response models, a plain `/chat` endpoint that streams server-sent events, a `/models` passthrough to Ollama, and a `/v1/chat/completions` endpoint that mimics the OpenAI contract so any OpenAI client can use it.
+
+```python
+import json
+import os
+import time
+from typing import AsyncIterator, Optional
+
+import httpx
+from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, Field
+
+OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
+API_KEY = os.getenv("API_KEY", "dev-key-change-me")
+
+app = FastAPI(title="Local LLM Gateway")
+
+
+class ChatMessage(BaseModel):
+    role: str
+    content: str
+
+
+class ChatRequest(BaseModel):
+    messages: list[ChatMessage]
+    model: str = Field(default="qwen2.5:7b")
+
+
+def require_key(
+    x_api_key: Optional[str] = Header(default=None),
+    authorization: Optional[str] = Header(default=None),
+) -> str:
+    token = x_api_key
+    if token is None and authorization and authorization.startswith("Bearer "):
+        token = authorization[len("Bearer "):]
+    if token != API_KEY:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+    return token
+
+
+async def ollama_stream(model: str, messages: list[dict]) -> AsyncIterator[str]:
+    payload = {"model": model, "messages": messages, "stream": True}
+    async with httpx.AsyncClient(timeout=120.0) as client:
+        async with client.stream("POST", f"{OLLAMA_URL}/api/chat", json=payload) as resp:
+            resp.raise_for_status()
+            async for line in resp.aiter_lines():
+                if line.strip():
+                    yield line
+
+
+@app.get("/models")
+async def list_models(_: str = Depends(require_key)):
+    async with httpx.AsyncClient() as client:
+        r = await client.get(f"{OLLAMA_URL}/api/tags")
+        r.raise_for_status()
+        return r.json()
+
+
+@app.post("/chat")
+async def chat(req: ChatRequest, _: str = Depends(require_key)):
+    async def event_gen():
+        async for line in ollama_stream(req.model, [m.model_dump() for m in req.messages]):
+            chunk = json.loads(line)
+            token = chunk.get("message", {}).get("content", "")
+            if token:
+                yield f"data: {json.dumps({'token': token})}\n\n"
+            if chunk.get("done"):
+                yield "data: [DONE]\n\n"
+
+    return StreamingResponse(event_gen(), media_type="text/event-stream")
+
+
+class OAIChatRequest(BaseModel):
+    model: str = "qwen2.5:7b"
+    messages: list[ChatMessage]
+    stream: bool = False
+    temperature: float = 0.7
+
+
+@app.post("/v1/chat/completions")
+async def oai_chat_completions(req: OAIChatRequest, _: str = Depends(require_key)):
+    if not req.stream:
+        payload = {
+            "model": req.model,
+            "messages": [m.model_dump() for m in req.messages],
+            "stream": False,
+            "options": {"temperature": req.temperature},
+        }
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            r = await client.post(f"{OLLAMA_URL}/api/chat", json=payload)
+            r.raise_for_status()
+            reply = r.json()["message"]["content"]
+        return {
+            "id": "chatcmpl-local-1",
+            "object": "chat.completion",
+            "created": int(time.time()),
+            "model": req.model,
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {"role": "assistant", "content": reply},
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+        }
+
+    async def event_gen():
+        async for line in ollama_stream(req.model, [m.model_dump() for m in req.messages]):
+            chunk = json.loads(line)
+            token = chunk.get("message", {}).get("content", "")
+            payload = {
+                "id": "chatcmpl-local-1",
+                "object": "chat.completion.chunk",
+                "created": int(time.time()),
+                "model": req.model,
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {"content": token},
+                        "finish_reason": "stop" if chunk.get("done") else None,
+                    }
+                ],
+            }
+            yield f"data: {json.dumps(payload)}\n\n"
+            if chunk.get("done"):
+                yield "data: [DONE]\n\n"
+
+    return StreamingResponse(event_gen(), media_type="text/event-stream")
+```
+
+Run it with `uvicorn app:app --reload --port 8000`.
+
+### Step 4: Test the passthrough and streaming endpoints
+
+```bash
+# list models (proves the Ollama passthrough works)
+curl -s http://localhost:8000/models -H "X-API-Key: dev-key-change-me" | head -c 300
+echo
+
+# streaming chat: watch tokens arrive as SSE
+curl -N -s -X POST http://localhost:8000/chat \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: dev-key-change-me" \
+  -d '{"messages": [{"role": "user", "content": "Explain recursion in one sentence."}]}'
+```
+
+You should see lines like `data: {"token": "Recursion"}` arriving one at a time, ending with `data: [DONE]`. If curl prints nothing and exits immediately, check that Ollama is running (`ollama list` should show `qwen2.5:7b`) and that the model name in `app.py` matches a pulled model exactly.
+
+### Step 5: Prove OpenAI compatibility with the official client
+
+This is the payoff of the abstraction: the official `openai` Python package talks to your local service with zero code changes beyond `base_url`. Install it in the same venv (`pip install openai`), then run:
+
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url="http://localhost:8000/v1", api_key="dev-key-change-me")
+
+response = client.chat.completions.create(
+    model="qwen2.5:7b",
+    messages=[{"role": "user", "content": "Say hello in one sentence."}],
+)
+print(response.choices[0].message.content)
+
+for chunk in client.chat.completions.create(
+    model="qwen2.5:7b",
+    messages=[{"role": "user", "content": "Count to three."}],
+    stream=True,
+):
+    print(chunk.choices[0].delta.content or "", end="", flush=True)
+```
+
+Alternatively, point OpenWebUI at it: add an OpenAI-compatible connection with base URL `http://host.docker.internal:8000/v1` and the same API key, then chat with your local model through the UI.
+
+### Step 6: Verify the API-key auth
+
+Auth is already in `app.py` via the `require_key` dependency, which accepts either an `X-API-Key` header or a Bearer token (so the OpenAI client works). Restart with a real key and confirm unauthenticated calls fail:
+
+```bash
+API_KEY="super-secret-1" uvicorn app:app --port 8000
+curl -s -o /dev/null -w "%{http_code}\n" http://localhost:8000/models
+# expect 401
+curl -s http://localhost:8000/models -H "X-API-Key: super-secret-1" | head -c 200
+# expect 200 with the model list
+```
+
+### Expected outcome
+
+A running FastAPI service on port 8000 with a streaming `/chat` endpoint (SSE), a `/models` passthrough to Ollama, and an OpenAI-compatible `/v1/chat/completions` endpoint — all backed by a local model and guarded by API-key auth. You will have verified it three ways: curl against the raw endpoints, the official `openai` client against `/v1`, and OpenWebUI pointed at the service.
+
+### Interview talking points
+
+Say: "I built an LLM gateway in FastAPI that wraps a local Ollama model. It exposes a streaming `/chat` endpoint over SSE and an OpenAI-compatible `/v1/chat/completions`, so any OpenAI client works against it unchanged — the provider is a configuration value, not a code change. Streaming matters because time-to-first-token is what users feel. Auth accepts an API-key header or bearer token. I prototype on local models for zero marginal cost and no data leaving the machine, and only pay for hosted APIs when frontier quality justifies it."
+
+<Callout type="important">
+Never commit API keys. The `dev-key-change-me` default is for local learning only — in anything shared, read the key from the environment and fail fast if it is missing.
+</Callout>

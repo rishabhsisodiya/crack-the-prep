@@ -1,0 +1,315 @@
+---
+title: "Prompt Engineering"
+track: "ai-engineering"
+kind: "notes"
+order: 3
+description: "Zero/one/few-shot, chain-of-thought, structured output, prompt formats and a debugging loop — plus a hands-on eval harness project."
+updated: 2026-09-29
+slug: "prompting"
+---
+
+import Callout from '../../components/Callout.astro';
+
+Prompt engineering is the cheapest performance lever in AI engineering: no training, no infra, just better instructions. Interviews test it two ways — can you name the techniques, and can you debug a prompt that fails. This chapter covers the core patterns, the formats models actually expect, and a repeatable loop for fixing bad prompts. The project at the end measures the techniques against each other instead of trusting vibes.
+
+## Zero, one, and few-shot prompting
+
+These describe how many examples you put in the prompt. Zero-shot gives only the instruction ("Classify this review as positive or negative."). One-shot adds a single example. Few-shot adds several input/output pairs before the real query. Few-shot works because the model infers the task format, the label set, and edge-case handling from the examples — it is the closest thing to "training" without training.
+
+The difference in practice:
+
+```text
+# zero-shot: instruction only
+Translate to French: "Good morning."
+
+# one-shot: instruction plus a single example
+Translate to French: "Good morning."
+French: "Bonjour."
+Translate to French: "See you tomorrow."
+French:
+```
+
+One well-chosen example often beats three mediocre ones — it anchors the exact output shape you want.
+
+```text
+Classify the sentiment as positive or negative.
+
+Review: "The delivery was fast and the food was hot."
+Sentiment: positive
+
+Review: "Cold food, rude driver, never again."
+Sentiment: negative
+
+Review: "It arrived on time but the packaging was torn."
+Sentiment:
+```
+
+Choose examples deliberately: cover each label, include one tricky edge case, and keep them short — every example burns context and money. If few-shot stops helping after 3–5 examples, the problem is usually the instruction, not the example count.
+
+## Separate instructions from data with delimiters
+
+When the input is long or untrusted, wrap it in delimiters — triple backticks, `###`, or XML-style tags — so the model can tell instruction apart from data.
+
+```text
+Summarize the support ticket below in one sentence.
+
+Ticket:
+"""
+Subject: Refund request #4821
+Body: Customer was charged twice for order 9918. Wants one charge reversed.
+"""
+```
+
+Delimiters also blunt prompt injection: text inside the ticket is visibly data, so "ignore previous instructions" buried in a ticket is less likely to be obeyed. Interview angle: "how do you stop user input from hijacking your system prompt" — the expected answer is delimiters plus a system message stating that quoted content is data, never instructions.
+
+## Chain-of-thought and self-consistency
+
+Chain-of-thought (CoT) asks the model to reason step by step before answering ("Think step by step."). It helps on multi-step problems — math, logic, planning — because the model gets to use generated tokens as scratch space; each reasoning step becomes context for the next. The cost is more output tokens and more latency, so reserve it for problems where zero-shot actually fails.
+
+Self-consistency builds on CoT: sample several reasoning paths at higher temperature, then take the majority answer. It trades compute for reliability and is a standard trick in eval harnesses and agent loops. A related pattern is least-to-most: explicitly decompose the problem ("First list the sub-problems, then solve each") when one CoT pass is not enough.
+
+A minimal self-consistency implementation:
+
+```python
+from collections import Counter
+
+def self_consistent_answer(client, model, question, samples=5):
+    answers = []
+    for _ in range(samples):
+        resp = client.chat.completions.create(
+            model=model,
+            temperature=0.8,
+            messages=[{
+                "role": "user",
+                "content": question + "\nThink step by step, then write the final answer on its own line starting with 'FINAL:'",
+            }],
+        )
+        text = resp.choices[0].message.content or ""
+        final = text.strip().splitlines()[-1].replace("FINAL:", "").strip()
+        answers.append(final)
+    winner, votes = Counter(answers).most_common(1)[0]
+    return winner, f"{votes}/{samples}"
+```
+
+<Callout type="tip">
+For deterministic tasks (classification, extraction), CoT usually hurts: it adds tokens and new ways to go wrong. Use it for reasoning tasks, then extract the final answer with a strict format like "FINAL: &lt;answer&gt;" so scoring stays mechanical.
+</Callout>
+
+## Persona and role prompting
+
+Assigning a role ("You are a senior SRE reviewing this incident report.") steers tone, vocabulary, and which knowledge the model surfaces. It is genuinely useful for style and domain framing — a "code reviewer" persona catches different issues than a "helpful assistant." Its limits matter in interviews: a persona does not grant new capabilities or override safety training, and vague personas ("you are an expert") add little. The effective version is specific and task-scoped: name the role, the audience, and the output contract in one or two sentences.
+
+## Structured output
+
+For anything downstream of code — [agents](/ai-engineering/agents/), pipelines, UIs — you need machine-readable answers, not prose. Three levels, in increasing reliability. First, instruct the format in the prompt and show an example ("Respond with JSON only, keys: name, age"). Second, use the provider's JSON mode / response-format feature, which constrains decoding to valid JSON. Third, use function calling / tool schemas: you declare a JSON schema for the arguments, and the model returns structured arguments instead of text. Prefer schemas over prompt pleading whenever the provider supports them; a schema is enforced, a polite request is not. Interview angle: "how do you guarantee the model returns valid JSON" — walk these three levels and land on schemas.
+
+```python
+import json
+import os
+from openai import OpenAI
+
+client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+
+# Level 2: JSON mode — decoding is constrained to valid JSON
+resp = client.chat.completions.create(
+    model="gpt-4o-mini",
+    messages=[{"role": "user", "content": "Extract name and age from: 'Ada is 36.' Reply as JSON with keys name and age."}],
+    response_format={"type": "json_object"},
+)
+print(json.loads(resp.choices[0].message.content))  # {'name': 'Ada', 'age': 36}
+
+# Level 3: function calling — the model returns structured arguments
+response = client.chat.completions.create(
+    model="gpt-4o-mini",
+    messages=[{"role": "user", "content": "Order 3 pizzas and 2 garlic breads."}],
+    tools=[{
+        "type": "function",
+        "function": {
+            "name": "create_order",
+            "description": "Place a food order",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "item": {"type": "string"},
+                    "quantity": {"type": "integer"},
+                },
+                "required": ["item", "quantity"],
+            },
+        },
+    }],
+    tool_choice="auto",
+)
+
+for call in response.choices[0].message.tool_calls or []:
+    print(call.function.name, json.loads(call.function.arguments))
+```
+
+## Prompt formats: Alpaca, ChatML, INST
+
+Instruction-tuned models expect prompts serialized in the format they were trained on. The format is part of the prompt — using the wrong one silently degrades quality, especially on local open models.
+
+| Format | Origin | Shape |
+|---|---|---|
+| Alpaca | Stanford Alpaca (LLaMA fine-tune) | `### Instruction:` / `### Input:` / `### Response:` plain-text template |
+| ChatML | OpenAI | `<\|im_start\|>system ... <\|im_end\|>` role-delimited messages |
+| INST | LLaMA-2 chat | `[INST] user text [/INST]` wrapping with `<<SYS>>` system blocks |
+
+In practice with APIs you rarely hand-write these — the SDK applies the chat template for you. They matter when you serve open models directly (Ollama, vLLM, Hugging Face `transformers` via `tokenizer.apply_chat_template`), where picking the model's native template is a free quality win. The [LLM foundations chapter](/ai-engineering/llm-foundations/) covers why tokenizers care about these delimiters.
+
+## Debugging failing prompts: the loop
+
+Treat a bad prompt like a bug, not a mood. The loop is: reproduce, isolate, fix, re-test.
+
+1. **Reproduce.** Pin temperature 0 and the model version, save the exact failing input/output pair. If you cannot reproduce it, you cannot verify a fix.
+2. **Isolate.** Change one thing at a time. Is the failure the instruction, a missing example, or an ambiguous edge case? Test the failing input against a minimal prompt to see which component breaks.
+3. **Fix with a constraint or an example.** Vague instructions get vague output. Add the smallest possible fix: a format constraint ("Answer with only the number"), one targeted few-shot example covering the failing case, or an explicit edge-case rule.
+4. **Re-test and regression-check.** Re-run the failing case plus a few previously-passing cases. Prompt edits routinely fix one case and break two others — keep a small eval set (the project below is exactly this).
+
+<Callout type="important">
+The most common failure mode is not a "bad model" but an under-specified task. Before reaching for a bigger model, check: does the prompt state the exact output format, the label set, and what to do with edge cases? Nine times out of ten, one of those is missing.
+</Callout>
+
+## Free resources (with credit)
+
+- **Anthropic — Prompt engineering overview** (official docs). Clear/detailed instructions, examples, step-by-step reasoning, and their recommended patterns. Credit: Anthropic. https://docs.anthropic.com/en/docs/build-with-claude/prompt-engineering/overview
+- **Learn Prompting — Advanced guides** (free). Zero-shot, few-shot, and advanced techniques with examples. Credit: Learn Prompting. https://LearnPrompting.org/docs/advanced/few_shot/introduction
+- **Stanford Alpaca repo** (GitHub). The original `### Instruction:` / `### Input:` / `### Response:` template and the 52k instruction dataset that started open instruction-tuning. Credit: Tatsu Lab, Stanford. https://github.com/tatsu-lab/stanford_alpaca
+
+## Project: prompt eval harness — zero-shot vs few-shot vs CoT
+
+You will build a tiny eval harness that runs three prompting strategies over the same 10-question set, scores accuracy and token usage, prints a comparison table, and then demonstrates the debug loop by fixing a failing case and re-running. This is the single most interview-credible prompting artifact you can show: it replaces opinions with numbers.
+
+**Step 1 — Set up the environment.** You need the `openai` Python package and any OpenAI-compatible endpoint: OpenAI itself, Ollama locally (`http://localhost:11434/v1`), or Gemini's OpenAI-compatible endpoint.
+
+```bash
+python -m venv prompt-env
+source prompt-env/bin/activate   # Windows: prompt-env\Scripts\activate
+pip install openai
+export OPENAI_API_KEY="your-key"          # or "ollama" for local
+export OPENAI_BASE_URL="https://api.openai.com/v1"   # or http://localhost:11434/v1
+export EVAL_MODEL="gpt-4o-mini"           # or e.g. llama3.1 for Ollama
+```
+
+**Step 2 — Build the eval set.** Ten questions mixing math word problems and classification, each with a canonical short answer. Keep answers short and exact-matchable — eval design is half the project.
+
+```python
+# eval_data.py
+EVAL_SET = [
+    {"q": "A bakery made 24 loaves and sold 9. How many are left?", "a": "15", "kind": "math"},
+    {"q": "Maya had 7 marbles. She bought 5 more, then lost 3. How many does she have?", "a": "9", "kind": "math"},
+    {"q": "A train travels 60 km in 1.5 hours. What is its speed in km/h?", "a": "40", "kind": "math"},
+    {"q": "A shopkeeper buys 10 pens at $2 each and sells them at $3 each. What is the profit?", "a": "10", "kind": "math"},
+    {"q": "If 3 workers build 3 sheds in 3 days, how many days for 1 worker to build 1 shed?", "a": "3", "kind": "math"},
+    {"q": "Classify as positive or negative: 'The food was cold and the waiter was rude.'", "a": "negative", "kind": "classify"},
+    {"q": "Classify as positive or negative: 'Fast delivery, still hot, will order again!'", "a": "positive", "kind": "classify"},
+    {"q": "Classify as positive or negative: 'It arrived on time but the box was crushed.'", "a": "negative", "kind": "classify"},
+    {"q": "Classify as positive or negative: 'Not bad for the price, honestly decent.'", "a": "positive", "kind": "classify"},
+    {"q": "Classify as positive or negative: 'Waited an hour, food never came.'", "a": "negative", "kind": "classify"},
+]
+```
+
+**Step 3 — Implement the three strategies as functions.** Each takes a question dict and returns a messages list. Note the CoT strategy forces a parseable final line.
+
+```python
+# strategies.py
+def zero_shot(item):
+    return [{"role": "user", "content": item["q"]}]
+
+def few_shot(item):
+    examples = (
+        "Q: A bakery made 24 loaves and sold 9. How many are left?\nA: 15\n\n"
+        "Q: Classify as positive or negative: 'The food was cold and late.'\nA: negative\n\n"
+    )
+    return [{"role": "user", "content": examples + "Q: " + item["q"] + "\nA:"}]
+
+def chain_of_thought(item):
+    return [{"role": "user", "content": (
+        item["q"] + "\nThink step by step, then write your final answer "
+        "on its own line starting with 'FINAL:'"
+    )}]
+```
+
+**Step 4 — Run all three strategies and score.** Normalize answers, extract the `FINAL:` line for CoT, and record token usage from the API response.
+
+```python
+# harness.py
+import os, re
+from openai import OpenAI
+from eval_data import EVAL_SET
+from strategies import zero_shot, few_shot, chain_of_thought
+
+client = OpenAI(
+    api_key=os.environ.get("OPENAI_API_KEY", "ollama"),
+    base_url=os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1"),
+)
+MODEL = os.environ.get("EVAL_MODEL", "gpt-4o-mini")
+
+def normalize(s):
+    return re.sub(r"[^a-z0-9]", "", s.lower())
+
+def extract_cot(text):
+    m = re.search(r"FINAL:\s*(.+)", text, re.IGNORECASE)
+    if m:
+        return m.group(1).strip()
+    lines = text.strip().splitlines()
+    return lines[-1].strip() if lines else ""
+
+def run(strategy, extractor=lambda t: t):
+    correct, in_tok, out_tok = 0, 0, 0
+    for item in EVAL_SET:
+        resp = client.chat.completions.create(
+            model=MODEL, temperature=0,
+            messages=strategy(item),
+        )
+        raw = resp.choices[0].message.content or ""
+        if normalize(extractor(raw)) == normalize(item["a"]):
+            correct += 1
+        usage = resp.usage  # None on some local servers (e.g. Ollama) — guard it
+        in_tok += usage.prompt_tokens if usage else 0
+        out_tok += usage.completion_tokens if usage else 0
+    n = len(EVAL_SET)
+    return {"accuracy": f"{correct}/{n}", "avg_in": in_tok // n, "avg_out": out_tok // n}
+
+STRATEGIES = [
+    ("zero-shot", zero_shot, lambda t: t),
+    ("few-shot", few_shot, lambda t: t),
+    ("cot", chain_of_thought, extract_cot),
+]
+
+if __name__ == "__main__":
+    print(f"{'strategy':<10} {'accuracy':<10} {'avg_in_tok':<12} {'avg_out_tok':<12}")
+    for name, fn, ext in STRATEGIES:
+        r = run(fn, ext)
+        print(f"{name:<10} {r['accuracy']:<10} {r['avg_in_tok']:<12} {r['avg_out_tok']:<12}")
+```
+
+Run it with `python harness.py`. Typical result on a small model: few-shot beats zero-shot on classification, CoT wins the tricky math (the worker/shed question) but costs 3–5x the output tokens. Your numbers will vary — the table is the point, not any specific winner.
+
+**Step 5 — Read the comparison table.** Look at where each strategy fails, not just the totals. If zero-shot misses "Not bad for the price, honestly decent." (negation + faint praise), that is your debug target: an edge case the instruction does not cover.
+
+**Step 6 — Demonstrate the debug loop: fix one failing case and re-run.** Pick the smallest fix — a targeted few-shot example for the failing pattern — and add it as a fourth strategy. Do not touch the others.
+
+```python
+# strategies.py (append)
+def few_shot_fixed(item):
+    examples = (
+        "Q: A bakery made 24 loaves and sold 9. How many are left?\nA: 15\n\n"
+        "Q: Classify as positive or negative: 'The food was cold and late.'\nA: negative\n\n"
+        "Q: Classify as positive or negative: 'Not terrible for the price.'\nA: positive\n\n"
+    )
+    return [{"role": "user", "content": examples + "Q: " + item["q"] + "\nA:"}]
+```
+
+Add `("few-shot-fixed", few_shot_fixed, lambda t: t)` to `STRATEGIES` in `harness.py` and re-run. You should see the classification misses drop while math scores stay flat — a clean, reviewable prompt diff with measured before/after. Commit both runs' tables to your notes; that is your regression evidence.
+
+<Callout type="tip">
+Keep the harness. Every future prompt change — for [RAG](/ai-engineering/rag/), [agents](/ai-engineering/agents/), or [production evals](/ai-engineering/production/) — gets tested by adding a case here first. Interviewers rate "I keep an eval set and regression-test prompts" far above "I'm good at prompting."
+</Callout>
+
+### Expected outcome
+
+A runnable `harness.py` that prints a strategy comparison table with accuracy and per-strategy token usage, plus a documented before/after from the debug-loop iteration. You will know, with numbers, which strategy wins on your task and what each one costs in tokens.
+
+### Interview talking points
+
+Say: "I don't guess which prompting technique works — I built a 10-question eval harness comparing zero-shot, few-shot, and chain-of-thought on the same set, scoring accuracy and token usage. CoT won the multi-step math but cost 4x the output tokens, so I only use it where zero-shot fails. When a prompt breaks, I follow a loop: reproduce at temperature 0, isolate the failing case, add the smallest fix — usually one targeted example or a format constraint — and re-run the harness to check for regressions. The harness is also how I'd evaluate prompts for RAG and agents going forward."

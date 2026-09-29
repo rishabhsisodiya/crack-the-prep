@@ -1,0 +1,326 @@
+---
+title: "Retrieval-Augmented Generation (RAG)"
+track: "ai-engineering"
+kind: "notes"
+order: 5
+description: "The RAG pipeline end to end: chunking, embeddings, vector search, and debugging failures — plus a two-phase chat-with-PDFs project from FAISS to pgvector."
+updated: 2026-09-29
+slug: "rag"
+---
+
+import Callout from '../../components/Callout.astro';
+
+LLMs hallucinate when they lack facts. Retrieval-Augmented Generation fixes that by fetching relevant documents and stuffing them into the prompt before generation — grounding answers in your data instead of the model's memory. It is the single most asked-about AI system design topic after agents.
+
+## Why RAG shows up in interviews
+
+"Design a chat-with-docs system" is the AI equivalent of "design URL shortener" — interviewers use it to test whether you can reason about a full pipeline, not just call an API. The follow-up is always a failure scenario: "answers are wrong, where do you look first?" This chapter gives you the pipeline mental model and the debugging order to answer both.
+
+## The pipeline in six stages
+
+Every RAG system, from a weekend script to a production service, runs the same six stages. Learn them in order, because debugging means walking this list top to bottom.
+
+| Stage | What happens | Typical tools |
+| --- | --- | --- |
+| Ingest | Load PDFs, docs, and pages into plain text | PyPDFLoader, Unstructured |
+| Chunk | Split text into retrievable pieces | RecursiveCharacterTextSplitter |
+| Embed | Convert each chunk into a vector | sentence-transformers, OpenAI embeddings |
+| Store | Index vectors for fast similarity search | FAISS, pgvector, Qdrant |
+| Retrieve | Fetch the top-k chunks for a user query | ANN search, hybrid search |
+| Generate | LLM answers using the chunks as context | Ollama, OpenAI, Gemini |
+
+**Ingest** is where quality starts and where most production bugs hide. PDFs are not text files: they have headers, footers, tables, scanned images, and two-column layouts that naive extraction mangles. `PyPDFLoader` is fine for clean digital PDFs; for scanned or complex layouts you need OCR (Tesseract) or a layout-aware parser like Unstructured. Whatever you use, always keep metadata — the file path, page number, and section — because retrieval is useless if you cannot cite or filter by source.
+
+**Chunk** turns each document into pieces small enough to embed and retrieve independently. This is the highest-leverage decision in the whole pipeline, which is why it gets its own section below. The key insight: the retriever can only ever return whole chunks, so a fact split across a chunk boundary is a fact lost.
+
+**Embed** converts each chunk into a dense vector — typically 384 to 3072 numbers — where semantic similarity becomes geometric closeness. Chunk embeddings are precomputed once and stored; at query time you only embed the user's question, which is why ingestion is slow and querying is fast. Swapping the embedding model later means re-embedding everything, so treat it as a committed decision.
+
+**Store** indexes those vectors for similarity search and persists them. The in-memory versus persistent choice (FAISS versus pgvector) is the core trade-off of Phase A versus Phase B of the project. The store also holds the chunk text and metadata alongside each vector, so retrieval returns usable context, not just IDs.
+
+**Retrieve** embeds the question, finds the nearest chunk vectors, and optionally filters by metadata first. The two knobs that matter are top-k (how many chunks) and the similarity threshold (how close is close enough). Hybrid retrieval — combining vector search with keyword search like BM25 — fixes the cases where the question uses exact terms (product codes, error strings) that embeddings blur together.
+
+**Generate** is the only stage the user sees: the retrieved chunks are stuffed into a prompt template with the question, and the LLM answers from that context. The prompt must instruct the model to use only the provided context and to say "I don't know" when the answer is not there — without that instruction, the model happily hallucinates on top of perfect retrieval.
+
+Ingest, chunk, and embed happen once per document (offline, in a batch job). Store persists the result. Retrieve and generate happen per query — the only per-query embedding is the question itself.
+
+## Chunking: the highest-leverage decision
+
+Chunking decides what the retriever can ever find, so it has more impact on answer quality than the choice of embedding model. The trade-off is simple: chunks that are too large dilute the embedding with unrelated text, and chunks that are too small lose the context needed to answer. Overlap (repeating the tail of one chunk at the start of the next) prevents sentences from being cut in half at boundaries.
+
+The default splitter, `RecursiveCharacterTextSplitter`, works down a hierarchy of separators: it first tries to split on double newlines (paragraphs), then single newlines, then sentence ends, then spaces, then characters — using the largest separator that still produces chunks under the size limit. That is why it keeps paragraphs intact when it can and only falls back to mid-sentence splits when it must. You can see this directly by splitting one document and printing the first few chunks with their lengths.
+
+How do you pick a size? There is no universal number, but there are reliable heuristics. Match the chunk to the answer unit: FAQ-style Q&A works with 300–500 characters, technical documentation with 800–1200, and long narrative prose sometimes needs 1500+. Set overlap to roughly 10–20% of the chunk size so boundary sentences survive. And always attach metadata to every chunk — source file, page number, section heading — because the retrieval section's metadata filtering depends on it.
+
+| Strategy | How it works | When to use |
+| --- | --- | --- |
+| Fixed-size | Blind character splits every N chars | Baselines and benchmarks only |
+| Recursive | Splits on separators: paragraphs, then sentences, then words | Default for most documents |
+| Semantic | Splits where the topic shifts, using embeddings | Long, mixed-topic documents |
+| Parent-document | Retrieve small chunks, hand the LLM the larger parent | Precise retrieval + rich context |
+| Sentence-window | Each chunk is one sentence plus its neighbors | Q&A over dense prose |
+
+Start with recursive chunking at 1000 characters with 200 overlap. It is the industry default for a reason, and you should be able to justify deviating from it with measurements, not taste. The parent-document pattern is worth knowing for interviews: you get the precision of small chunks at retrieval time and the context richness of large chunks at generation time, at the cost of a slightly more complex index.
+
+<Callout type="tip">
+When an interviewer asks "how would you improve this RAG system?", the expected first answer is chunking experiments — not a bigger model. Change chunk size and overlap, re-run a fixed eval set, and compare. That is exactly what Phase B of the project has you do.
+</Callout>
+
+## Embeddings: text as geometry
+
+An embedding model converts text into a vector of numbers where semantic similarity becomes geometric closeness — "refund policy" and "money-back guarantee" land near each other even though they share no words. The retriever embeds the user question the same way and returns the chunks with the closest vectors, ranked by cosine similarity (the angle between vectors, which ignores magnitude and focuses on direction).
+
+Two practical facts matter. First, dimensions are a capacity knob: `all-MiniLM-L6-v2` uses 384 dimensions and runs on a laptop CPU, while OpenAI's `text-embedding-3-large` uses 3072 and costs money per token. Bigger is not automatically better for your data — benchmark with your own eval set. Second, embedding quality is measured on public leaderboards like MTEB, but those scores describe general text; your documents may behave differently, which is another reason the project measures instead of assuming.
+
+For learning, a small local model like `all-MiniLM-L6-v2` is fast, free, and good enough; you upgrade embedding models only after chunking and retrieval parameters are tuned. In an interview, if asked "what does an embedding capture?", the one-line answer is: "the distributional meaning of the text — words and phrases that appear in similar contexts get similar vectors."
+
+## Vector stores and ANN search
+
+Comparing one query vector against millions of chunk vectors exactly is too slow, so vector stores use approximate nearest neighbor (ANN) search — trading a tiny amount of recall for orders of magnitude in speed. The dominant algorithm is HNSW (Hierarchical Navigable Small World): it organizes vectors into layered graphs, where the top layer is a sparse overview and each lower layer is denser. A query starts at the top and greedily descends, like zooming into a map — each layer narrows the search to a promising neighborhood instead of scanning everything.
+
+The older alternative is IVF (inverted file index): cluster all vectors into buckets, then only search the buckets nearest the query. IVF is simpler and uses less memory; HNSW is faster at query time and usually wins on recall. You rarely choose directly — pgvector and FAISS expose both — but you should know the trade-off being made: exact search is correct and slow, ANN is approximate and fast, and the "approximate" part is tuned with parameters like HNSW's `ef_search` (bigger = better recall, slower queries).
+
+FAISS keeps the index in memory: perfect for a prototype, gone on restart. pgvector puts vectors in Postgres next to your relational data: persistent, filterable with SQL, and shared across processes. That persistence is why Phase B of the project moves to it.
+
+## Retrieval parameters
+
+The main knob is top-k: how many chunks to hand the LLM. Too low and the answer misses context; too high and you dilute the prompt with noise while burning tokens and latency. Four is a sane default for Q&A over documents. The second knob is metadata filtering — restricting retrieval to a source file, date range, or tenant before ranking — which fixes a whole class of "right answer from the wrong document" bugs. The third knob is a similarity threshold: discard chunks below a minimum score so the generator never sees garbage, which also gives you a clean signal for "I don't know" responses when nothing passes.
+
+Hybrid search deserves a mention because interviewers love it: pure vector search struggles with exact terms like product codes, error strings, or names, because embeddings blur rare tokens together. Combining vector ranking with keyword ranking (BM25) and merging the results handles both semantic questions and exact-match questions. pgvector supports this with full-text search alongside vector search in the same query.
+
+## Naive RAG failure modes
+
+<Callout type="warning">
+"RAG is failing — how do you debug?" is a favorite interview question. The expected answer is a pipeline walk: check what was retrieved before blaming the model. If the chunks are wrong, it is a retrieval problem; if the chunks are right and the answer is wrong, it is a generation problem. Saying this out loud puts you ahead of most candidates.
+</Callout>
+
+| Symptom | Likely cause | Fix |
+| --- | --- | --- |
+| Answers are vague or refuse to answer | Chunks too small, or top-k too low | Increase chunk size, raise top-k |
+| Answer cites the wrong document | No metadata filtering | Filter by source or section |
+| Right chunks retrieved, wrong answer | Weak model or loose prompt | Stronger model, tighter grounding prompt |
+| Slow startup or out of memory | Re-embedding on every boot, huge in-RAM index | Precompute embeddings, move to pgvector |
+| Hallucinates despite good retrieval | Prompt does not constrain to context | Add "use only the provided context; say I don't know otherwise" |
+| Misses exact terms (codes, names) | Embeddings blur rare tokens | Add hybrid BM25 + vector search |
+| Inconsistent answers across runs | Temperature too high for factual Q&A | Set temperature to 0 for retrieval answers |
+| Good on your questions, bad on users' | No eval set; tuned to three hand-written queries | Build an eval set and measure — see [Production AI](/ai-engineering/production/) |
+
+The last row is the one that separates junior from senior answers. Hand-testing three questions proves nothing; a fixed eval set of twenty-plus questions with known answers, re-run after every change, is what makes RAG engineering instead of RAG tinkering. The production chapter shows how to score those evals with RAGAS and gate them in CI.
+
+## Free resources
+
+These are the sources this chapter is built on — credit where it is due, and all free:
+
+- LangChain RAG docs — the end-to-end indexing and retrieval tutorial: https://docs.langchain.com/oss/python/langchain/rag
+- DataTalksClub LLM Zoomcamp — free 10-week course building a production RAG assistant: https://github.com/DataTalksClub/llm-zoomcamp
+- pgvector — open-source vector search for Postgres: https://github.com/pgvector/pgvector
+
+## Project: chat with your PDFs
+
+You will build a working chat-with-documents system in two phases. Phase A is an in-memory baseline you can finish in an afternoon — expect some answers to be wrong, because noticing the failures is the point. Phase B makes it production-shaped with pgvector, metadata filters, and measured chunking experiments. The generator can be the [FastAPI service from the LLM APIs chapter](/ai-engineering/llm-apis/) or Ollama directly.
+
+### Phase A: in-memory RAG that works
+
+The goal is a working baseline, not a perfect one. You will load real PDFs, chunk them, embed them, and ask questions through a local model.
+
+**1. Install dependencies and verify imports.** You need Ollama installed with a model pulled — `ollama pull qwen2.5:7b` (see [the LLM APIs chapter](/ai-engineering/llm-apis/)). The `langchain-ollama` and `langchain-huggingface` packages are the current homes of the Ollama and HuggingFace integrations; the old `langchain_community` paths are deprecated.
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install langchain langchain-community langchain-text-splitters langchain-ollama \
+  langchain-huggingface pypdf sentence-transformers faiss-cpu
+python -c "from langchain_ollama import OllamaLLM; from langchain_huggingface import HuggingFaceEmbeddings; print('imports ok')"
+```
+
+Expected output: `imports ok`. If `ollama` is not found, install it from [ollama.com](https://ollama.com) first — every later step fails without the model server running. If pip is slow, that is normal: `sentence-transformers` pulls in torch (~200 MB).
+
+**2. Prepare documents and inspect your chunks.** Put two or three real PDFs in a `docs/` folder — a handbook, a policy doc, anything with facts you can verify. Before building the pipeline, look at what chunking actually produces; this makes the chunking theory concrete.
+
+```python
+from langchain_community.document_loaders import PyPDFLoader
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+
+docs = []
+for path in ["docs/handbook.pdf", "docs/policy.pdf", "docs/faq.pdf"]:
+    docs.extend(PyPDFLoader(path).load())
+print(f"Loaded {len(docs)} pages")
+
+splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+chunks = splitter.split_documents(docs)
+print(f"Split into {len(chunks)} chunks")
+for c in chunks[:2]:
+    print(len(c.page_content), "chars | source:", c.metadata["source"])
+    print(c.page_content[:200].replace("\n", " "))
+    print("-" * 70)
+```
+
+Expected output: page counts, chunk counts, and the first 200 characters of two chunks with their source file. If a PDF loads zero pages, it is probably scanned images — you need OCR first (see the ingest notes above). If chunks look like mid-sentence fragments, your documents have unusual formatting; try lowering `chunk_size` to 500 for this corpus.
+
+**3. Build the full pipeline.** Save the script below as `rag_phase_a.py`. It loads, chunks, embeds locally with `all-MiniLM-L6-v2`, stores in an in-memory FAISS index, and answers questions through the local model.
+
+```python
+from langchain_community.document_loaders import PyPDFLoader
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_community.vectorstores import FAISS
+from langchain_ollama import ChatOllama
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.runnables import RunnablePassthrough
+from langchain_core.output_parsers import StrOutputParser
+
+PDFS = ["docs/handbook.pdf", "docs/policy.pdf", "docs/faq.pdf"]
+
+# 1. Load: one Document per PDF page, with source path in metadata
+docs = []
+for path in PDFS:
+    docs.extend(PyPDFLoader(path).load())
+print(f"Loaded {len(docs)} pages from {len(PDFS)} PDFs")
+
+# 2. Chunk: 1000 chars with 200 overlap is the sane default
+splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+chunks = splitter.split_documents(docs)
+print(f"Split into {len(chunks)} chunks")
+
+# 3. Embed locally and keep the index in memory
+embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+store = FAISS.from_documents(chunks, embeddings)
+print("Index built")
+
+# 4. Retrieve top-4 chunks, generate with a local model (temperature 0 for factual Q&A)
+retriever = store.as_retriever(search_kwargs={"k": 4})
+llm = ChatOllama(model="qwen2.5:7b", temperature=0)
+
+prompt = ChatPromptTemplate.from_template(
+    "Answer the question using ONLY the context below. "
+    "If the answer is not in the context, say you do not know.\n\n"
+    "Context:\n{context}\n\nQuestion: {question}"
+)
+
+def format_docs(docs):
+    return "\n\n".join(d.page_content for d in docs)
+
+chain = (
+    {"context": retriever | format_docs, "question": RunnablePassthrough()}
+    | prompt
+    | llm
+    | StrOutputParser()
+)
+
+# 5. Ask questions and watch what breaks
+questions = [
+    "What is the refund policy?",
+    "Who approves expense reports over $500?",
+    "What are the office holidays this year?",
+]
+for q in questions:
+    print("Q:", q)
+    print("A:", chain.invoke(q))
+    print("-" * 70)
+```
+
+Run it with `python rag_phase_a.py`. The first run downloads the embedding model (~90 MB), so give it a minute. Expected output: three answers grounded in your PDFs. If you get `Connection refused` from the LLM step, Ollama is not running — start it with `ollama serve`. If answers are vague, that is the point of the next step.
+
+**4. Record the failures.** For each wrong or vague answer, write down which failure mode from the table above it matches. This log becomes your Phase B experiment plan — and it is exactly the artifact interviewers want to hear about.
+
+### Phase B: make it production-shaped
+
+**1. Run pgvector in Docker.** This replaces the in-memory FAISS index with vectors stored in Postgres.
+
+```bash
+docker run -d --name pgvector \
+  -e POSTGRES_PASSWORD=secret \
+  -p 5432:5432 \
+  pgvector/pgvector:pg16
+docker ps --filter name=pgvector --format "running: {{.Names}}"
+pip install langchain-postgres "psycopg[binary]"
+```
+
+Expected output: `running: pgvector`. If `docker ps` shows nothing, the container failed to start — check `docker logs pgvector`. If port 5432 is already taken by a local Postgres, change the publish flag to `-p 5433:5432` and use port 5433 in the connection string below.
+
+**2. Swap FAISS for PGVector.** Save this as `rag_phase_b.py`. It reuses the loader, splitter, and embeddings from Phase A — only the store changes. Vectors now survive restarts, so you embed once instead of on every boot. `PGVector` enables the `vector` extension automatically on first connect.
+
+```python
+from langchain_community.document_loaders import PyPDFLoader
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_postgres import PGVector
+from langchain_ollama import ChatOllama
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.runnables import RunnablePassthrough
+from langchain_core.output_parsers import StrOutputParser
+
+CONNECTION = "postgresql+psycopg://postgres:secret@localhost:5432/postgres"
+
+docs = []
+for path in ["docs/handbook.pdf", "docs/policy.pdf", "docs/faq.pdf"]:
+    docs.extend(PyPDFLoader(path).load())
+chunks = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200).split_documents(docs)
+print(f"Loaded {len(docs)} pages, split into {len(chunks)} chunks")
+
+embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+store = PGVector(
+    embeddings=embeddings,
+    collection_name="company_docs",
+    connection=CONNECTION,
+    use_jsonb=True,
+)
+store.add_documents(chunks)  # run once; comment out on later runs
+print("Stored", len(chunks), "chunks in pgvector")
+
+llm = ChatOllama(model="qwen2.5:7b", temperature=0)
+prompt = ChatPromptTemplate.from_template(
+    "Answer the question using ONLY the context below. "
+    "If the answer is not in the context, say you do not know.\n\n"
+    "Context:\n{context}\n\nQuestion: {question}"
+)
+
+def format_docs(docs):
+    return "\n\n".join(d.page_content for d in docs)
+
+retriever = store.as_retriever(search_kwargs={"k": 4})
+chain = (
+    {"context": retriever | format_docs, "question": RunnablePassthrough()}
+    | prompt
+    | llm
+    | StrOutputParser()
+)
+print("Q: What is the refund policy?")
+print("A:", chain.invoke("What is the refund policy?"))
+```
+
+Run it with `python rag_phase_b.py`. Expected output: chunk counts, then an answer. If you see `connection refused`, the container is not up — re-run the `docker ps` check from step 1. On the second run, comment out `store.add_documents(chunks)` or you will duplicate every chunk — and notice how much faster startup is without re-embedding.
+
+**3. Add metadata filters.** `PyPDFLoader` records the file path in each chunk's `source` metadata. Filtering to one document before ranking fixes cross-document contamination.
+
+```python
+retriever = store.as_retriever(
+    search_kwargs={"k": 4, "filter": {"source": "docs/policy.pdf"}}
+)
+chain = (
+    {"context": retriever | format_docs, "question": RunnablePassthrough()}
+    | prompt
+    | llm
+    | StrOutputParser()
+)
+print(chain.invoke("What is the refund policy?"))
+```
+
+Ask the same question with and without the filter and compare. When the unfiltered answer cites the wrong document, the filtered answer should not — that contrast is the demo you walk an interviewer through.
+
+**4. Experiment and record.** Re-run the same three questions for each configuration and note which answers improve. Fill in a table like this in your notes:
+
+| Chunk size | Overlap | top-k | Observation |
+| --- | --- | --- | --- |
+| 500 | 100 | 4 |  |
+| 1000 | 200 | 4 |  |
+| 1000 | 200 | 8 |  |
+
+Change one variable at a time. The point is not finding the perfect numbers — it is building the habit of measuring instead of guessing. Use a fresh `collection_name` per configuration (e.g. `docs_c500`) so experiments do not contaminate each other.
+
+## What you should be able to explain
+
+You now have a RAG system you built twice and measured. The interview talking points write themselves: chunking trade-offs (large chunks dilute embeddings, small chunks lose context, overlap protects boundaries) and why you started at 1000/200; why pgvector beats an in-memory index for anything real (persistence across restarts, SQL metadata filtering, concurrent readers, no re-embedding on boot); and your debugging order for a failing RAG system (check retrieved chunks first, then the generator). Pair this with [an agent that decides when to retrieve](/ai-engineering/agents/) — and you can field the full "design a chat-with-docs system" interview loop.
+
+<Callout type="tip">
+Keep your Phase A vs Phase B notes. "I built RAG twice, measured chunk-size trade-offs, and moved to pgvector for persistence and filtering" is a stronger interview story than any certificate.
+</Callout>
