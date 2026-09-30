@@ -1,7 +1,7 @@
 ---
 import BaseLayout from './BaseLayout.astro';
 import TrackLinks from '../components/TrackLinks.astro';
-import { SITE, TRACKS, trackBySlug, u } from '../consts';
+import { SITE, trackBySlug, tracksIn, u } from '../consts';
 
 type PagerLink = { href: string; label: string };
 interface Props {
@@ -17,13 +17,15 @@ interface Props {
 const { track, title, description, ogType = 'article', prev: prevProp, next: nextProp } = Astro.props;
 const current = trackBySlug(track);
 
-const idx = TRACKS.findIndex((t) => t.slug === track);
+// default pager walks track-to-track, but never crosses from one roadmap into another
+const siblings = current ? tracksIn(current.roadmap) : [];
+const idx = siblings.findIndex((t) => t.slug === track);
 const prev: PagerLink | null =
   prevProp ??
-  (idx > 0 ? { href: u(`/${TRACKS[idx - 1].slug}`), label: TRACKS[idx - 1].title } : null);
+  (idx > 0 ? { href: u(`/${siblings[idx - 1].slug}`), label: siblings[idx - 1].title } : null);
 const next: PagerLink | null =
   nextProp ??
-  (idx >= 0 && idx < TRACKS.length - 1 ? { href: u(`/${TRACKS[idx + 1].slug}`), label: TRACKS[idx + 1].title } : null);
+  (idx >= 0 && idx < siblings.length - 1 ? { href: u(`/${siblings[idx + 1].slug}`), label: siblings[idx + 1].title } : null);
 
 // The TOC slot is rendered twice: sticky sidebar on desktop, collapsible panel on mobile.
 const tocHtml = Astro.slots.has('toc') ? await Astro.slots.render('toc') : '';
@@ -57,7 +59,6 @@ const jsonLd = [
   <div class="read-progress" id="readProgress" aria-hidden="true"></div>
   <div class="prep">
     <aside class="prep-rail" aria-label="Tracks">
-      <p class="prep-rail__label">Tracks</p>
       <TrackLinks track={track} />
     </aside>
 
@@ -160,7 +161,6 @@ const jsonLd = [
   @media (min-width: 960px) {
     .prep-rail { display: block; position: sticky; top: 5rem; align-self: start; }
   }
-  .prep-rail__label,
   .prep-toc :global(.toc-label) {
     font-family: var(--font-mono);
     font-size: 0.62rem;

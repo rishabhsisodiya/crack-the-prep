@@ -1,5 +1,5 @@
 ---
-import { SITE, TRACKS, u } from '../consts';
+import { SITE, ROADMAPS, tracksIn, u } from '../consts';
 const year = new Date().getFullYear();
 ---
 
@@ -8,16 +8,19 @@ const year = new Date().getFullYear();
     <div>
       <p class="foot-brand">CRACKTHE<span>PREP</span></p>
       <p class="foot-tag">
-        Free interview preparation for full-stack engineers.
+        Free interview preparation for full-stack and AI engineers.
       </p>
     </div>
-    <nav aria-label="Tracks">
-      <ul>
-        {TRACKS.map((t) => (
-          <li><a href={u(`/${t.slug}`)}>{t.title}</a></li>
-        ))}
-      </ul>
-    </nav>
+    {ROADMAPS.map((r) => (
+      <nav aria-label={r.title}>
+        <p class="foot-h">{r.title}</p>
+        <ul>
+          {tracksIn(r.id).map((t) => (
+            <li><a href={u(`/${t.slug}`)}>{t.title}</a></li>
+          ))}
+        </ul>
+      </nav>
+    ))}
   </div>
   <div class="wrap foot-base">
     <span>© {year} {SITE.name}</span>
@@ -47,6 +50,14 @@ const year = new Date().getFullYear();
   .foot-brand span { color: var(--muted); }
   .foot-tag { max-width: 42ch; font-size: 0.9rem; margin-top: 0.4rem; }
   .foot nav ul { list-style: none; display: grid; grid-template-columns: 1fr 1fr; gap: 0.4rem 2rem; }
+  .foot-h {
+    font-family: var(--font-mono);
+    font-size: 0.62rem;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--cyan);
+    margin-bottom: 0.7rem;
+  }
   .foot nav a { font-family: var(--font-mono); font-size: 0.78rem; color: var(--muted); }
   .foot nav a:hover { color: var(--cyan); }
   .foot-base {

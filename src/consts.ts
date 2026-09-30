@@ -14,8 +14,27 @@ export const SITE = {
     'Free, practitioner-grade interview preparation for full-stack engineers: JavaScript, React, Node.js, system design, DSA, AI engineering and behavioral — notes, questions and worked examples in one place.',
 } as const;
 
+export type RoadmapId = 'fullstack' | 'ai';
+
+export type Roadmap = { id: RoadmapId; title: string; blurb: string };
+
+/** Top-level groupings of tracks. Each roadmap is navigated and paged on its own. */
+export const ROADMAPS: Roadmap[] = [
+  {
+    id: 'fullstack',
+    title: 'Full-Stack Interview Prep',
+    blurb: 'JavaScript, React, Node.js, machine coding, system design, DSA and behavioral.',
+  },
+  {
+    id: 'ai',
+    title: 'AI Engineering Roadmap',
+    blurb: 'GenAI & LLM engineering for working engineers — from advanced Python to production agents.',
+  },
+];
+
 export type Track = {
   slug: string;
+  roadmap: RoadmapId;
   title: string;
   blurb: string;
   badge: string;
@@ -28,12 +47,14 @@ export type Track = {
 export const TRACKS: Track[] = [
   {
     slug: 'plan',
+    roadmap: 'fullstack',
     title: 'Prep Plan',
     blurb: 'How to prepare, what to prioritise, and a week-by-week roadmap.',
     badge: '01',
   },
   {
     slug: 'javascript',
+    roadmap: 'fullstack',
     title: 'JavaScript',
     blurb: 'Language core — scope, closures, prototypes, the event loop, async, ES6+.',
     badge: 'JS',
@@ -41,6 +62,7 @@ export const TRACKS: Track[] = [
   },
   {
     slug: 'react',
+    roadmap: 'fullstack',
     title: 'React',
     blurb: 'Rendering, hooks, state, performance and the patterns interviewers probe.',
     badge: '⚛',
@@ -48,32 +70,29 @@ export const TRACKS: Track[] = [
   },
   {
     slug: 'nodejs',
+    roadmap: 'fullstack',
     title: 'Node.js',
     blurb: 'Runtime model, modules, Express, middleware, auth and backend fundamentals.',
     badge: '⬢',
     hasQuestions: true,
   },
   {
-    slug: 'ai-engineering',
-    title: 'AI Engineering',
-    blurb: 'GenAI & LLM engineering — Python for AI, prompts, RAG, agents, memory, voice, MCP, evals, guardrails. Theory, free resources and a build project in every chapter.',
-    badge: 'New',
-    hasQuestions: true,
-  },
-  {
     slug: 'machine-coding',
+    roadmap: 'fullstack',
     title: 'Machine Coding',
     blurb: 'Polyfills, utilities, async helpers and UI components — built live, step by step, the way the round is scored.',
     badge: '⌨',
   },
   {
     slug: 'system-design',
+    roadmap: 'fullstack',
     title: 'System Design',
     blurb: 'A framework, the building blocks, and worked problems with diagrams.',
     badge: '▤',
   },
   {
     slug: 'dsa',
+    roadmap: 'fullstack',
     title: 'DSA',
     blurb: 'Theory, two dozen patterns, a curated interview-core list, a 450-problem checklist, and worked solutions.',
     badge: '∑',
@@ -88,13 +107,34 @@ export const TRACKS: Track[] = [
   },
   {
     slug: 'behavioral',
+    roadmap: 'fullstack',
     title: 'Behavioral',
     blurb: 'The STAR method and a bank of leadership and teamwork prompts.',
     badge: '✦',
   },
+  {
+    slug: 'ai-engineering',
+    roadmap: 'ai',
+    title: 'AI Engineering',
+    blurb: 'GenAI & LLM engineering — Python for AI, prompts, RAG, agents, memory, voice, MCP, evals, guardrails. Theory, free resources and a build project in every chapter.',
+    badge: 'AI',
+    hasQuestions: true,
+    sections: [
+      { label: 'Advanced Python', path: 'python' },
+      { label: 'How LLMs work', path: 'llm-foundations' },
+      { label: 'Prompt engineering', path: 'prompting' },
+      { label: 'LLM APIs & local models', path: 'llm-apis' },
+      { label: 'RAG', path: 'rag' },
+      { label: 'Agents & LangGraph', path: 'agents' },
+      { label: 'Agent memory', path: 'memory' },
+      { label: 'Voice, multimodal & MCP', path: 'voice-multimodal' },
+      { label: 'Production AI', path: 'production' },
+    ],
+  },
 ];
 
 export const trackBySlug = (slug: string) => TRACKS.find((t) => t.slug === slug);
+export const tracksIn = (roadmap: RoadmapId) => TRACKS.filter((t) => t.roadmap === roadmap);
 
 /** Prefix an absolute-from-root path with the configured base. */
 export function u(path = '/'): string {

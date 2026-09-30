@@ -1,13 +1,22 @@
 ---
-import { TRACKS, u } from '../consts';
+import { ROADMAPS, trackBySlug, tracksIn, u } from '../consts';
 
 interface Props { track: string }
 const { track } = Astro.props;
 const path = Astro.url.pathname.replace(/\/$/, '');
+
+// each roadmap gets its own sidebar. The AI roadmap stays focused on itself;
+// full-stack pages get a link across to it.
+const roadmapId = trackBySlug(track)?.roadmap ?? 'fullstack';
+const current = ROADMAPS.filter((r) => r.id === roadmapId);
+const others = roadmapId === 'ai' ? [] : ROADMAPS.filter((r) => r.id !== roadmapId);
 ---
 
+{current.map((r) => (
+<div class="roadmap">
+<p class="roadmap-label">{r.title}</p>
 <ul class="track-links">
-  {TRACKS.map((t) => {
+  {tracksIn(r.id).map((t) => {
     const onTrack = t.slug === track;
     const onQuestions = onTrack && path.endsWith('/questions');
     const activeSection = onTrack
@@ -32,8 +41,32 @@ const path = Astro.url.pathname.replace(/\/$/, '');
     );
   })}
 </ul>
+</div>
+))}
+{others.map((r) => (
+  <a class="roadmap-switch" href={u(`/${tracksIn(r.id)[0].slug}`)}>{r.title} →</a>
+))}
 
 <style>
+  .roadmap-switch {
+    display: block;
+    margin-top: 1.4rem;
+    padding-top: 0.9rem;
+    border-top: 1px solid var(--navy-line);
+    font-family: var(--font-mono);
+    font-size: 0.7rem;
+    letter-spacing: 0.06em;
+    color: var(--muted);
+  }
+  .roadmap-switch:hover { color: var(--cyan); }
+  .roadmap-label {
+    font-family: var(--font-mono);
+    font-size: 0.62rem;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--cyan);
+    margin: 0 0 0.5rem;
+  }
   .track-links { list-style: none; display: flex; flex-direction: column; gap: 0.15rem; }
   .track-links a {
     display: block;
