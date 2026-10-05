@@ -95,7 +95,10 @@ Function.prototype.myBind = function (thisArg, ...preset) {
   if (typeof this !== 'function') throw new TypeError('Bind must be called on a function');
   const fn = this;
   function bound(...later) {
-    if (new.target) return new fn(...preset, ...later); // called with new
+    // `new.target` is set only when bound is called as `new bound()`.
+    // `new` must create a fresh instance, so the bound `thisArg` is ignored
+    // and the original function is constructed instead (preset args still apply).
+    if (new.target) return new fn(...preset, ...later);
     const ctx = thisArg == null ? globalThis : Object(thisArg);
     const key = Symbol('fn');
     ctx[key] = fn;
@@ -103,6 +106,10 @@ Function.prototype.myBind = function (thisArg, ...preset) {
     delete ctx[key];
     return result;
   }
+  // Link prototypes so `new bound() instanceof bound` is true, as with native bind.
+  // Object.create gives bound its own prototype object that inherits from fn's
+  // (a direct assignment would share one object between the two functions).
+  // Arrow functions have no `prototype`, hence the guard.
   if (fn.prototype) bound.prototype = Object.create(fn.prototype);
   return bound;
 };
@@ -143,6 +150,7 @@ Function.prototype.myBind = function (thisArg, ...preset) {
   if (typeof this !== 'function') throw new TypeError('myBind must be called on a function');
   const fn = this;
   function bound(...later) {
+    // Called as `new bound()`: ignore the bound `thisArg` and construct the original function.
     if (new.target) return new fn(...preset, ...later);
     const ctx = thisArg == null ? globalThis : Object(thisArg);
     const key = Symbol('fn');
@@ -153,6 +161,7 @@ Function.prototype.myBind = function (thisArg, ...preset) {
       delete ctx[key];
     }
   }
+  // Keep `new bound() instanceof bound` true; arrow functions have no `prototype`.
   if (fn.prototype) bound.prototype = Object.create(fn.prototype);
   return bound;
 };
