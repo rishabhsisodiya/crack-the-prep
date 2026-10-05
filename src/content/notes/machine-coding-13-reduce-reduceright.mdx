@@ -5,7 +5,7 @@ kind: "notes"
 order: 13
 slug: "reduce-reduceright"
 imp: true
-updated: 2026-10-05
+updated: 2026-10-06
 description: "Implement Array.prototype.reduce and reduceRight — the accumulator, running with and without an initial value, sparse arrays and the empty-array TypeError."
 ---
 
@@ -144,13 +144,7 @@ Array.prototype.myReduceRight = function (cb, initial) {
 
 ## Follow-ups
 
-- *Write `map` and `filter` using only your `reduce`.* A common twist to check you understand the accumulator:
-
-  ```js
-  const map = (arr, fn) => arr.myReduce((out, x, i) => (out.push(fn(x, i, arr)), out), []);
-  const filter = (arr, fn) => arr.myReduce((out, x, i) => (fn(x, i, arr) && out.push(x), out), []);
-  ```
-
+- *Write `map` and `filter` using only your `reduce`.* Worked through in its own section below.
 - *Implement `pipe` and `compose`.* `pipe` runs functions left to right with `reduce`; `compose` runs them right to left with `reduceRight`.
 
   ```js
@@ -159,6 +153,39 @@ Array.prototype.myReduceRight = function (cb, initial) {
   ```
 
 - *Why not use arrow functions for the polyfills?* `this` must be the array the method is called on, and an arrow function has no `arguments` object of its own.
+
+### Write `map` and `filter` using only `reduce`
+
+A common twist to check you understand the accumulator. The accumulator is the output array: start it empty, add to it for each element, and return it every time.
+
+```js
+Array.prototype.myMapViaReduce = function (cb, thisArg) {
+  return this.myReduce((out, x, i, arr) => {
+    out[i] = cb.call(thisArg, x, i, arr);
+    return out;
+  }, new Array(this.length));
+};
+
+Array.prototype.myFilterViaReduce = function (cb, thisArg) {
+  return this.myReduce((out, x, i, arr) => {
+    if (cb.call(thisArg, x, i, arr)) out.push(x);
+    return out;
+  }, []);
+};
+
+[1, 2, 3].myMapViaReduce((x) => x * 2);                 // [2, 4, 6]
+[1, 2, 3, 4].myFilterViaReduce((x) => x % 2 === 0);     // [2, 4]
+```
+
+The points an interviewer looks for:
+
+- **Pass the initial value.** Without `[]`, the first element becomes the accumulator and `out.push` fails on a number.
+- **Return the accumulator from every call.** Whatever the callback returns is the next `out`. Forget the `return` and `out` is `undefined` on the second element. `push` returns the new length, not the array, so `return out.push(x)` is wrong too.
+- **Mutate the accumulator instead of copying it.** `[...out, x]` works but copies the array on every step, which is O(n²). The accumulator is a new array that nobody else holds, so pushing to it is safe.
+- **Forward `index` and `array`** to the user's callback, and use `cb.call(thisArg, …)`, so the result behaves like the real `map` and `filter`.
+- **Holes.** `reduce` skips holes, so `out.push` in the `map` version would close them up. Starting from `new Array(this.length)` and assigning `out[i]` keeps each result at its original index, as the built-in `map` does.
+
+The inner callbacks are arrow functions on purpose: they need `cb` and `thisArg` from the outer function.
 
 <Callout type="tip">
 Say the empty-array rule out loud before you code it. Interviewers ask for `reduce` mostly to see whether you know what happens with no initial value.

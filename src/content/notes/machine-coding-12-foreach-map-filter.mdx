@@ -5,8 +5,8 @@ kind: "notes"
 order: 12
 slug: "foreach-map-filter"
 imp: true
-updated: 2026-10-05
-description: "Implement Array.prototype.forEach, map and filter — the callback arguments, thisArg, sparse arrays, and why forEach cannot stop early."
+updated: 2026-10-06
+description: "Implement Array.prototype.forEach, map and filter — the callback arguments, thisArg, sparse arrays, why forEach cannot stop early, and why await inside forEach does not wait."
 ---
 
 import Callout from '../../components/Callout.astro';
@@ -129,9 +129,79 @@ Array.prototype.myFilter = function (cb, thisArg) {
 ## Follow-ups
 
 - *How do you stop `forEach` early?* You cannot — `return` only ends the current callback, and `break` is a syntax error there. Use a `for...of` loop, or `some` / `every`, which stop on their own.
-- *Why does `await` inside `forEach` not wait?* `forEach` ignores what the callback returns, including a promise, so every callback starts at once and the code after the loop runs first. Use `for...of` with `await`, or `Promise.all` over `map`.
 - *What is the difference between `forEach` and `map`?* `map` returns a new array of the results. `forEach` returns `undefined`.
-- *Write `map` and `filter` using only `reduce`.* See [reduce and reduceRight](/machine-coding/reduce-reduceright).
+- *Write `map` and `filter` using only `reduce`.* Worked through on the [reduce and reduceRight](/machine-coding/reduce-reduceright#write-map-and-filter-using-only-reduce) page.
+
+### Why `await` inside `forEach` does not wait
+
+This is asked often enough to prepare on its own. What does this log?
+
+```js
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+async function run() {
+  [1, 2, 3].forEach(async (n) => {
+    await sleep(100);
+    console.log(n);
+  });
+  console.log('done');
+}
+
+run(); // done, 1, 2, 3
+```
+
+`done` is logged first, and then `1`, `2`, `3` arrive together after 100 ms — not one every 100 ms.
+
+The polyfill shows why. The whole loop body is this line:
+
+```js
+if (i in this) cb.call(thisArg, this[i], i, this);
+```
+
+- The return value of the callback is thrown away. An `async` callback returns a promise as soon as it reaches its first `await`, and `forEach` drops that promise and moves to the next element.
+- `await` only pauses the function it is written in. Here that is the callback, not `run`, so `run` carries on to `console.log('done')`.
+- Nothing is holding the promises, so a `try...catch` around the `forEach` cannot catch an error thrown after an `await`. It becomes an unhandled rejection.
+
+The fix depends on whether the work should run one item at a time or all together.
+
+```js
+// One after another: 1, 2, 3 at 100 ms intervals, then done
+async function inSequence() {
+  for (const n of [1, 2, 3]) {
+    await sleep(100);
+    console.log(n);
+  }
+  console.log('done');
+}
+
+// All at once: 1, 2, 3 together after 100 ms, then done
+async function inParallel() {
+  await Promise.all([1, 2, 3].map(async (n) => {
+    await sleep(100);
+    console.log(n);
+  }));
+  console.log('done');
+}
+```
+
+`map` works where `forEach` does not because it keeps what the callback returns, so `Promise.all` has the promises to wait for.
+
+A common next question is to write a `forEach` that does wait. Make the method itself `async` and `await` each call:
+
+```js
+Array.prototype.myForEachAsync = async function (cb, thisArg) {
+  const len = this.length;
+  for (let i = 0; i < len; i++) {
+    if (i in this) await cb.call(thisArg, this[i], i, this);
+  }
+};
+
+await [1, 2, 3].myForEachAsync(async (n) => {
+  await sleep(100);
+  console.log(n);
+});
+console.log('done'); // 1, 2, 3, done
+```
 
 <Callout type="tip">
 If you are asked for only one of these, write `map`. It shows every rule on this page: the three callback arguments, `thisArg`, holes, and the cached length.
@@ -148,4 +218,5 @@ If you are asked for only one of these, write `map`. It shows every rule on this
 ## Related
 
 - Concepts: [call, apply and bind](/javascript/15-call-apply-and-bind-method) in the JavaScript track, for how `cb.call(thisArg, …)` sets `this`.
+- `sleep` used in the async example: [sleep and timeout](/machine-coding/sleep-timeout).
 - Next: [reduce and reduceRight](/machine-coding/reduce-reduceright).

@@ -95,6 +95,32 @@ export const tests = {
         assert.throws(() => [1][method](), TypeError);
         assert.throws(() => [][method]('nope'), TypeError);
       }
+
+      // await inside forEach does not wait; for...of, Promise.all over map and an async forEach do
+      const tick = () => new Promise((resolve) => setTimeout(resolve, 5));
+      let order = [];
+      [1, 2, 3].myForEach(async (n) => { await tick(); order.push(n); });
+      order.push('done');
+      assert.deepEqual(order, ['done']);
+      await tick(); await tick();
+      assert.deepEqual(order, ['done', 1, 2, 3]);
+
+      order = [];
+      await Promise.all([1, 2, 3].myMap(async (n) => { await tick(); order.push(n); }));
+      order.push('done');
+      assert.deepEqual(order, [1, 2, 3, 'done']);
+
+      const myForEachAsync = async function (cb, thisArg) {
+        const len = this.length;
+        for (let i = 0; i < len; i++) {
+          if (i in this) await cb.call(thisArg, this[i], i, this);
+        }
+      };
+      order = [];
+      // eslint-disable-next-line no-sparse-arrays
+      await myForEachAsync.call([3, , 1], async (n) => { await tick(); order.push(n); });
+      order.push('done');
+      assert.deepEqual(order, [3, 1, 'done']);
     },
   },
   'reduce-reduceright': {
@@ -154,10 +180,36 @@ export const tests = {
       const compose = (...fns) => (x) => fns.myReduceRight((v, fn) => fn(v), x);
       assert.equal(pipe((n) => n + 1, (n) => n * 2)(5), 12);
       assert.equal(compose((n) => n + 1, (n) => n * 2)(5), 11);
-      const map = (arr, fn) => arr.myReduce((out, x, i) => (out.push(fn(x, i, arr)), out), []);
-      const filter = (arr, fn) => arr.myReduce((out, x, i) => (fn(x, i, arr) && out.push(x), out), []);
+      const mapViaReduce = function (cb, thisArg) {
+        return this.myReduce((out, x, i, arr) => {
+          out[i] = cb.call(thisArg, x, i, arr);
+          return out;
+        }, new Array(this.length));
+      };
+      const filterViaReduce = function (cb, thisArg) {
+        return this.myReduce((out, x, i, arr) => {
+          if (cb.call(thisArg, x, i, arr)) out.push(x);
+          return out;
+        }, []);
+      };
+      const map = (arr, ...args) => mapViaReduce.apply(arr, args);
+      const filter = (arr, ...args) => filterViaReduce.apply(arr, args);
       assert.deepEqual(map([1, 2, 3], (x) => x * 2), [2, 4, 6]);
       assert.deepEqual(filter([1, 2, 3, 4], (x) => x % 2 === 0), [2, 4]);
+      assert.deepEqual(map([], (x) => x), []);
+      assert.deepEqual(filter([], () => true), []);
+      assert.deepEqual(map(['a', 'b'], (x, i, arr) => x + i + arr.length), ['a02', 'b12']);
+      assert.deepEqual(filter(['a', 'b', 'c'], (x, i) => i !== 1), ['a', 'c']);
+      const factor = { k: 10 };
+      assert.deepEqual(map([1, 2], function (x) { return x * this.k; }, factor), [10, 20]);
+      assert.deepEqual(filter([5, 15], function (x) { return x > this.k; }, factor), [15]);
+      // eslint-disable-next-line no-sparse-arrays
+      const viaReduce = map([1, , 3], (x) => x * 2);
+      assert.equal(viaReduce.length, 3);
+      assert.equal(1 in viaReduce, false);
+      assert.deepEqual([viaReduce[0], viaReduce[2]], [2, 6]);
+      // eslint-disable-next-line no-sparse-arrays
+      assert.deepEqual(filter([1, , 3], () => true), [1, 3]);
     },
   },
   'find-some-every': {
