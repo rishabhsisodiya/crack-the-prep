@@ -1,0 +1,151 @@
+---
+title: "Polyfill: forEach, map and filter"
+track: "machine-coding"
+kind: "notes"
+order: 12
+slug: "foreach-map-filter"
+imp: true
+updated: 2026-10-05
+description: "Implement Array.prototype.forEach, map and filter — the callback arguments, thisArg, sparse arrays, and why forEach cannot stop early."
+---
+
+import Callout from '../../components/Callout.astro';
+
+## Problem
+
+Implement `myForEach`, `myMap` and `myFilter` on `Array.prototype`, matching the built-ins:
+
+```js
+[1, 2, 3].myForEach((x) => console.log(x));    // logs 1, 2, 3 — returns undefined
+[1, 2, 3].myMap((x) => x * 2);                 // [2, 4, 6]
+[1, 2, 3, 4].myFilter((x) => x % 2 === 0);     // [2, 4]
+```
+
+## Clarifying questions
+
+- Does the callback receive `(element, index, array)`? *Yes, all three.*
+- Should the methods accept a `thisArg`? *Yes, the built-ins do.*
+- Should holes in sparse arrays (`[1, , 3]`) be skipped? *Yes — the built-ins skip them.*
+- What does `forEach` return? *`undefined`. It exists only for side effects.*
+- Should the original array be mutated? *No. `map` and `filter` return a new array.*
+
+## Approach
+
+All three are the same loop with a different thing done to the callback's result. Loop over the indices, skip holes with `i in this`, and call the callback with the element, its index and the array:
+
+- `forEach` ignores the result.
+- `map` stores the result at the same index of a new array.
+- `filter` keeps the element when the result is truthy.
+
+## Step-by-step build
+
+### Step 1 — myForEach
+
+```js
+Array.prototype.myForEach = function (cb, thisArg) {
+  for (let i = 0; i < this.length; i++) {
+    if (i in this) cb.call(thisArg, this[i], i, this);
+  }
+};
+```
+
+There is no `return`, so the method returns `undefined`.
+
+### Step 2 — myMap
+
+```js
+Array.prototype.myMap = function (cb, thisArg) {
+  const out = new Array(this.length);
+  for (let i = 0; i < this.length; i++) {
+    if (i in this) out[i] = cb.call(thisArg, this[i], i, this);
+  }
+  return out;
+};
+```
+
+Assigning to `out[i]` instead of pushing keeps holes as holes and keeps every result at its original index.
+
+### Step 3 — myFilter
+
+```js
+Array.prototype.myFilter = function (cb, thisArg) {
+  const out = [];
+  for (let i = 0; i < this.length; i++) {
+    if (i in this && cb.call(thisArg, this[i], i, this)) out.push(this[i]);
+  }
+  return out;
+};
+```
+
+### Step 4 — validate the callback and read the length once
+
+```js
+if (typeof cb !== 'function') throw new TypeError(cb + ' is not a function');
+const len = this.length;
+```
+
+The built-ins read `length` once, before the loop starts. Caching it gives the same behaviour when the callback adds elements.
+
+## Final code
+
+```js
+Array.prototype.myForEach = function (cb, thisArg) {
+  if (typeof cb !== 'function') throw new TypeError(cb + ' is not a function');
+  const len = this.length;
+  for (let i = 0; i < len; i++) {
+    if (i in this) cb.call(thisArg, this[i], i, this);
+  }
+};
+
+Array.prototype.myMap = function (cb, thisArg) {
+  if (typeof cb !== 'function') throw new TypeError(cb + ' is not a function');
+  const len = this.length;
+  const out = new Array(len);
+  for (let i = 0; i < len; i++) {
+    if (i in this) out[i] = cb.call(thisArg, this[i], i, this);
+  }
+  return out;
+};
+
+Array.prototype.myFilter = function (cb, thisArg) {
+  if (typeof cb !== 'function') throw new TypeError(cb + ' is not a function');
+  const len = this.length;
+  const out = [];
+  for (let i = 0; i < len; i++) {
+    if (i in this && cb.call(thisArg, this[i], i, this)) out.push(this[i]);
+  }
+  return out;
+};
+```
+
+## Edge cases
+
+- Sparse arrays: `[1, , 3].myMap(f)` keeps the hole and never calls `f` for index 1. `myForEach` and `myFilter` skip it too.
+- The callback pushes to the array while looping: elements added later are not visited, because `len` was read before the loop.
+- The callback deletes an element that has not been visited yet: it is skipped, because `i in this` is checked on every iteration.
+- An empty array: the callback is never called. `myMap` and `myFilter` return `[]`.
+- `thisArg` is ignored when the callback is an arrow function, as with the built-ins.
+
+## Follow-ups
+
+- *How do you stop `forEach` early?* You cannot — `return` only ends the current callback, and `break` is a syntax error there. Use a `for...of` loop, or `some` / `every`, which stop on their own.
+- *Why does `await` inside `forEach` not wait?* `forEach` ignores what the callback returns, including a promise, so every callback starts at once and the code after the loop runs first. Use `for...of` with `await`, or `Promise.all` over `map`.
+- *What is the difference between `forEach` and `map`?* `map` returns a new array of the results. `forEach` returns `undefined`.
+- *Write `map` and `filter` using only `reduce`.* See [reduce and reduceRight](/machine-coding/reduce-reduceright).
+
+<Callout type="tip">
+If you are asked for only one of these, write `map`. It shows every rule on this page: the three callback arguments, `thisArg`, holes, and the cached length.
+</Callout>
+
+## Common mistakes
+
+- Using `push` in `map`, which collapses holes and shifts indices.
+- Returning the array from `forEach` — the built-in returns `undefined`, so it cannot be chained.
+- Forgetting the `index` and `array` arguments to the callback.
+- Ignoring `thisArg`.
+- Writing the polyfill as an arrow function, which loses `this` (the array the method was called on).
+
+## Related
+
+- Concepts: [call, apply and bind](/javascript/15-call-apply-and-bind-method) in the JavaScript track, for how `cb.call(thisArg, …)` sets `this`.
+- Next: [reduce and reduceRight](/machine-coding/reduce-reduceright).

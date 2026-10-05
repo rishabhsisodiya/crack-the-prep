@@ -180,4 +180,4 @@ console.log(pipe(n => n + 1, n => n * 2)(5));
 // 12
 ```
 
-> **Interview practice:** Interview version with sparse arrays, `thisArg` and the empty-array rule: [Machine Coding — map, filter and reduce](/machine-coding/map-filter-reduce).
+> **Interview practice:** Interview version with sparse arrays, a missing initial value and the empty-array rule: [Machine Coding — reduce and reduceRight](/machine-coding/reduce-reduceright).

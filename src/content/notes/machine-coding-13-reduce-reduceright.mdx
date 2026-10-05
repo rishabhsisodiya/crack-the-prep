@@ -1,0 +1,179 @@
+---
+title: "Polyfill: reduce and reduceRight"
+track: "machine-coding"
+kind: "notes"
+order: 13
+slug: "reduce-reduceright"
+imp: true
+updated: 2026-10-05
+description: "Implement Array.prototype.reduce and reduceRight — the accumulator, running with and without an initial value, sparse arrays and the empty-array TypeError."
+---
+
+import Callout from '../../components/Callout.astro';
+
+## Problem
+
+Implement `myReduce` and `myReduceRight` on `Array.prototype`, matching the built-ins:
+
+```js
+[1, 2, 3].myReduce((sum, x) => sum + x, 0);         // 6
+[1, 2, 3].myReduce((sum, x) => sum + x);            // 6 (no initial value)
+['a', 'b', 'c'].myReduceRight((s, x) => s + x, ''); // 'cba'
+['a', 'b', 'c'].myReduceRight((s, x) => s + x);     // 'cba' (no initial value)
+```
+
+## Clarifying questions
+
+- What does the callback receive? *`(accumulator, element, index, array)`.*
+- Is the initial value optional? *Yes. Without it, the first element (the last one for `reduceRight`) becomes the accumulator.*
+- What should happen on an empty array with no initial value? *Throw a `TypeError`.*
+- Should holes in sparse arrays (`[1, , 3]`) be skipped? *Yes — the built-ins skip them.*
+- Is there a `thisArg`? *No. Unlike `map` and `filter`, `reduce` does not take one.*
+
+## Approach
+
+Keep one value, the accumulator, and replace it with the callback's result for every element. The only real decision is where the accumulator starts:
+
+- An initial value was passed: start with it and visit every element.
+- No initial value: the first existing element becomes the accumulator and the loop starts after it. If there is no element at all, throw.
+
+Check `arguments.length` rather than `initial === undefined`, because `undefined` is a legitimate initial value. `reduceRight` is the same logic walking from the last index down to 0.
+
+## Step-by-step build
+
+### Step 1 — myReduce with an initial value
+
+```js
+Array.prototype.myReduce = function (cb, initial) {
+  let acc = initial;
+  for (let i = 0; i < this.length; i++) {
+    if (i in this) acc = cb(acc, this[i], i, this);
+  }
+  return acc;
+};
+```
+
+### Step 2 — support a missing initial value
+
+```js
+Array.prototype.myReduce = function (cb, initial) {
+  let i = 0;
+  let acc = initial;
+  if (arguments.length < 2) {
+    while (i < this.length && !(i in this)) i++;   // find the first real element
+    if (i >= this.length) throw new TypeError('Reduce of empty array with no initial value');
+    acc = this[i++];
+  }
+  for (; i < this.length; i++) {
+    if (i in this) acc = cb(acc, this[i], i, this);
+  }
+  return acc;
+};
+```
+
+### Step 3 — myReduceRight
+
+Mirror every index: start at `length - 1`, search downwards for the first real element, and loop while `i >= 0`.
+
+```js
+Array.prototype.myReduceRight = function (cb, initial) {
+  let i = this.length - 1;
+  let acc = initial;
+  if (arguments.length < 2) {
+    while (i >= 0 && !(i in this)) i--;            // find the last real element
+    if (i < 0) throw new TypeError('Reduce of empty array with no initial value');
+    acc = this[i--];
+  }
+  for (; i >= 0; i--) {
+    if (i in this) acc = cb(acc, this[i], i, this);
+  }
+  return acc;
+};
+```
+
+### Step 4 — validate the callback and read the length once
+
+```js
+if (typeof cb !== 'function') throw new TypeError(cb + ' is not a function');
+const len = this.length;
+```
+
+## Final code
+
+```js
+Array.prototype.myReduce = function (cb, initial) {
+  if (typeof cb !== 'function') throw new TypeError(cb + ' is not a function');
+  const len = this.length;
+  let i = 0;
+  let acc = initial;
+  if (arguments.length < 2) {
+    while (i < len && !(i in this)) i++;
+    if (i >= len) throw new TypeError('Reduce of empty array with no initial value');
+    acc = this[i++];
+  }
+  for (; i < len; i++) {
+    if (i in this) acc = cb(acc, this[i], i, this);
+  }
+  return acc;
+};
+
+Array.prototype.myReduceRight = function (cb, initial) {
+  if (typeof cb !== 'function') throw new TypeError(cb + ' is not a function');
+  let i = this.length - 1;
+  let acc = initial;
+  if (arguments.length < 2) {
+    while (i >= 0 && !(i in this)) i--;
+    if (i < 0) throw new TypeError('Reduce of empty array with no initial value');
+    acc = this[i--];
+  }
+  for (; i >= 0; i--) {
+    if (i in this) acc = cb(acc, this[i], i, this);
+  }
+  return acc;
+};
+```
+
+## Edge cases
+
+- An empty array with no initial value throws; with an initial value it returns that value and never calls the callback.
+- A single element with no initial value is returned as-is, and the callback is never called.
+- `undefined` as the explicit initial value must be used — hence `arguments.length`.
+- Sparse arrays: holes are skipped, including when looking for the starting element. `[, 1, 2].myReduce(f)` starts with `1`.
+- An array of only holes with no initial value throws, the same as an empty array.
+- The callback pushes to the array while looping: the built-in reads `length` once at the start, so elements added later are not visited. Caching `len` gives the same behaviour.
+
+## Follow-ups
+
+- *Write `map` and `filter` using only your `reduce`.* A common twist to check you understand the accumulator:
+
+  ```js
+  const map = (arr, fn) => arr.myReduce((out, x, i) => (out.push(fn(x, i, arr)), out), []);
+  const filter = (arr, fn) => arr.myReduce((out, x, i) => (fn(x, i, arr) && out.push(x), out), []);
+  ```
+
+- *Implement `pipe` and `compose`.* `pipe` runs functions left to right with `reduce`; `compose` runs them right to left with `reduceRight`.
+
+  ```js
+  const pipe = (...fns) => (x) => fns.myReduce((v, fn) => fn(v), x);
+  const compose = (...fns) => (x) => fns.myReduceRight((v, fn) => fn(v), x);
+  ```
+
+- *Why not use arrow functions for the polyfills?* `this` must be the array the method is called on, and an arrow function has no `arguments` object of its own.
+
+<Callout type="tip">
+Say the empty-array rule out loud before you code it. Interviewers ask for `reduce` mostly to see whether you know what happens with no initial value.
+</Callout>
+
+## Common mistakes
+
+- `if (!initial)` instead of checking whether it was passed — breaks `reduce(fn, 0)`.
+- Starting the loop at index 0 when no initial value was passed, which counts the first element twice.
+- Returning `undefined` for an empty array instead of throwing.
+- Passing `thisArg` to the callback — `reduce` has no such parameter.
+- In `reduceRight`, looping while `i > 0` and missing index 0.
+
+## Related
+
+- Concepts: [reduce polyfill](/javascript/17-polyfill-reduce) in the JavaScript track.
+- Previous: [forEach, map and filter](/machine-coding/foreach-map-filter).
+- Next: [find, findIndex, some and every](/machine-coding/find-some-every).

@@ -38,21 +38,297 @@ export const tests = {
       assert.throws(() => Function.prototype.myBind.call({}), TypeError);
     },
   },
-  'map-filter-reduce': {
+  'foreach-map-filter': {
     names: [],
     async run() {
+      const seen = [];
+      const src = ['a', 'b'];
+      assert.equal(src.myForEach((x, i, arr) => seen.push([x, i, arr === src])), undefined);
+      assert.deepEqual(seen, [['a', 0, true], ['b', 1, true]]);
       assert.deepEqual([1, 2, 3].myMap((x) => x * 2), [2, 4, 6]);
+      assert.deepEqual([1, 2, 3].myMap((x, i, arr) => x + i + arr.length), [4, 6, 8]);
       assert.deepEqual([1, 2, 3, 4].myFilter((x) => x % 2 === 0), [2, 4]);
-      assert.equal([1, 2, 3].myReduce((s, x) => s + x, 0), 6);
-      assert.equal([1, 2, 3].myReduce((s, x) => s + x), 6);
-      assert.throws(() => [].myReduce((a, b) => a + b), TypeError);
-      assert.equal([].myReduce((a, b) => a + b, 7), 7);
+      assert.deepEqual(['a', 'b', 'c'].myFilter((x, i) => i !== 1), ['a', 'c']);
+
+      // holes are skipped; map keeps them as holes
       let calls = 0;
       // eslint-disable-next-line no-sparse-arrays
       const mapped = [1, , 3].myMap((x) => (calls++, x));
       assert.equal(calls, 2);
       assert.equal(1 in mapped, false);
+      assert.equal(mapped.length, 3);
+      calls = 0;
+      // eslint-disable-next-line no-sparse-arrays
+      [1, , 3].myForEach(() => calls++);
+      assert.equal(calls, 2);
+      // eslint-disable-next-line no-sparse-arrays
+      assert.deepEqual([1, , 3].myFilter(() => true), [1, 3]);
+
+      // thisArg
+      const ctx = { k: 10 };
+      const withThis = [];
+      [1].myForEach(function (x) { withThis.push(x * this.k); }, ctx);
+      assert.deepEqual(withThis, [10]);
+      assert.deepEqual([1, 2].myMap(function (x) { return x * this.k; }, ctx), [10, 20]);
+      assert.deepEqual([5, 15].myFilter(function (x) { return x > this.k; }, ctx), [15]);
+
+      // length is read once: elements pushed by the callback are not visited
+      const growing = [1, 2];
+      calls = 0;
+      growing.myForEach((x) => { calls++; growing.push(x); });
+      assert.equal(calls, 2);
+      // ...but an element deleted before its turn is skipped
+      const shrinking = [1, 2, 3];
+      const visited = [];
+      shrinking.myForEach((x) => { visited.push(x); delete shrinking[2]; });
+      assert.deepEqual(visited, [1, 2]);
+
+      // empty array, input not mutated
+      assert.deepEqual([].myMap((x) => x), []);
+      assert.deepEqual([].myFilter(() => true), []);
+      const input = [1, 2, 3];
+      input.myMap((x) => x * 2);
+      input.myFilter(() => false);
+      assert.deepEqual(input, [1, 2, 3]);
+
+      for (const method of ['myForEach', 'myMap', 'myFilter']) {
+        assert.throws(() => [1][method](), TypeError);
+        assert.throws(() => [][method]('nope'), TypeError);
+      }
+    },
+  },
+  'reduce-reduceright': {
+    names: [],
+    async run() {
+      assert.equal([1, 2, 3].myReduce((s, x) => s + x, 0), 6);
+      assert.equal([1, 2, 3].myReduce((s, x) => s + x), 6);
+      assert.equal(['a', 'b', 'c'].myReduceRight((s, x) => s + x, ''), 'cba');
+      assert.equal(['a', 'b', 'c'].myReduceRight((s, x) => s + x), 'cba');
+
+      // callback arguments, with and without an initial value
+      const src = ['a', 'b', 'c'];
+      const log = (acc, x, i, arr) => [...acc, [x, i, arr === src]];
+      assert.deepEqual(src.myReduce(log, []), [['a', 0, true], ['b', 1, true], ['c', 2, true]]);
+      assert.deepEqual(src.myReduceRight(log, []), [['c', 2, true], ['b', 1, true], ['a', 0, true]]);
+      const indices = [];
+      src.myReduce((acc, x, i) => (indices.push(i), acc));
+      assert.deepEqual(indices, [1, 2]);
+      indices.length = 0;
+      src.myReduceRight((acc, x, i) => (indices.push(i), acc));
+      assert.deepEqual(indices, [1, 0]);
+
+      // empty array and single element
+      for (const method of ['myReduce', 'myReduceRight']) {
+        assert.throws(() => [][method]((a, b) => a + b), TypeError);
+        assert.equal([][method]((a, b) => a + b, 7), 7);
+        let calls = 0;
+        assert.equal([5][method](() => calls++), 5);
+        assert.equal(calls, 0);
+        // eslint-disable-next-line no-sparse-arrays
+        assert.throws(() => [, , ,][method]((a, b) => a + b), TypeError);
+        assert.throws(() => [1][method](), TypeError);
+        assert.throws(() => [1][method]('nope', 0), TypeError);
+      }
+
+      // an explicit undefined initial value is used
       assert.equal([undefined].myReduce((a, x) => a + String(x), 'u:'), 'u:undefined');
+      assert.equal(['x'].myReduce((a, x) => String(a) + x, undefined), 'undefinedx');
+      assert.equal(['x'].myReduceRight((a, x) => String(a) + x, undefined), 'undefinedx');
+
+      // holes are skipped, including when picking the starting element
+      // eslint-disable-next-line no-sparse-arrays
+      assert.equal([, 1, , 2].myReduce((s, x) => s + x), 3);
+      // eslint-disable-next-line no-sparse-arrays
+      assert.equal([1, , 2, ,].myReduceRight((s, x) => s + x), 3);
+      let calls = 0;
+      // eslint-disable-next-line no-sparse-arrays
+      [1, , 3].myReduce((s) => (calls++, s), 0);
+      assert.equal(calls, 2);
+
+      // length is read once
+      const growing = [1, 2];
+      assert.equal(growing.myReduce((s, x) => (growing.push(9), s + x), 0), 3);
+
+      // the follow-ups on the page
+      const pipe = (...fns) => (x) => fns.myReduce((v, fn) => fn(v), x);
+      const compose = (...fns) => (x) => fns.myReduceRight((v, fn) => fn(v), x);
+      assert.equal(pipe((n) => n + 1, (n) => n * 2)(5), 12);
+      assert.equal(compose((n) => n + 1, (n) => n * 2)(5), 11);
+      const map = (arr, fn) => arr.myReduce((out, x, i) => (out.push(fn(x, i, arr)), out), []);
+      const filter = (arr, fn) => arr.myReduce((out, x, i) => (fn(x, i, arr) && out.push(x), out), []);
+      assert.deepEqual(map([1, 2, 3], (x) => x * 2), [2, 4, 6]);
+      assert.deepEqual(filter([1, 2, 3, 4], (x) => x % 2 === 0), [2, 4]);
+    },
+  },
+  'find-some-every': {
+    names: [],
+    async run() {
+      const nums = [5, 12, 8, 130];
+      const big = (x) => x > 10;
+      assert.equal(nums.myFind(big), 12);
+      assert.equal(nums.myFindIndex(big), 1);
+      assert.equal(nums.myFindLast(big), 130);
+      assert.equal(nums.myFindLastIndex(big), 3);
+      assert.equal(nums.mySome((x) => x > 100), true);
+      assert.equal(nums.myEvery((x) => x > 100), false);
+      assert.equal(nums.mySome((x) => x > 1000), false);
+      assert.equal(nums.myEvery((x) => x > 1), true);
+
+      // nothing matches
+      const never = () => false;
+      assert.equal(nums.myFind(never), undefined);
+      assert.equal(nums.myFindLast(never), undefined);
+      assert.equal(nums.myFindIndex(never), -1);
+      assert.equal(nums.myFindLastIndex(never), -1);
+
+      // empty array: the callback never runs
+      let calls = 0;
+      const count = () => (calls++, true);
+      assert.equal([].myFind(count), undefined);
+      assert.equal([].myFindLast(count), undefined);
+      assert.equal([].myFindIndex(count), -1);
+      assert.equal([].myFindLastIndex(count), -1);
+      assert.equal([].mySome(count), false);
+      assert.equal([].myEvery(() => (calls++, false)), true);
+      assert.equal(calls, 0);
+
+      // short-circuit: stop at the deciding element
+      const visitedBy = (method, cb) => {
+        const visited = [];
+        [1, 2, 3, 4][method]((x) => (visited.push(x), cb(x)));
+        return visited;
+      };
+      assert.deepEqual(visitedBy('myFind', (x) => x === 2), [1, 2]);
+      assert.deepEqual(visitedBy('myFindIndex', (x) => x === 2), [1, 2]);
+      assert.deepEqual(visitedBy('myFindLast', (x) => x === 3), [4, 3]);
+      assert.deepEqual(visitedBy('myFindLastIndex', (x) => x === 3), [4, 3]);
+      assert.deepEqual(visitedBy('mySome', (x) => x === 2), [1, 2]);
+      assert.deepEqual(visitedBy('myEvery', (x) => x < 2), [1, 2]);
+
+      // callback arguments and thisArg
+      const src = ['a', 'b'];
+      const ctx = { want: 'b' };
+      for (const method of ['myFind', 'myFindIndex', 'myFindLast', 'myFindLastIndex', 'mySome', 'myEvery']) {
+        const seen = [];
+        src[method]((x, i, arr) => (seen.push([x, i, arr === src]), method === 'myEvery'));
+        seen.sort((p, q) => p[1] - q[1]);
+        assert.deepEqual(seen, [['a', 0, true], ['b', 1, true]], method);
+        assert.throws(() => [1][method](), TypeError);
+        assert.throws(() => [][method]('nope'), TypeError);
+      }
+      assert.equal(src.myFind(function (x) { return x === this.want; }, ctx), 'b');
+      assert.equal(src.myFindIndex(function (x) { return x === this.want; }, ctx), 1);
+      assert.equal(src.myFindLast(function (x) { return x === this.want; }, ctx), 'b');
+      assert.equal(src.myFindLastIndex(function (x) { return x === this.want; }, ctx), 1);
+      assert.equal(src.mySome(function (x) { return x === this.want; }, ctx), true);
+      assert.equal(src.myEvery(function (x) { return x !== this.want; }, ctx), false);
+
+      // holes: the find family visits them as undefined, some and every skip them
+      const isUndef = (x) => x === undefined;
+      // eslint-disable-next-line no-sparse-arrays
+      const sparse = [1, , 3];
+      assert.equal(sparse.myFindIndex(isUndef), 1);
+      assert.equal(sparse.myFindLastIndex(isUndef), 1);
+      calls = 0;
+      sparse.myFind(() => (calls++, false));
+      assert.equal(calls, 3);
+      calls = 0;
+      sparse.myFindLast(() => (calls++, false));
+      assert.equal(calls, 3);
+      assert.equal(sparse.mySome(isUndef), false);
+      assert.equal(sparse.myEvery((x) => x !== undefined), true);
+
+      // truthiness: some and every return real booleans
+      assert.equal([0, 'x'].mySome((x) => x), true);
+      assert.equal([1, 'x'].myEvery((x) => x), true);
+      assert.equal([1, ''].myEvery((x) => x), false);
+      assert.equal([0, ''].mySome((x) => x), false);
+      assert.equal([0, 7].myFind((x) => x), 7);
+
+      // find returns the element the callback was shown, even if the callback replaces it
+      const mutated = [1, 2];
+      assert.equal(mutated.myFind((x, i, arr) => { arr[i] = 99; return x === 2; }), 2);
+      assert.equal(mutated.myFindLast((x, i, arr) => { arr[i] = 0; return true; }), 99);
+
+      // length is read once
+      const growing = [1, 2];
+      calls = 0;
+      growing.myFind((x) => { calls++; growing.push(x); return false; });
+      assert.equal(calls, 2);
+
+      // the follow-up on the page
+      const every = (arr, fn) => !arr.mySome((x, i, a) => !fn(x, i, a));
+      assert.equal(every([2, 4], (x) => x % 2 === 0), true);
+      assert.equal(every([2, 5], (x) => x % 2 === 0), false);
+      assert.equal(every([], () => false), true);
+    },
+  },
+  'includes-indexof': {
+    names: [],
+    async run() {
+      assert.equal([1, 2, 3].myIncludes(2), true);
+      assert.equal([1, 2, 3].myIncludes(4), false);
+      assert.equal([1, 2, 3].myIndexOf(2), 1);
+      assert.equal([1, 2, 3].myIndexOf(4), -1);
+      assert.equal([1, 2, 1].myIndexOf(1), 0); // first match
+      assert.equal([1, 2, 3].myIncludes(1), true); // index 0 is still true
+
+      // NaN and signed zero
+      assert.equal([NaN].myIncludes(NaN), true);
+      assert.equal([NaN].myIndexOf(NaN), -1);
+      assert.equal([1, 2].myIncludes(NaN), false);
+      assert.equal([-0].myIncludes(0), true);
+      assert.equal([0].myIncludes(-0), true);
+      assert.equal([-0].myIndexOf(0), 0);
+
+      // no coercion, objects by reference
+      assert.equal([1, 2].myIncludes('1'), false);
+      assert.equal([1, 2].myIndexOf('1'), -1);
+      assert.equal([null].myIncludes(undefined), false);
+      const obj = { a: 1 };
+      assert.equal([obj].myIncludes(obj), true);
+      assert.equal([obj].myIndexOf(obj), 0);
+      assert.equal([{ a: 1 }].myIncludes({ a: 1 }), false);
+      assert.equal([{ a: 1 }].myIndexOf({ a: 1 }), -1);
+
+      // holes: includes reads undefined, indexOf skips
+      // eslint-disable-next-line no-sparse-arrays
+      const sparse = [1, , 3];
+      assert.equal(sparse.myIncludes(undefined), true);
+      assert.equal(sparse.myIndexOf(undefined), -1);
+      assert.equal([1, undefined].myIncludes(undefined), true);
+      assert.equal([1, undefined].myIndexOf(undefined), 1);
+
+      // empty array
+      assert.equal([].myIncludes(undefined), false);
+      assert.equal([].myIndexOf(undefined), -1);
+
+      // fromIndex
+      const arr = [1, 2, 3, 2];
+      assert.equal(arr.myIndexOf(2, 2), 3);
+      assert.equal(arr.myIndexOf(1, 1), -1);
+      assert.equal(arr.myIncludes(1, 1), false);
+      assert.equal(arr.myIncludes(3, 2), true);
+      assert.equal([1, 2, 3].myIncludes(1, -2), false);
+      assert.equal([1, 2, 3].myIncludes(2, -2), true);
+      assert.equal([1, 2, 3].myIndexOf(3, -1), 2);
+      assert.equal([1, 2, 3].myIndexOf(1, -1), -1);
+      assert.equal([1, 2, 3].myIncludes(1, -100), true); // past the start: search everything
+      assert.equal([1, 2, 3].myIndexOf(1, -100), 0);
+      for (const from of [3, 4, Infinity]) {
+        assert.equal([1, 2, 3].myIncludes(3, from), false);
+        assert.equal([1, 2, 3].myIndexOf(3, from), -1);
+      }
+      assert.equal([1, 2, 3].myIncludes(1, -Infinity), true);
+      assert.equal([1, 2, 3].myIndexOf(1, -Infinity), 0);
+      // fromIndex is converted to an integer; undefined and NaN mean 0
+      for (const from of [undefined, NaN, null, 'x', 0.9, -0.9]) {
+        assert.equal([1, 2, 3].myIncludes(1, from), true);
+        assert.equal([1, 2, 3].myIndexOf(1, from), 0);
+      }
+      assert.equal([1, 2, 3].myIndexOf(1, '1'), -1);
+      assert.equal([1, 2, 3].myIndexOf(2, 1.9), 1);
+      assert.equal([1, 2, 3].myIncludes(2, -1.9), false); // truncates to -1
     },
   },
   promise: {
