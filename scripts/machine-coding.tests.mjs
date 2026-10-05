@@ -19,6 +19,12 @@ export const tests = {
       const user = { name: 'Asha' };
       assert.equal(greet.myCall(user, 'Hi', '!'), 'Hi, Asha!');
       assert.equal(greet.myApply(user, ['Hello', '.']), 'Hello, Asha.');
+      assert.equal(greet.myApply(user, { length: 2, 0: 'Yo', 1: '!' }), 'Yo, Asha!');
+      assert.equal(function () { return arguments.length; }.myApply(user), 0);
+      assert.equal(function () { return arguments.length; }.myApply(user, null), 0);
+      assert.throws(() => greet.myApply(user, 5), TypeError);
+      assert.throws(() => Function.prototype.myApply.call({}, user, []), TypeError);
+      assert.throws(() => (() => { throw new Error('boom'); }).myApply(user, []), /boom/);
       assert.equal(greet.myBind(user, 'Hey')('?'), 'Hey, Asha?');
       assert.deepEqual(Object.getOwnPropertySymbols(user), [], 'temporary key must be removed');
       function P(a, b) { this.s = a + b; }

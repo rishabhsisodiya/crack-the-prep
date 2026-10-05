@@ -53,13 +53,22 @@ Function.prototype.myCall = function (thisArg, ...args) {
 
 ### Step 2 — myApply
 
-The only difference is that arguments arrive as an array (or `null`).
+Same trick, written out in full instead of delegating to `myCall`. The only difference is that arguments arrive as one array (or `null` / `undefined`, meaning "no arguments").
 
 ```js
-Function.prototype.myApply = function (thisArg, args = []) {
-  return this.myCall(thisArg, ...(args ?? []));
+Function.prototype.myApply = function (thisArg, args) {
+  const ctx = thisArg == null ? globalThis : Object(thisArg);
+  const key = Symbol('fn');
+  ctx[key] = this;
+  const result = ctx[key](...(args ?? [])); // spread the array into real arguments
+  delete ctx[key];
+  return result;
 };
 ```
+
+<Callout type="tip">
+Once `myCall` exists, `myApply` can be the one-liner `return this.myCall(thisArg, ...(args ?? []))`. Interviewers often ask for the standalone version to check that you understand the mechanism, not just the reuse.
+</Callout>
 
 ### Step 3 — myBind with partial application
 
@@ -105,7 +114,19 @@ Function.prototype.myCall = function (thisArg, ...args) {
 };
 
 Function.prototype.myApply = function (thisArg, args) {
-  return this.myCall(thisArg, ...(args ?? []));
+  if (typeof this !== 'function') throw new TypeError('myApply must be called on a function');
+  if (args != null && typeof args !== 'object' && typeof args !== 'function') {
+    throw new TypeError('myApply expects an array or array-like as the second argument');
+  }
+  const list = args == null ? [] : Array.from(args); // accepts arrays and array-likes (e.g. `arguments`)
+  const ctx = thisArg == null ? globalThis : Object(thisArg);
+  const key = Symbol('fn');
+  ctx[key] = this;
+  try {
+    return ctx[key](...list);
+  } finally {
+    delete ctx[key];
+  }
 };
 
 Function.prototype.myBind = function (thisArg, ...preset) {
@@ -125,6 +146,7 @@ Function.prototype.myBind = function (thisArg, ...preset) {
 - `thisArg` is `null`/`undefined` → `globalThis`; a primitive → boxed with `Object()`.
 - The target object is frozen — assigning the temporary key fails. Mention it; the real `call` has no such limit because it is implemented natively.
 - The function throws → the `finally` still removes the temporary key.
+- `myApply` with `null`/`undefined` args → called with no arguments; an array-like (`arguments`, `{ length: 2, 0: 'a', 1: 'b' }`) works; a primitive such as `5` → `TypeError`, as with the native `apply`.
 - Binding twice: `f.myBind(a).myBind(b)` keeps `a` — the first bound `this` wins, as with the native `bind`.
 - Arrow functions ignore `this` entirely; all three only forward the arguments.
 
