@@ -34,7 +34,7 @@ hi('?');                                // "Hey, Asha?"
 
 ## Approach
 
-A function called as a method (`obj.fn()`) gets `this === obj`. So to call `fn` with a chosen `this`, temporarily attach it to that object under a key that cannot collide (a `Symbol`), call it, then delete the key. `apply` is the same with an array of arguments. `bind` returns a new function that remembers `this` and the first arguments, and calls the original with `apply` later.
+A function called as a method (`obj.fn()`) gets `this === obj`. So to call `fn` with a chosen `this`, temporarily attach it to that object under a key that cannot collide (a `Symbol`), call it, then delete the key. `apply` is the same with an array of arguments. `bind` returns a new function that remembers `this` and the first arguments, and runs the same attach-call-delete trick when it is finally called. Each of the three is written standalone here — none depends on the others.
 
 ## Step-by-step build
 
@@ -76,7 +76,12 @@ Once `myCall` exists, `myApply` can be the one-liner `return this.myCall(thisArg
 Function.prototype.myBind = function (thisArg, ...preset) {
   const fn = this;
   return function (...later) {
-    return fn.myApply(thisArg, [...preset, ...later]);
+    const ctx = thisArg == null ? globalThis : Object(thisArg);
+    const key = Symbol('fn');
+    ctx[key] = fn;                                 // attach at call time, not bind time
+    const result = ctx[key](...preset, ...later);  // preset arguments first, then the later ones
+    delete ctx[key];
+    return result;
   };
 };
 ```
@@ -91,7 +96,12 @@ Function.prototype.myBind = function (thisArg, ...preset) {
   const fn = this;
   function bound(...later) {
     if (new.target) return new fn(...preset, ...later); // called with new
-    return fn.myApply(thisArg, [...preset, ...later]);
+    const ctx = thisArg == null ? globalThis : Object(thisArg);
+    const key = Symbol('fn');
+    ctx[key] = fn;
+    const result = ctx[key](...preset, ...later);
+    delete ctx[key];
+    return result;
   }
   if (fn.prototype) bound.prototype = Object.create(fn.prototype);
   return bound;
@@ -134,7 +144,14 @@ Function.prototype.myBind = function (thisArg, ...preset) {
   const fn = this;
   function bound(...later) {
     if (new.target) return new fn(...preset, ...later);
-    return fn.myApply(thisArg, [...preset, ...later]);
+    const ctx = thisArg == null ? globalThis : Object(thisArg);
+    const key = Symbol('fn');
+    ctx[key] = fn;
+    try {
+      return ctx[key](...preset, ...later);
+    } finally {
+      delete ctx[key];
+    }
   }
   if (fn.prototype) bound.prototype = Object.create(fn.prototype);
   return bound;

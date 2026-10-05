@@ -26,6 +26,8 @@ export const tests = {
       assert.throws(() => Function.prototype.myApply.call({}, user, []), TypeError);
       assert.throws(() => (() => { throw new Error('boom'); }).myApply(user, []), /boom/);
       assert.equal(greet.myBind(user, 'Hey')('?'), 'Hey, Asha?');
+      assert.equal(greet.myBind(user).myBind({ name: 'Other' })('Hi', '!'), 'Hi, Asha!', 'first bound this wins');
+      assert.throws(() => (() => { throw new Error('boom'); }).myBind(user)(), /boom/);
       assert.deepEqual(Object.getOwnPropertySymbols(user), [], 'temporary key must be removed');
       function P(a, b) { this.s = a + b; }
       const BP = P.myBind({ ignored: true }, 2);
