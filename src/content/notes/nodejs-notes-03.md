@@ -304,6 +304,9 @@ All user-written synchronous JavaScript code takes priority over async code that
 8.  All callbacks in the close queue are executed.
 9.  For one final time in the same loop, the microtask queues are executed. First, tasks in the nextTick queue, and then tasks in the promise queue.
 
+> [!NOTE]
+> "nextTick first, then promises" holds inside callbacks, and at the top level of a CommonJS file. At the top level of an **ES module** the order is reversed. See [CommonJS vs ES modules](#8-commonjs-vs-es-modules-the-order-at-the-top-level) below.
+
 If there are more callbacks to be processed at this point, the loop is kept alive for one more run, and the same steps are repeated. On the other hand, if all callbacks are executed and there is no more code to process, the event loop exits.
 
 ### Let’s understand it more with code
@@ -612,6 +615,50 @@ zoo
 Baz
 
 This code will first call start(), then call foo() in process.nextTick queue. After that, it will handle promises microtask queue, which prints bar and adds zoo() in process.nextTick queue at the same time. Then it will call zoo() which has just been added. In the end, the baz() in the macrotask queue is called.
+
+### 8. CommonJS vs ES modules: the order at the top level
+
+Every rule above says "nextTick queue first, then the promise queue". That is true inside any callback. It is **not** true for code at the **top level of an ES module**.
+
+```js
+console.log("A");
+
+setTimeout(() => console.log("B"), 0);
+
+Promise.resolve().then(() => console.log("C"));
+
+process.nextTick(() => console.log("D"));
+
+console.log("E");
+```
+
+| How the file is run | Output |
+|---|---|
+| **CommonJS** (`.cjs`, or `.js` without `"type": "module"`) | `A E D C B` |
+| **ES module** (`.mjs`, or `.js` with `"type": "module"`) | `A E C D B` |
+
+`A`, `E` and `B` are the same in both: synchronous code first, the timer last. Only `C` and `D` swap.
+
+**Why?**
+
+-   A **CommonJS** file is run as a plain synchronous function. When it finishes, Node drains the nextTick queue (`D`), then the promise queue (`C`).
+-   An **ES module** is loaded asynchronously, so its top-level code already runs **inside a promise job**. When it finishes, the engine is in the middle of draining the promise queue, so it carries on and runs `C`. Only when the promise queue is empty does Node get back to the nextTick queue and run `D`.
+
+**The difference is only at the top level.** Inside a timer, an I/O callback or any other callback, nextTick runs before promises in both module systems:
+
+```js
+setTimeout(() => {
+  Promise.resolve().then(() => console.log("promise"));
+  process.nextTick(() => console.log("nextTick"));
+}, 0);
+
+// CommonJS and ES module both print:
+// nextTick
+// promise
+```
+
+> [!NOTE]
+> The examples in this chapter are written for CommonJS. If you paste them into a `.mjs` file, or into a project with `"type": "module"` in `package.json`, promise callbacks scheduled at the top level run before `process.nextTick` callbacks. When an interviewer asks for the output, ask (or state) which module system the file uses.
 
 ## Event emitter
 

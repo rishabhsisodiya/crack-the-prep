@@ -100,6 +100,8 @@ A single config module that reads `process.env` with sensible defaults and valid
 
 ESM enables tree-shaking and top-level `await`; it's the modern default.
 
+One behaviour differs too: at the **top level of an ES module**, promise callbacks run **before** `process.nextTick` callbacks, the reverse of CommonJS (see the output question below).
+
 ## How does module caching work?
 
 The first `require`/`import` of a module runs it once and caches the resulting `exports` object keyed by resolved path. Subsequent imports get the **same** object — so a module can hold singleton state (a DB pool, a config). `require.cache` exposes it; deleting an entry forces a re-load (used by some hot-reload tools).
@@ -141,7 +143,7 @@ Each iteration ("tick") runs these libuv phases in order:
 4. **check** — `setImmediate` callbacks
 5. **close** — `'close'` events (e.g. `socket.on('close')`)
 
-**Between every phase** (and between individual callbacks), Node drains the **microtask queues**: `process.nextTick` first, then resolved Promises.
+**Between every phase** (and between individual callbacks), Node drains the **microtask queues**: `process.nextTick` first, then resolved Promises. (The one exception is the top level of an ES module, where promises come first.)
 
 ## `process.nextTick()` vs `setImmediate()` vs `setTimeout(fn, 0)`
 
@@ -155,6 +157,25 @@ Inside an I/O callback, `setImmediate` always fires before `setTimeout(fn, 0)`.
 ## Microtasks vs macrotasks in Node
 
 **Microtasks** — `process.nextTick` and Promise reactions; the whole queue is drained after each callback and between event-loop phases. **Macrotasks** — timers, I/O callbacks, `setImmediate`; one is taken per phase. Microtasks always run to completion before the next macrotask.
+
+## What does this print, and does it differ between CommonJS and ES modules?
+
+```js
+console.log("A");
+setTimeout(() => console.log("B"), 0);
+Promise.resolve().then(() => console.log("C"));
+process.nextTick(() => console.log("D"));
+console.log("E");
+```
+
+- **CommonJS:** `A E D C B`
+- **ES module:** `A E C D B`
+
+Synchronous code runs first (`A`, `E`) and the timer runs last (`B`) in both. In CommonJS, the nextTick queue (`D`) drains before the promise queue (`C`). An ES module's top-level code already runs **inside a promise job**, so the promise queue finishes draining (`C`) before Node returns to the nextTick queue (`D`).
+
+The difference is **only at the top level** of an ES module. Inside a timer or I/O callback, `nextTick` runs before promises in both.
+
+[Deep dive → How Nodejs Works](/nodejs/03-how-nodejs-works/#8-commonjs-vs-es-modules-the-order-at-the-top-level)
 
 ## What is a callback and what is an error-first callback?
 
