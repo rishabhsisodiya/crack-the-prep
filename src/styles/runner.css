@@ -1,0 +1,77 @@
+/* Run controls, the plain code editor and test results. Shared by CodeRunner and PracticeEditor. */
+.runner { margin: 0.5rem 0 0.2rem; }
+.runner-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 0.45rem; }
+.rb {
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  letter-spacing: 0.04em;
+  padding: 0.3rem 0.7rem;
+  background: var(--navy-card);
+  border: 1px solid var(--navy-line-2);
+  color: var(--text);
+  border-radius: 4px;
+  cursor: pointer;
+}
+.rb:hover:not(:disabled) { color: var(--cyan); border-color: var(--cyan); }
+.rb:disabled { opacity: 0.6; cursor: progress; }
+.rb-run { color: var(--green); border-color: rgba(6, 214, 160, 0.45); }
+.runner-badge {
+  font-family: var(--font-mono);
+  font-size: 0.6rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--gold);
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  padding: 0 0.45rem;
+}
+.runner-hint { margin-left: auto; font-family: var(--font-mono); font-size: 0.62rem; color: var(--muted); }
+@media (hover: none) { .runner-hint { display: none; } }
+
+.runner-editor {
+  display: block;
+  width: 100%;
+  min-height: 8rem;
+  margin: 0.4rem 0;
+  padding: 0.8rem 1rem;
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  line-height: 1.55;
+  tab-size: 2;
+  color: var(--white);
+  background: #0d1117;
+  border: 1px solid var(--navy-line-2);
+  border-radius: 6px;
+  resize: vertical;
+  white-space: pre;
+  overflow-x: auto;
+}
+.runner-editor:focus { outline: 2px solid var(--cyan); outline-offset: 1px; }
+
+.runner-out {
+  margin-top: 0.6rem;
+  border: 1px solid var(--navy-line);
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.18);
+  font-size: 0.82rem;
+}
+.ro-sum { padding: 0.5rem 0.8rem; font-family: var(--font-mono); font-size: 0.78rem; font-weight: 700; }
+.ro-sum.ok { color: var(--green); }
+.ro-sum.bad { color: var(--danger); }
+.ro-case { border-top: 1px solid var(--navy-line); }
+.ro-case > summary { cursor: pointer; padding: 0.4rem 0.8rem; font-family: var(--font-mono); font-size: 0.74rem; }
+.ro-case.ok > summary { color: var(--green); }
+.ro-case.bad > summary { color: var(--danger); }
+.ro-case pre, .ro-logs pre {
+  margin: 0 0.8rem 0.6rem;
+  padding: 0.5rem 0.7rem;
+  font-family: var(--font-mono);
+  font-size: 0.74rem;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  background: rgba(0, 180, 216, 0.06);
+  border-radius: 4px;
+  color: var(--text);
+}
+.ro-logs { border-top: 1px solid var(--navy-line); }
+.ro-logs > p { margin: 0.4rem 0.8rem 0.3rem; font-family: var(--font-mono); font-size: 0.66rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); }

@@ -1,0 +1,13 @@
+/* Difficulty badge, shared by the DSA topic list and the practice page. */
+.diff {
+  font-family: var(--font-mono);
+  font-size: 0.58rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding: 0.1rem 0.45rem;
+  border-radius: 999px;
+  border: 1px solid currentColor;
+}
+.diff--easy { color: var(--green); }
+.diff--medium { color: var(--gold); }
+.diff--hard { color: var(--danger); }

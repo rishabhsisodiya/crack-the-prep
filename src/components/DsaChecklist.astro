@@ -16,7 +16,7 @@ const LEVEL = { E: 'Easy', M: 'Medium', H: 'Hard' } as const;
 
 const solvedBy = new Map<string, string>();
 for (const s of solutions as { problem: string; topic: string; also?: string[] }[]) {
-  const link = u(`/dsa/solutions/${kebab(s.topic)}#${kebab(s.problem)}`);
+  const link = u(`/dsa/solutions/${kebab(s.topic)}/${kebab(s.problem)}`);
   solvedBy.set(norm(s.problem), link);
   for (const a of s.also ?? []) solvedBy.set(norm(a), link);
 }

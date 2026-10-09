@@ -1,0 +1,201 @@
+---
+import { Code } from 'astro-expressive-code/components';
+import PrepLayout from '../../../../layouts/PrepLayout.astro';
+import CodeRunner from '../../../../components/CodeRunner.astro';
+import PracticeEditor from '../../../../components/PracticeEditor.astro';
+import '../../../../styles/dsa.css';
+import { solutions } from '../../../../data/dsa-solutions.mjs';
+import { statements } from '../../../../data/dsa-statements.mjs';
+import { tests } from '../../../../data/dsa-tests.mjs';
+import { primarySpec, specFor, starterFor, untestedStarter } from '../../../../lib/runner-spec.mjs';
+import { u, kebab } from '../../../../consts';
+
+export function getStaticPaths() {
+  return solutions.map((s) => {
+    const inTopic = solutions.filter((x) => x.topic === s.topic);
+    const i = inTopic.indexOf(s);
+    return {
+      params: { topic: kebab(s.topic), problem: kebab(s.problem) },
+      props: { s, prevProblem: inTopic[i - 1] ?? null, nextProblem: inTopic[i + 1] ?? null },
+    };
+  });
+}
+
+const { s, prevProblem, nextProblem } = Astro.props;
+const topicHref = u(`/dsa/solutions/${kebab(s.topic)}`);
+const problemHref = (p) => u(`/dsa/solutions/${kebab(p.topic)}/${kebab(p.problem)}`);
+const statement = statements[s.problem];
+
+const primary = primarySpec(tests[s.problem], s.approaches);
+const spec = primary?.spec ?? null;
+const starter = primary ? starterFor(primary.code, primary.spec) : untestedStarter(s.approaches[0].code);
+if (starter === null) throw new Error(`No starter code can be derived for "${s.problem}" (run npm run check:data)`);
+
+const json = (v) => JSON.stringify(v);
+const EXPECTED_LABEL = { unordered: 'Expected (any order)', 'unordered-deep': 'Expected (any order)', 'any-of': 'Expected (any of)' };
+const expectedLabel = (spec && EXPECTED_LABEL[spec.compare]) || 'Expected';
+const caseInput = (c) =>
+  spec.kind === 'design' ? `new ${spec.fn}(${c.args[0].map(json).join(', ')})\n${c.args[1].map(([m, ...a]) => `.${m}(${a.map(json).join(', ')})`).join('\n')}` : c.args.map(json).join(', ');
+
+const prev = prevProblem ? { href: problemHref(prevProblem), label: prevProblem.problem } : { href: topicHref, label: `All ${s.topic} problems` };
+const next = nextProblem ? { href: problemHref(nextProblem), label: nextProblem.problem } : undefined;
+---
+
+<PrepLayout
+  track="dsa"
+  title={`${s.problem} — ${s.topic}`}
+  description={statement ? statement.text.split('\n\n')[0].slice(0, 155) : `Practice ${s.problem}: write your own solution, run it, then compare with ${s.approaches.length} worked approaches.`}
+  prev={prev}
+  next={next}
+  wide
+>
+  <div class="prose">
+    <nav class="crumbs" aria-label="Problem">
+      <a href={u('/dsa/solutions')}>Solutions</a> <span aria-hidden="true">/</span>
+      <a href={topicHref}>{s.topic}</a>
+    </nav>
+    <h1>{s.problem}</h1>
+    {s.difficulty && <p class="meta"><span class={`diff diff--${s.difficulty.toLowerCase()}`}>{s.difficulty}</span></p>}
+  </div>
+
+  <div class="workspace">
+    <div class="brief">
+      {statement && (
+        <section class="problem" aria-label="Problem">
+          <h2>Problem</h2>
+          {statement.text.split('\n\n').map((para) => <p>{para}</p>)}
+          {statement.ex?.map((e, i) => (
+            <div class="ex">
+              <p class="ex-h">Example {i + 1}</p>
+              <pre><b>Input:</b>  {e.in}{'\n'}<b>Output:</b> {e.out}</pre>
+              {e.why && <p class="ex-why">{e.why}</p>}
+            </div>
+          ))}
+          {s.also && s.also.length > 0 && <p class="also">Also asked as: {s.also.join(' · ')}</p>}
+        </section>
+      )}
+
+      <section class="cases" aria-label="Test cases">
+        <h2>Test cases</h2>
+        {spec ? (
+          spec.cases.map((c, i) => (
+            <div class="ex">
+              <p class="ex-h">Case {i + 1}</p>
+              <pre><b>Input:</b>    {caseInput(c)}{'\n'}<b>{expectedLabel}:</b> {json(c.expected)}</pre>
+            </div>
+          ))
+        ) : (
+          <p class="empty">No automated tests for this problem yet. Use the examples above to check your output.</p>
+        )}
+      </section>
+    </div>
+
+    <PracticeEditor id={`${kebab(s.topic)}/${kebab(s.problem)}`} starter={starter} spec={spec} />
+  </div>
+
+  <details class="solution">
+    <summary>
+      <span class="solution-show">View solution</span>
+      <span class="solution-hide">Hide solution</span>
+      <span class="n">{s.approaches.length} {s.approaches.length === 1 ? 'approach' : 'approaches'}</span>
+    </summary>
+    <div class="body">
+      {s.approaches.map((a, i) => (
+        <div class="approach">
+          <h3>{i + 1}. {a.name}</h3>
+          <p class="cx">
+            <span><b>Time</b> {a.time}</span>
+            <span><b>Space</b> {a.space}</span>
+          </p>
+          <p class="idea">{a.idea}</p>
+          <Code code={a.code} lang="js" />
+          {specFor(tests[s.problem], i, a.code) && (
+            <CodeRunner id={`${kebab(s.topic)}/${kebab(s.problem)}/${i}`} code={a.code} spec={specFor(tests[s.problem], i, a.code)} />
+          )}
+          {a.note && <p class="note">{a.note}</p>}
+        </div>
+      ))}
+    </div>
+  </details>
+</PrepLayout>
+
+<style>
+  .crumbs { font-family: var(--font-mono); font-size: 0.72rem; color: var(--muted); display: flex; gap: 0.5rem; }
+  .meta { margin: 0.4rem 0 0; }
+
+  .workspace { display: grid; grid-template-columns: minmax(0, 1fr); gap: 2rem; margin-top: 1.6rem; }
+  @media (min-width: 1000px) {
+    .workspace { grid-template-columns: minmax(0, 5fr) minmax(0, 6fr); align-items: start; }
+    /* the editor stays in view while a long statement scrolls */
+    .workspace > :global(.practice) { position: sticky; top: 5rem; }
+  }
+
+  .brief h2 {
+    margin: 0 0 0.6rem;
+    font-family: var(--font-mono);
+    font-size: 0.7rem;
+    font-weight: 400;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+  .problem p { margin: 0.5rem 0; }
+  .cases { margin-top: 1.6rem; padding-top: 1.2rem; border-top: 1px dashed var(--navy-line-2); }
+  .ex { margin: 0.7rem 0 0; }
+  .ex-h { font-family: var(--font-mono); font-size: 0.7rem; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); margin: 0 0 0.3rem !important; }
+  .ex pre {
+    font-family: var(--font-mono);
+    font-size: 0.8rem;
+    background: rgba(0, 180, 216, 0.06);
+    border: 1px solid var(--navy-line);
+    border-radius: 6px;
+    padding: 0.55rem 0.8rem;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    margin: 0;
+  }
+  .ex pre b { color: var(--cyan); font-weight: 700; }
+  .ex-why { font-size: 0.88rem; color: var(--muted); }
+  .also, .empty { font-size: 0.85rem; color: var(--muted); margin: 0.8rem 0 0; }
+
+  .solution {
+    margin-top: 2.5rem;
+    border: 1px solid var(--navy-line);
+    border-radius: 8px;
+    background: var(--navy-card);
+    overflow: hidden;
+  }
+  .solution > summary {
+    list-style: none;
+    cursor: pointer;
+    padding: 0.9rem 1.1rem;
+    display: flex;
+    align-items: center;
+    gap: 0.7rem;
+    font-weight: 600;
+    color: var(--white);
+  }
+  .solution > summary::-webkit-details-marker { display: none; }
+  .solution > summary::before { content: '›'; color: var(--cyan); font-family: var(--font-mono); transition: transform 0.15s; }
+  .solution > summary:focus-visible { outline: 2px solid var(--cyan); outline-offset: -2px; }
+  .solution[open] > summary::before { transform: rotate(90deg); }
+  .solution[open] > summary { border-bottom: 1px solid var(--navy-line); background: rgba(0, 180, 216, 0.05); }
+  .solution-hide, .solution[open] .solution-show { display: none; }
+  .solution[open] .solution-hide { display: inline; }
+  .solution .n { margin-left: auto; font-family: var(--font-mono); font-size: 0.68rem; font-weight: 400; color: var(--muted); }
+  .body { padding: 0.6rem 1.1rem 1rem; }
+
+  .approach { margin: 1.4rem 0; }
+  .approach:first-of-type { margin-top: 0.6rem; }
+  .approach h3 { font-size: 1rem; color: var(--blue-light); margin: 0 0 0.4rem; }
+  .approach .cx { display: flex; gap: 1.2rem; font-family: var(--font-mono); font-size: 0.74rem; color: var(--muted); margin: 0 0 0.5rem; }
+  .approach .cx b { color: var(--text); font-weight: 500; }
+  .approach .idea { font-size: 0.92rem; margin: 0 0 0.6rem; }
+  .approach .note {
+    font-size: 0.82rem;
+    color: var(--muted);
+    border-left: 2px solid var(--navy-line-2);
+    padding-left: 0.7rem;
+    margin: 0.6rem 0 0;
+  }
+</style>

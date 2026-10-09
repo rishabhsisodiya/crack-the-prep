@@ -7,6 +7,7 @@
  *   - every Interview Core problem resolves to a solution (by name, alias or `solution`)
  *   - no two solutions in a topic share an anchor (◆ solutions links stay unique)
  *   - test specs are well-formed, and every reference approach passes its tests
+ *   - every tested problem yields starter code that compiles and defines the entry point
  *   - notes: no duplicate `order` within a track (warn)
  *   - machine-coding problem pages follow the fixed section template, in order
  */
@@ -19,7 +20,7 @@ import { solutions } from '../src/data/dsa-solutions.mjs';
 import { statements } from '../src/data/dsa-statements.mjs';
 import { tests } from '../src/data/dsa-tests.mjs';
 import { kebab } from '../src/lib/slug.mjs';
-import { defines, specFor } from '../src/lib/runner-spec.mjs';
+import { defines, primarySpec, specFor, starterFor } from '../src/lib/runner-spec.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const readJson = (p) => JSON.parse(fs.readFileSync(path.join(ROOT, p), 'utf8'));
@@ -128,6 +129,22 @@ for (const [title, entry] of Object.entries(tests)) {
     }
   }
 }
+// ---------------------------------------------------------------- starter code
+// The practice page opens on an empty version of the entry point, derived from the reference code.
+for (const sol of solutions) {
+  const primary = primarySpec(tests[sol.problem], sol.approaches);
+  if (!primary) continue;
+  const starter = starterFor(primary.code, primary.spec);
+  if (starter === null) { err(`starter "${sol.problem}"`, `cannot read the signature of "${primary.spec.fn}"`); continue; }
+  harnessCtx.__code = starter;
+  harnessCtx.__fns = primary.spec.after ? [primary.spec.fn, primary.spec.after] : [primary.spec.fn];
+  try {
+    vm.runInContext('CTPHarness.compile(__code, __fns)', harnessCtx);
+  } catch (e) {
+    err(`starter "${sol.problem}"`, `does not compile: ${e.message}`);
+  }
+}
+
 const untested = [...coreSolutions].filter((p) => !tests[p]);
 if (untested.length) warn('tests', `${untested.length} of ${coreSolutions.size} Interview Core solutions have no tests yet`);
 

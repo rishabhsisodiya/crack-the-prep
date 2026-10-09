@@ -12,9 +12,11 @@ interface Props {
   /** override the default track-to-track pager (used for chapter navigation) */
   prev?: PagerLink;
   next?: PagerLink;
+  /** give the body the full page width: no side rails, track links in the collapsible panel */
+  wide?: boolean;
 }
 
-const { track, title, description, ogType = 'article', prev: prevProp, next: nextProp } = Astro.props;
+const { track, title, description, ogType = 'article', prev: prevProp, next: nextProp, wide = false } = Astro.props;
 const current = trackBySlug(track);
 
 // default pager walks track-to-track, but never crosses from one roadmap into another
@@ -57,7 +59,7 @@ const jsonLd = [
 
 <BaseLayout title={title} description={description} ogType={ogType} jsonLd={jsonLd}>
   <div class="read-progress" id="readProgress" aria-hidden="true"></div>
-  <div class="prep">
+  <div class:list={['prep', { 'prep--wide': wide }]}>
     <aside class="prep-rail" aria-label="Tracks">
       <TrackLinks track={track} />
     </aside>
@@ -155,6 +157,12 @@ const jsonLd = [
   }
   @media (min-width: 960px) {
     .prep { grid-template-columns: 200px minmax(0, 1fr) 200px; }
+  }
+
+  @media (min-width: 960px) {
+    .prep--wide { grid-template-columns: minmax(0, 1fr); }
+    .prep--wide .prep-rail, .prep--wide .prep-toc { display: none; }
+    .prep--wide .mobile-nav { display: flex; }
   }
 
   .prep-rail { display: none; }

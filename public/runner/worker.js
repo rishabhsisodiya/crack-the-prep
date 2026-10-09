@@ -3,7 +3,7 @@
  * Started fresh for every run by CodeRunner, and terminated on timeout, so an
  * infinite loop never freezes the page.
  *
- * page → worker   { code, spec }
+ * page → worker   { code, spec }   spec null = just execute the code (no test cases)
  * worker → page   { type: 'case', result }                 after each case
  *                 { type: 'done', results, error?, logs }  when finished
  */
@@ -27,6 +27,12 @@ console.error = capture('error: ');
 
 self.onmessage = (e) => {
   const { code, spec } = e.data;
+  if (!spec) {
+    let error;
+    try { CTPHarness.compile(code, []); } catch (err) { error = String(err && err.message ? err.message : err); }
+    self.postMessage({ type: 'done', error, results: [], logs });
+    return;
+  }
   const out = CTPHarness.runAll(code, spec, () => performance.now(), (result) =>
     self.postMessage({ type: 'case', result: { i: result.i } }),
   );
