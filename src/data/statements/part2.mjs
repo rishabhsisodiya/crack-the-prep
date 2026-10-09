@@ -126,8 +126,8 @@ export const part2 = {
     ex: [{ in: '3 → 2 and 2', out: '64' }],
   },
   "Program for n'th node from the end of a linked list": {
-    text: `Return the value of the nth node from the end of the list, or −1 if the list has fewer than n nodes.`,
-    ex: [{ in: '1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9, n = 2', out: '8' }],
+    text: `Return the nth node from the end of the list, or null if the list has fewer than n nodes.`,
+    ex: [{ in: '1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9, n = 2', out: 'the node with value 8' }],
   },
   'First non-repeating character in a stream': {
     text: `Characters arrive one at a time. After each one, report the first character so far that has appeared exactly once, or "#" if there is none.`,
@@ -215,8 +215,8 @@ export const part2 = {
     ex: [{ in: 'input = [1, 2, 3], output = [2, 1, 3]', out: 'true' }, { in: 'input = [1, 2, 3], output = [3, 1, 2]', out: 'false' }],
   },
   'Implement a circular queue': {
-    text: `Implement a fixed-capacity circular queue (ring buffer) with enQueue, deQueue, Front, Rear, isEmpty and isFull. The front and rear indices wrap around the array.`,
-    ex: [{ in: 'k = 3: enQueue 1, 2, 3, 4 → Rear() → isFull() → deQueue() → enQueue(4) → Rear()', out: 'true, true, true, false, 3, true, true, true, 4' }],
+    text: `Implement a fixed-capacity circular queue (ring buffer) with enqueue, dequeue, front, rear, isEmpty and isFull. enqueue and dequeue return whether they succeeded; front and rear return −1 on an empty queue. The front and rear indices wrap around the array.`,
+    ex: [{ in: 'k = 3: enqueue 1, 2, 3, 4 → rear() → isFull() → dequeue() → enqueue(4) → rear()', out: 'true, true, true, false, 3, true, true, true, 4' }],
   },
   'LRU Cache': {
     text: `Design a Least Recently Used cache with a fixed capacity. get(key) returns the value, or −1 if absent, and marks the key as recently used. put(key, value) inserts or updates the key; when the cache is full, it first evicts the least recently used key. Both operations must be O(1).`,
@@ -366,7 +366,7 @@ All leaves at the same level? Does the tree contain two identical subtrees with 
   },
   'Count pairs from two BSTs whose sum equals X': {
     text: `Count pairs (a from the first BST, b from the second) with a + b = x.`,
-    ex: [{ in: 'BST1 = {1, 3, 5, 6, 7, 8, 10}, BST2 = {2, 3, 4, 5, 6, 8, 9, 11}, x = 16', out: '3', why: '(5, 11), (7, 9) and (8, 8).' }],
+    ex: [{ in: 'BST1 = {1, 3, 5, 6, 7, 8, 10}, BST2 = {2, 3, 4, 5, 6, 8, 9, 11}, x = 16', out: '4', why: '(5, 11), (7, 9), (8, 8) and (10, 6).' }],
   },
   'Median of a BST in O(n) time, O(1) space / count nodes in a range': {
     text: `(1) Return the median of all values in a BST using O(n) time and O(1) extra space (no recursion stack, so use Morris traversal). (2) Count the nodes whose values lie in the range [low, high].`,
@@ -377,8 +377,8 @@ All leaves at the same level? Does the tree contain two identical subtrees with 
     ex: [{ in: '[8, 58, 71, 18, 31, 32, 63, 92, 43, 3, 91, 93, 25, 80, 28]', out: '[18, 63, 80, 25, 32, 43, 80, 93, 80, 25, 93, -1, 28, -1, -1]' }],
   },
   'Find conflicting appointments': {
-    text: `Appointments [start, end] arrive in order. Print every appointment that overlaps with any earlier one.`,
-    ex: [{ in: '[[1,5], [3,7], [2,6], [10,15], [5,6], [4,100]]', out: '[3,7] conflicts with [1,5]; [2,6] with [1,5]; [5,6] with [3,7]; [4,100] with [1,5]' }],
+    text: `Appointments [start, end] arrive in order. Return every appointment that overlaps one that arrived before it, in arrival order. Two appointments that only touch (one ends exactly when the other starts) do not overlap.`,
+    ex: [{ in: '[[1,5], [3,7], [2,6], [10,15], [5,6], [4,100]]', out: '[[3,7], [2,6], [5,6], [4,100]]', why: '[3,7] and [2,6] overlap [1,5]; [5,6] only touches [1,5] but overlaps [3,7]; [4,100] overlaps [1,5]. [10,15] overlaps nothing that came before it.' }],
   },
   'Check whether a BST contains a dead end': {
     text: `The BST holds positive integers. A dead end is a leaf where no new value can be inserted, because both value − 1 and value + 1 are already taken (treat 0 as taken). Return true if the BST contains a dead end.`,
@@ -461,8 +461,8 @@ All leaves at the same level? Does the tree contain two identical subtrees with 
     ex: [{ in: 's = "ilikesamsung", dict = ["i", "like", "sam", "sung", "samsung"]', out: 'true' }],
   },
   'Implement a phone directory (prefix search)': {
-    text: `Given a list of contacts and a query string, return for each prefix of the query (its first 1, 2, … characters) the sorted list of matching contacts, or "0" if none match.`,
-    ex: [{ in: 'contacts = ["geeikistest", "geeksforgeeks", "geeksfortest"], query = "geeips"', out: 'g, ge, gee → all three; geei → [geeikistest]; geeip, geeips → 0' }],
+    text: `Given a list of contacts and a query string, return for each prefix of the query (its first 1, 2, … characters) the sorted list of matching contacts (an empty list if none match).`,
+    ex: [{ in: 'contacts = ["geeikistest", "geeksforgeeks", "geeksfortest"], query = "geeips"', out: 'g, ge, gee → all three; geei → [geeikistest]; geeip, geeips → []' }],
   },
   'Print unique rows in a boolean matrix': {
     text: `Print each distinct row of a binary matrix once, in order of first appearance.`,

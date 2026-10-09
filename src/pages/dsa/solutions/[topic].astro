@@ -29,28 +29,27 @@ const next = nextTopic ? { href: u(`/dsa/solutions/${kebab(nextTopic)}`), label:
 
 <PrepLayout
   track="dsa"
-  title={`${topic} — DSA Solutions`}
+  title={`${topic} — DSA Practice Problems`}
   description={`${items.length} ${topic} problems to practise: write your own solution, run it against tests, then compare with the worked approaches.`}
   prev={prev}
   next={next}
 >
   <div class="prose">
     <nav class="crumbs">
-      <a href={u('/dsa/solutions')}>Solutions</a> <span aria-hidden="true">/</span> {topic}
+      <a href={u('/dsa/solutions')}>Problems</a> <span aria-hidden="true">/</span> {topic}
     </nav>
     <h1>{topic}</h1>
-    <p class="lede">{items.length} problems · {approaches} approaches</p>
-    <p class="xlink">
-      <a href={u('/dsa')}>← Checklist</a> · <a href={u('/dsa/solutions')}>All topics →</a>
-    </p>
+    <p class="lede"><span data-solved-count>0/{items.length}</span> solved · {approaches} approaches</p>
+    <p class="xlink"><a href={u('/dsa/solutions')}>← All topics</a></p>
   </div>
 
   <ul class="sol-list">
     {items.map((s) => (
       <li>
-        <a class="sol" href={u(`/dsa/solutions/${kebab(topic)}/${kebab(s.problem)}`)} data-slug={kebab(s.problem)}>
+        <a class="sol" href={u(`/dsa/solutions/${kebab(topic)}/${kebab(s.problem)}`)} data-slug={kebab(s.problem)} data-solved-id={`${kebab(topic)}/${kebab(s.problem)}`}>
           <span class="q">{s.problem}</span>
           {s.difficulty && <span class={`diff diff--${s.difficulty.toLowerCase()}`}>{s.difficulty}</span>}
+          <span class="solved-mark">✓ Solved</span>
           <span class="n">{s.approaches.length} {s.approaches.length === 1 ? 'approach' : 'approaches'}</span>
         </a>
       </li>
@@ -83,6 +82,9 @@ const next = nextTopic ? { href: u(`/dsa/solutions/${kebab(nextTopic)}`), label:
 </style>
 
 <script>
+  import { initProgress } from '../../../lib/progress';
+  initProgress();
+
   // Problems used to be sections of this page: forward an old #problem link to its own page.
   const slug = decodeURIComponent(location.hash.slice(1));
   const link = slug && [...document.querySelectorAll<HTMLAnchorElement>('.sol[data-slug]')].find((a) => a.dataset.slug === slug);

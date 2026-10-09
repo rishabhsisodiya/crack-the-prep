@@ -100,8 +100,8 @@ export const part1 = {
     ex: [{ in: 'a = [1, 5, 10, 20, 40, 80], b = [6, 7, 20, 80, 100], c = [3, 4, 15, 20, 30, 70, 80, 120]', out: '[20, 80]' }],
   },
   'Rearrange array in alternating positive and negative items': {
-    text: `Rearrange the array so positive and negative numbers alternate, keeping their original relative order within each sign. If one sign runs out, append the leftovers at the end. Treat 0 as positive. The hard version asks for O(1) extra space.`,
-    ex: [{ in: '[1, 2, 3, -4, -1, 4]', out: '[-4, 1, -1, 2, 3, 4]' }],
+    text: `Rearrange the array so positive and negative numbers alternate, keeping their original relative order within each sign. Start with a positive number. If one sign runs out, append the leftovers at the end. Treat 0 as positive. The hard version asks for O(1) extra space.`,
+    ex: [{ in: '[1, 2, 3, -4, -1, 4]', out: '[1, -4, 2, -1, 3, 4]' }],
   },
   'Subarray with sum equal to 0': {
     text: `Given an array of integers (it may contain negatives), return true if some non-empty contiguous subarray sums to 0.`,
@@ -128,7 +128,7 @@ export const part1 = {
     ex: [{ in: '[3, 3, 5, 0, 0, 3, 1, 4]', out: '6', why: 'Buy at 0 and sell at 3 (+3), then buy at 1 and sell at 4 (+3).' }],
   },
   'Check whether an array is a subset of another array': {
-    text: `Given arrays a1 and a2, return true if every element of a2 is present in a1. If a value repeats in a2, a1 must contain it at least as many times.`,
+    text: `Given arrays a1 and a2, return true if every element of a2 is present in a1. The values within each array are distinct.`,
     ex: [
       { in: 'a1 = [11, 1, 13, 21, 3, 7], a2 = [11, 3, 7, 1]', out: 'true' },
       { in: 'a1 = [10, 5, 2, 23, 19], a2 = [19, 5, 3]', out: 'false', why: '3 is missing from a1.' },
@@ -227,8 +227,8 @@ export const part1 = {
     ex: [{ in: 'a = "horse", b = "ros"', out: '3', why: 'Replace h→r, delete r, delete e.' }],
   },
   'Next greater number with the same set of digits': {
-    text: `Given a number as a string of digits, return the smallest number greater than it that uses exactly the same digits, or "not possible" if none exists.`,
-    ex: [{ in: '"218765"', out: '"251678"' }, { in: '"4321"', out: 'not possible' }],
+    text: `Given a number as a string of digits, return the smallest number greater than it that uses exactly the same digits, or "no greater number" if none exists.`,
+    ex: [{ in: '"218765"', out: '"251678"' }, { in: '"4321"', out: '"no greater number"' }],
   },
   'Word Break': {
     text: `Given a string s and a dictionary of words, return true if s can be split into a sequence of one or more dictionary words. Each word can be used any number of times.`,
@@ -247,7 +247,7 @@ export const part1 = {
   },
   'Convert a sentence into its mobile numeric keypad sequence': {
     text: `On an old phone keypad, a letter is typed by pressing its key repeatedly (a = 2, b = 22, c = 222, …, s = 7777, z = 9999), and a space is 0. Convert an uppercase sentence into its key sequence.`,
-    ex: [{ in: '"GEEKS"', out: '"4333355777"' }],
+    ex: [{ in: '"GEEKS"', out: '"43333557777"' }],
   },
   'Minimum bracket reversals to balance an expression': {
     text: `The expression contains only { and }. Reversing a bracket changes { to } or } to {. Return the minimum number of reversals needed to balance it, or −1 if that is impossible (an odd length).`,
@@ -311,7 +311,7 @@ export const part1 = {
   },
   'Number of customers who could not get a computer': {
     text: `A café has n computers. The string lists events: the first time a letter appears, that customer arrives; the second time, they leave. An arriving customer takes a free computer, or leaves without one if all are busy (and their later departure changes nothing). Return how many customers could not get a computer.`,
-    ex: [{ in: 'n = 2, "ABBAJJKZKZ"', out: '0' }, { in: 'n = 1, "GACCBDDBAGEE"', out: '1', why: 'A arrives while G is still using the only computer.' }],
+    ex: [{ in: 'n = 2, "ABBAJJKZKZ"', out: '0' }, { in: 'n = 3, "GACCBDDBAGEE"', out: '1', why: 'D arrives while G, A and B hold all three computers.' }],
   },
   'Check if two strings are isomorphic': {
     text: `Two strings are isomorphic if the characters of s can be replaced to get t, using a consistent one-to-one mapping (no two characters map to the same character). Return true if they are.`,

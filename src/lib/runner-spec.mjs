@@ -126,6 +126,9 @@ const TREE = '// Tree nodes are { val, left, right }. new TreeNode(val, left, ri
 const SHAPE_HINT = {
   list: LIST, 'cycle-list': LIST, 'y-lists': LIST, 'list-array': LIST,
   tree: TREE, 'tree-ref': TREE,
+  dll: '// Doubly linked list nodes are { val, prev, next }.',
+  'circular-list': LIST + '\n// The list is circular: the last node points back to the head.',
+  'tree-dll': '// Return the head of the list: left is the previous node, right is the next.',
   'random-list': '// Nodes are { val, next, random }.',
   graph: '// Graph nodes are { val, neighbors }.',
 };

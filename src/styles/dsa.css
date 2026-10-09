@@ -11,3 +11,14 @@
 .diff--easy { color: var(--green); }
 .diff--medium { color: var(--gold); }
 .diff--hard { color: var(--danger); }
+
+/* "Solved" mark: hidden until progress.ts adds .is-solved to the element or an ancestor carrying data-solved-id. */
+.solved-mark {
+  display: none;
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  letter-spacing: 0.04em;
+  color: var(--green);
+  white-space: nowrap;
+}
+.is-solved .solved-mark, .is-solved.solved-mark { display: inline; }

@@ -1,5 +1,6 @@
 ---
 import PrepLayout from '../../../layouts/PrepLayout.astro';
+import '../../../styles/dsa.css';
 import { solutions } from '../../../data/dsa-solutions.mjs';
 import { u, kebab } from '../../../consts';
 
@@ -16,24 +17,30 @@ const totalApproaches = byTopic.reduce((n, g) => n + g.approaches, 0);
 
 <PrepLayout
   track="dsa"
-  title="DSA Worked Solutions"
-  description={`Multiple interview-ready approaches to ${total} core DSA problems, organised by topic.`}
+  title="DSA Practice Problems"
+  description={`${total} DSA problems to solve in the browser, organised by topic: an editor, tests, and multiple worked approaches for each.`}
 >
   <div class="prose">
-    <h1>Worked Solutions</h1>
+    <h1>Practice Problems</h1>
     <p class="lede">
-      {total} problems · {totalApproaches} approaches. Each is stated brute-force first, then
-      optimal, with the idea, time/space complexity and code. Pick a topic — split into
-      separate pages so each loads fast.
+      {total} problems · {totalApproaches} worked approaches. Write your own solution in the
+      editor and run it against the tests. The solution stays hidden until you ask for it:
+      brute force first, then optimal, with the idea, complexity and code.
     </p>
-    <p class="xlink"><a href={u('/dsa')}>← Back to the checklist</a></p>
+    <p class="progress">
+      <span data-solved-prefix="" data-solved-max={total}>0</span> / {total} solved
+      <button type="button" class="reset" data-solved-reset>reset</button>
+    </p>
+    <p class="xlink"><a href={u('/dsa')}>← DSA</a> · Short on time? Start with the <a href={u('/dsa/core')}>Interview Core</a>.</p>
   </div>
 
   <div class="grid">
     {byTopic.map((g) => (
       <a class="card" href={u(`/dsa/solutions/${kebab(g.topic)}`)}>
         <span class="card-title">{g.topic}</span>
-        <span class="card-meta">{g.count} problems · {g.approaches} approaches</span>
+        <span class="card-meta">
+          <span data-solved-prefix={`${kebab(g.topic)}/`} data-solved-max={g.count}>0</span>/{g.count} solved · {g.approaches} approaches
+        </span>
       </a>
     ))}
   </div>
@@ -42,6 +49,19 @@ const totalApproaches = byTopic.reduce((n, g) => n + g.approaches, 0);
 <style>
   .lede { font-size: 1.05rem; margin: 0.4rem 0 0.8rem; }
   .xlink { font-family: var(--font-mono); font-size: 0.8rem; }
+  .progress { font-family: var(--font-mono); font-size: 0.8rem; color: var(--muted); margin: 0 0 0.6rem; }
+  .reset {
+    margin-left: 0.6rem;
+    background: none;
+    border: 1px solid var(--navy-line);
+    color: var(--muted);
+    font: inherit;
+    font-size: 0.7rem;
+    padding: 0.1rem 0.5rem;
+    border-radius: 4px;
+    cursor: pointer;
+  }
+  .reset:hover { color: var(--danger); border-color: var(--danger); }
 
   .grid {
     display: grid;
@@ -63,3 +83,8 @@ const totalApproaches = byTopic.reduce((n, g) => n + g.approaches, 0);
   .card-title { font-family: var(--font-display); font-size: 1.2rem; letter-spacing: 0.04em; color: var(--white); }
   .card-meta { font-family: var(--font-mono); font-size: 0.7rem; color: var(--muted); }
 </style>
+
+<script>
+  import { initProgress } from '../../../lib/progress';
+  initProgress();
+</script>

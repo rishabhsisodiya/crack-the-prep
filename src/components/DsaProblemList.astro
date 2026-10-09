@@ -1,0 +1,114 @@
+---
+// A curated DSA problem list, grouped by topic. Each row links to the problem's
+// practice page and shows whether the reader has solved it (src/lib/progress.ts).
+import '../styles/dsa.css';
+import { solutions } from '../data/dsa-solutions.mjs';
+import { u, kebab } from '../consts';
+
+interface Problem { name: string; solution?: string; important?: boolean; level?: 'E' | 'M' | 'H' }
+interface Group { topic: string; pattern?: string; problems: Problem[] }
+interface Props { groups: Group[] }
+
+const { groups } = Astro.props;
+const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
+const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, '');
+const LEVEL = { E: 'Easy', M: 'Medium', H: 'Hard' } as const;
+
+// problem name or alias → id of its practice page ("<topic>/<problem>")
+const practiceId = new Map<string, string>();
+for (const s of solutions as { problem: string; topic: string; also?: string[] }[]) {
+  const id = `${kebab(s.topic)}/${kebab(s.problem)}`;
+  practiceId.set(norm(s.problem), id);
+  for (const a of s.also ?? []) practiceId.set(norm(a), id);
+}
+---
+
+<div class="dsa-list" data-solved-scope>
+  <p class="reviewed"><span data-solved-count>0/0</span> solved</p>
+
+  <nav class="topic-jump" aria-label="Topics">
+    {groups.map((g) => <a href={`#${slug(g.topic)}`}>{g.topic}</a>)}
+  </nav>
+
+  <div class="groups">
+    {groups.map((g) => (
+      <section class="group" id={slug(g.topic)} data-solved-scope>
+        <h2>
+          {g.topic} <span class="gcount" data-solved-count>0/{g.problems.length}</span>
+          {g.pattern && <a class="patlink" href={u(`/dsa/patterns#${g.pattern}`)}>pattern →</a>}
+        </h2>
+        <ul>
+          {g.problems.map((p) => {
+            // check-data.mjs guarantees every listed problem resolves to a solution
+            const id = practiceId.get(norm(p.solution ?? p.name));
+            return (
+              <li data-solved-id={id}>
+                {id ? <a href={u(`/dsa/solutions/${id}`)}>{p.name}</a> : <span>{p.name}</span>}
+                {p.level && <i class={`lvl lvl-${p.level}`}>{LEVEL[p.level]}</i>}
+                {p.important && <b class="imp" title="Marked important in the source list">★</b>}
+                <span class="solved-mark">✓ Solved</span>
+              </li>
+            );
+          })}
+        </ul>
+      </section>
+    ))}
+  </div>
+</div>
+
+<style>
+  .reviewed { font-family: var(--font-mono); font-size: 0.8rem; color: var(--muted); }
+
+  .topic-jump { display: flex; flex-wrap: wrap; gap: 0.4rem; margin: 1.2rem 0 2.5rem; }
+  .topic-jump a {
+    font-family: var(--font-mono);
+    font-size: 0.68rem;
+    letter-spacing: 0.04em;
+    padding: 0.25rem 0.6rem;
+    border: 1px solid var(--navy-line);
+    border-radius: 4px;
+    color: var(--muted);
+  }
+  .topic-jump a:hover { color: var(--cyan); border-color: var(--navy-line-2); }
+
+  .group { margin: 2.5rem 0; scroll-margin-top: 5rem; }
+  .group h2 {
+    font-family: var(--font-display);
+    font-size: 1.5rem;
+    letter-spacing: 0.05em;
+    color: var(--white);
+    border-bottom: 1px solid var(--navy-line);
+    padding-bottom: 0.4rem;
+    display: flex;
+    align-items: baseline;
+    gap: 0.7rem;
+  }
+  .gcount { font-family: var(--font-mono); font-size: 0.72rem; color: var(--muted); }
+  .patlink { margin-left: auto; font-family: var(--font-mono); font-size: 0.68rem; letter-spacing: 0.04em; }
+
+  .group ul { list-style: none; margin: 0.8rem 0 0; padding: 0; }
+  .group li {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 0.5rem;
+    margin: 0;
+    padding: 0.4rem 0.5rem;
+    border-radius: 5px;
+    font-size: 0.92rem;
+  }
+  .group li:hover { background: rgba(0, 180, 216, 0.06); }
+  .group li a { color: var(--text); }
+  .group li a:hover { color: var(--cyan); }
+  .group li.is-solved a { color: var(--muted); }
+  .imp { color: var(--gold); font-size: 0.8em; }
+  .lvl { font-family: var(--font-mono); font-style: normal; font-size: 0.62rem; letter-spacing: 0.04em; }
+  .lvl-E { color: var(--green); }
+  .lvl-M { color: var(--gold); }
+  .lvl-H { color: var(--danger); }
+</style>
+
+<script>
+  import { initProgress } from '../lib/progress';
+  initProgress();
+</script>

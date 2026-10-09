@@ -15,7 +15,7 @@ worked examples in one place.
 | **Node.js** | Runtime model, modules, Express, middleware, auth, backend fundamentals |
 | **Machine Coding** | Polyfills, utilities, async helpers and UI components, built step by step |
 | **System Design** | A framework, the building blocks, worked problems with diagrams |
-| **DSA** | Theory, two dozen patterns, an interview core list, a 450 problem checklist, worked solutions |
+| **DSA** | Theory, two dozen patterns, an interview core list, practice problems with an editor, tests and worked solutions |
 | **Behavioral** | The STAR method and a bank of leadership and teamwork prompts |
 | **AI Engineering** | Python for AI, LLMs, prompts, RAG, agents, memory, voice, MCP, evals, guardrails |
 
@@ -71,8 +71,9 @@ After editing, run `npm run check`.
 To add a **track**, add an entry to `TRACKS` in `src/consts.ts`, then add notes with that
 `track` slug.
 
-To add a **DSA problem**, the statement, solution and tests live in `src/data/`. `check:data`
-will tell you what is missing or unlinked.
+To add a **DSA problem**, the statement, solution and tests live in `src/data/`. Every problem
+needs tests in `dsa-tests.mjs` (at least three cases, one an edge case), or an entry in its
+`untestable` list saying why it has none. `check:data` will tell you what is missing or unlinked.
 
 ## Layout
 

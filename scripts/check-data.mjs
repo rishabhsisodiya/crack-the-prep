@@ -8,6 +8,7 @@
  *   - no two solutions in a topic share an anchor (◆ solutions links stay unique)
  *   - test specs are well-formed, and every reference approach passes its tests
  *   - every tested problem yields starter code that compiles and defines the entry point
+ *   - every problem has tests or an entry in `untestable` with a reason, never both
  *   - notes: no duplicate `order` within a track (warn)
  *   - machine-coding problem pages follow the fixed section template, in order
  */
@@ -18,7 +19,7 @@ import { fileURLToPath } from 'node:url';
 
 import { solutions } from '../src/data/dsa-solutions.mjs';
 import { statements } from '../src/data/dsa-statements.mjs';
-import { tests } from '../src/data/dsa-tests.mjs';
+import { tests, untestable } from '../src/data/dsa-tests.mjs';
 import { kebab } from '../src/lib/slug.mjs';
 import { defines, primarySpec, specFor, starterFor } from '../src/lib/runner-spec.mjs';
 
@@ -67,6 +68,7 @@ vm.runInContext(fs.readFileSync(path.join(ROOT, 'public/runner/harness.js'), 'ut
 const H = harnessCtx.CTPHarness;
 
 const KINDS = ['function', 'design'];
+const MIN_CASES = 3; // the reader's own code is judged by these, so one or two is too thin
 const CHECKS = ['return', 'arg0'];
 
 function validSpec(title, t) {
@@ -86,7 +88,7 @@ function validSpec(title, t) {
   if (t.compare && !H.COMPARE_MODES.includes(t.compare)) bad(`unknown compare "${t.compare}"`);
   if (t.output && !H.OUTPUT_KINDS.includes(t.output)) bad(`unknown output "${t.output}"`);
   for (const k of t.input ?? []) if (!H.INPUT_KINDS.includes(k)) bad(`unknown input "${k}"`);
-  if (!Array.isArray(t.cases) || !t.cases.length) bad('needs at least one case');
+  if (!Array.isArray(t.cases) || t.cases.length < MIN_CASES) bad(`needs at least ${MIN_CASES} cases`);
   (t.cases ?? []).forEach((c, i) => {
     if (!Array.isArray(c.args)) bad(`case ${i + 1}: \`args\` must be an array`);
     if (!('expected' in c)) bad(`case ${i + 1}: \`expected\` is missing`);
@@ -145,8 +147,14 @@ for (const sol of solutions) {
   }
 }
 
-const untested = [...coreSolutions].filter((p) => !tests[p]);
-if (untested.length) warn('tests', `${untested.length} of ${coreSolutions.size} Interview Core solutions have no tests yet`);
+// ---------------------------------------------------------------- untestable
+for (const [title, reason] of Object.entries(untestable)) {
+  if (!byTitle.has(title)) err('untestable', `orphan key "${title}" (no such solution)`);
+  if (tests[title]) err('untestable', `"${title}" also has tests`);
+  if (typeof reason !== 'string' || !reason) err('untestable', `"${title}" needs a reason`);
+}
+const untested = solutions.filter((s) => !tests[s.problem] && !untestable[s.problem]);
+for (const s of untested) err('tests', `"${s.problem}" has neither tests nor an entry in \`untestable\``);
 
 // ---------------------------------------------------------------- notes
 const NOTES = path.join(ROOT, 'src/content/notes');

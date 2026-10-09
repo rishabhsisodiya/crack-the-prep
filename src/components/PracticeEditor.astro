@@ -2,15 +2,17 @@
 /**
  * The reader's own editor for one problem: starts from an empty function,
  * runs against the problem's tests in a Web Worker (public/runner/worker.js)
- * and saves what they type in localStorage. With no `spec` the code is only
- * executed and its console output shown.
+ * and saves what they type in localStorage. Passing every test marks the
+ * problem solved. With no `spec` the code is only executed and its console
+ * output shown, and the reader marks the problem solved themselves.
  */
 import '../styles/runner.css';
+import '../styles/dsa.css';
 import { u } from '../consts';
 import { BUILD_ID } from '../lib/build.mjs';
 
 interface Props {
-  /** unique per problem, e.g. "array/contains-duplicate" — localStorage key */
+  /** unique per problem, e.g. "array/contains-duplicate" — localStorage key and progress id */
   id: string;
   starter: string;
   spec: unknown | null;
@@ -22,10 +24,10 @@ const workerUrl = `${u('/runner/worker.js')}?v=${import.meta.env.PROD ? BUILD_ID
 const payload = JSON.stringify({ starter, spec }).replace(/</g, '\\u003c');
 ---
 
-<section class="practice" data-id={id} data-worker={workerUrl} aria-label="Your solution">
+<section class="practice" data-id={id} data-solved-id={id} data-worker={workerUrl} aria-label="Your solution">
   <script type="application/json" class="practice-data" set:html={payload} />
   <div class="runner-bar">
-    <h2 class="practice-title">Your solution</h2>
+    <h2 class="practice-title">Your solution <span class="solved-mark">✓ Solved</span></h2>
     <span class="runner-hint">Ctrl/⌘ + Enter to run</span>
     <button type="button" class="rb" data-act="reset" disabled>↺ Reset</button>
     <button type="button" class="rb rb-run" data-act="run" disabled>▶ Run</button>
@@ -41,6 +43,7 @@ const payload = JSON.stringify({ starter, spec }).replace(/</g, '\\u003c');
   {!spec && (
     <p class="practice-note">
       This problem has no automated tests. Run executes your code and shows what it logs.
+      <button type="button" class="rb" data-act="mark">Mark as solved</button>
     </p>
   )}
   <noscript><p class="practice-note">Running code needs JavaScript enabled.</p></noscript>
@@ -49,6 +52,9 @@ const payload = JSON.stringify({ starter, spec }).replace(/</g, '\\u003c');
 
 <style>
   .practice-title {
+    display: flex;
+    align-items: baseline;
+    gap: 0.7rem;
     margin: 0 auto 0 0;
     font-family: var(--font-mono);
     font-size: 0.7rem;
@@ -59,61 +65,77 @@ const payload = JSON.stringify({ starter, spec }).replace(/</g, '\\u003c');
   }
   .practice :global(.runner-hint) { margin-left: 0; }
   .practice-editor { min-height: 16rem; margin: 0.6rem 0 0; }
-  .practice-note { margin: 0.5rem 0 0; font-size: 0.82rem; color: var(--muted); }
+  .practice :global(.cm-editor) { margin: 0.6rem 0 0; }
+  .practice-note { margin: 0.6rem 0 0; font-size: 0.82rem; color: var(--muted); }
+  .practice-note .rb { margin-left: 0.4rem; }
 </style>
 
 <script>
-  import { type Spec, codeStore, execute, renderResults, runOnCtrlEnter } from '../lib/runner-client';
+  import { type Spec, codeStore, execute, renderResults } from '../lib/runner-client';
+  import { type CodeEditor, codeMirrorEditor, textareaEditor } from '../lib/code-editor';
+  import { loadSolved, setSolved } from '../lib/progress';
 
   const store = codeStore('crack-the-prep:practice:code:');
 
   function setup(root: HTMLElement) {
     const { starter, spec } = JSON.parse(root.querySelector('.practice-data')!.textContent!) as { starter: string; spec: Spec | null };
     const id = root.dataset.id!;
-    const editor = root.querySelector<HTMLTextAreaElement>('.practice-editor')!;
+    const textarea = root.querySelector<HTMLTextAreaElement>('.practice-editor')!;
     const runBtn = root.querySelector<HTMLButtonElement>('[data-act="run"]')!;
     const resetBtn = root.querySelector<HTMLButtonElement>('[data-act="reset"]')!;
+    const markBtn = root.querySelector<HTMLButtonElement>('[data-act="mark"]');
     const out = root.querySelector<HTMLElement>('.runner-out')!;
     let saveTimer = 0;
 
-    const sync = () => { resetBtn.disabled = editor.value === starter; };
+    // Returning visitor: restore what they wrote.
+    const saved = store.get(id);
+    if (saved !== null) textarea.value = saved;
+
+    function onChange() {
+      resetBtn.disabled = editor.getValue() === starter;
+      clearTimeout(saveTimer);
+      saveTimer = window.setTimeout(() => {
+        const code = editor.getValue();
+        if (code === starter) store.del(id);
+        else store.set(id, code);
+      }, 300);
+    }
 
     async function run() {
       if (runBtn.disabled) return;
       runBtn.disabled = true;
       runBtn.textContent = 'Running…';
       try {
-        renderResults(out, spec, await execute(root.dataset.worker!, editor.value, spec));
+        const allPassed = renderResults(out, spec, await execute(root.dataset.worker!, editor.getValue(), spec));
+        if (allPassed) setSolved(id, true);
       } finally {
         runBtn.disabled = false;
         runBtn.textContent = '▶ Run';
       }
     }
 
-    runOnCtrlEnter(editor, run);
-    editor.addEventListener('input', () => {
-      sync();
-      clearTimeout(saveTimer);
-      saveTimer = window.setTimeout(() => {
-        if (editor.value === starter) store.del(id);
-        else store.set(id, editor.value);
-      }, 300);
-    });
+    let editor: CodeEditor = textareaEditor(textarea, { onChange, onRun: run });
+    codeMirrorEditor(textarea, { onChange, onRun: run }).then((cm) => { if (cm) editor = cm; });
+
     runBtn.addEventListener('click', run);
     resetBtn.addEventListener('click', () => {
       if (!confirm('Discard your code and start again from the empty function?')) return;
+      editor.setValue(starter);
       clearTimeout(saveTimer);
       store.del(id);
-      editor.value = starter;
+      resetBtn.disabled = true;
       out.hidden = true;
-      sync();
       editor.focus();
     });
 
-    // Returning visitor: restore what they wrote.
-    const saved = store.get(id);
-    if (saved !== null) editor.value = saved;
-    sync();
+    // No tests to judge by: the reader decides when it is solved.
+    if (markBtn) {
+      const label = () => { markBtn.textContent = loadSolved()[id] ? 'Mark as unsolved' : 'Mark as solved'; };
+      markBtn.addEventListener('click', () => { setSolved(id, !loadSolved()[id]); label(); });
+      label();
+    }
+
+    resetBtn.disabled = editor.getValue() === starter;
     runBtn.disabled = false;
   }
 

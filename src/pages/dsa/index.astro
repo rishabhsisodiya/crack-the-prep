@@ -1,12 +1,10 @@
 ---
 import PrepLayout from '../../layouts/PrepLayout.astro';
-import dsa from '../../data/dsa.json';
 import core from '../../data/dsa-core.json';
 import { solutions } from '../../data/dsa-solutions.mjs';
 import { u } from '../../consts';
 
 const coreProblems = core.reduce((n, g) => n + g.problems.length, 0);
-const totalProblems = dsa.reduce((n, g) => n + g.problems.length, 0);
 const solvedCount = solutions.length;
 const approachCount = solutions.reduce((n, s) => n + s.approaches.length, 0);
 
@@ -32,14 +30,9 @@ const cards = [
     blurb: `${coreProblems} high-frequency interview problems grouped by pattern — the list to do first when time is short.`,
   },
   {
-    href: u('/dsa/checklist'),
-    title: 'Practice Checklist',
-    blurb: `${totalProblems} problems across ${dsa.length} topics. Tick them off as you solve — progress saved in your browser.`,
-  },
-  {
     href: u('/dsa/solutions'),
-    title: 'Worked Solutions',
-    blurb: `${solvedCount} problems solved with ${approachCount} approaches — brute force first, then optimal, with idea, complexity and code.`,
+    title: 'Practice Problems',
+    blurb: `${solvedCount} problems with an editor and tests: write your own solution, run it, then compare with ${approachCount} worked approaches.`,
   },
 ];
 ---
@@ -47,14 +40,14 @@ const cards = [
 <PrepLayout
   track="dsa"
   title="Data Structures & Algorithms"
-  description="DSA for coding interviews — theory, patterns, a practice checklist, and worked solutions with multiple approaches."
+  description="DSA for coding interviews — theory, patterns, and practice problems with an editor, tests and worked solutions."
 >
   <div class="prose">
     <h1>Data Structures &amp; Algorithms</h1>
     <p class="lede">
       Everything for the coding round: the theory, the patterns that map a problem to a
-      technique, a practice checklist to track progress, and worked solutions with
-      multiple approaches.
+      technique, and practice problems you solve in the browser, each with tests and
+      worked solutions.
     </p>
   </div>
 

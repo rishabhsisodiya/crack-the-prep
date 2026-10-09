@@ -71,6 +71,52 @@
     return out;
   }
 
+  /** Array → doubly linked list of { val, prev, next }. */
+  function toDLL(arr) {
+    let head = null, prev = null;
+    for (const val of arr) {
+      const node = { val, prev, next: null };
+      if (prev) prev.next = node; else head = node;
+      prev = node;
+    }
+    return head;
+  }
+
+  /** Doubly linked list → array, walking `nextKey`. Fails if a back link does not match. */
+  function fromDLL(head, prevKey, nextKey) {
+    const out = [];
+    for (let n = head, before = null; n; before = n, n = n[nextKey]) {
+      if (out.length >= MAX_NODES) throw new Error('list has more than ' + MAX_NODES + ' nodes — possible cycle');
+      if ((n[prevKey] || null) !== before) throw new Error('node ' + n.val + ': ' + prevKey + ' does not point to the node before it');
+      out.push(n.val);
+    }
+    return out;
+  }
+
+  /** Array → singly linked list whose last node points back to the head. */
+  function toCircular(arr) {
+    const head = toList(arr);
+    if (head) {
+      let tail = head;
+      while (tail.next) tail = tail.next;
+      tail.next = head;
+    }
+    return head;
+  }
+
+  /** Circular list → array, one lap from the head. Fails if the list does not loop back to it. */
+  function fromCircular(head) {
+    const out = [];
+    if (!head) return out;
+    let n = head;
+    do {
+      if (!n || out.length >= MAX_NODES) throw new Error('the list does not loop back to its head');
+      out.push(n.val);
+      n = n.next;
+    } while (n !== head);
+    return out;
+  }
+
   /** LeetCode level-order array (null = missing child) → tree. */
   function toTree(arr) {
     if (!arr.length || arr[0] === null) return null;
@@ -205,12 +251,19 @@
     'y-lists': (v) => toYLists(v),
     'random-list': (v) => [toRandomList(v)],
     'list-array': (v) => [v.map(toList)],
+    dll: (v) => [toDLL(v)],
+    'circular-list': (v) => [toCircular(v)],
     graph: (v) => [toGraph(v)],
     // 'tree-ref' is resolved in runCase: it needs the preceding tree argument.
     'tree-ref': (v) => [v],
   };
+  const isNode = (v) => v === null || (typeof v === 'object' && 'val' in v);
   const FROM = {
     raw: (v) => v,
+    dll: (v) => (isNode(v) ? fromDLL(v, 'prev', 'next') : v),
+    // a tree flattened in place: left = previous, right = next
+    'tree-dll': (v) => (isNode(v) ? fromDLL(v, 'left', 'right') : v),
+    'circular-list': (v) => (isNode(v) ? fromCircular(v) : v),
     list: (v) => (isList(v) ? fromList(v) : v),
     'cycle-list': (v) => (isList(v) ? fromList(v) : v),
     tree: (v) => (isTree(v) ? fromTree(v) : v),

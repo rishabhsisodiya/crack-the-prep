@@ -51,7 +51,7 @@ const next = nextProblem ? { href: problemHref(nextProblem), label: nextProblem.
 >
   <div class="prose">
     <nav class="crumbs" aria-label="Problem">
-      <a href={u('/dsa/solutions')}>Solutions</a> <span aria-hidden="true">/</span>
+      <a href={u('/dsa/solutions')}>Problems</a> <span aria-hidden="true">/</span>
       <a href={topicHref}>{s.topic}</a>
     </nav>
     <h1>{s.problem}</h1>
@@ -199,3 +199,8 @@ const next = nextProblem ? { href: problemHref(nextProblem), label: nextProblem.
     margin: 0.6rem 0 0;
   }
 </style>
+
+<script>
+  import { initProgress } from '../../../../lib/progress';
+  initProgress();
+</script>

@@ -1,8 +1,9 @@
 /**
- * Worked solutions for the DSA checklist — multiple approaches per problem.
+ * DSA practice problems and their worked solutions — multiple approaches per problem.
  *
- * To add one: append an entry. `problem` should match the checklist name closely
- * (matching is fuzzy — lowercased, non-alphanumerics stripped). Each approach:
+ * To add one: append an entry. `problem` is the title shown and the key used by
+ * dsa-statements.mjs and dsa-tests.mjs; `also` lists other names it is asked under
+ * (Interview Core matches on either, lowercased, non-alphanumerics stripped). Each approach:
  *   { name, idea, time, space, code, note? }
  * `code` is JavaScript. Keep approaches ordered brute-force → optimal.
  *
@@ -1530,7 +1531,11 @@ function findKthLargest(nums, k) {
   while (i < a.length && j < b.length) {
     if (a[i] < b[j]) pushUni(a[i++]);
     else if (a[i] > b[j]) pushUni(b[j++]);
-    else { pushUni(a[i]); inter.push(a[i]); i++; j++; }
+    else {
+      pushUni(a[i]);
+      if (inter[inter.length - 1] !== a[i]) inter.push(a[i]);
+      i++; j++;
+    }
   }
   while (i < a.length) pushUni(a[i++]);
   while (j < b.length) pushUni(b[j++]);
@@ -2170,21 +2175,25 @@ function findKthLargest(nums, k) {
     difficulty: 'Medium',
     approaches: [
       {
-        name: 'Two-pointer merge check',
-        idea: 'Walk the result; each character must match the front of a or b (preserving each source’s order).',
-        time: 'O(n)',
-        space: 'O(1)',
+        name: 'Interleaving DP',
+        idea: 'dp[i][j] is true when the first i characters of a and the first j of b can form the first i + j of result. The last character of that prefix came from a (then dp[i−1][j] must hold) or from b (then dp[i][j−1] must hold).',
+        time: 'O(n · m)',
+        space: 'O(n · m)',
         code: `function isValidShuffle(a, b, result) {
-  if (a.length + b.length !== result.length) return false;
-  let i = 0, j = 0;
-  for (const c of result) {
-    if (i < a.length && a[i] === c) i++;
-    else if (j < b.length && b[j] === c) j++;
-    else return false;
+  const n = a.length, m = b.length;
+  if (n + m !== result.length) return false;
+  const dp = Array.from({ length: n + 1 }, () => new Array(m + 1).fill(false));
+  dp[0][0] = true;
+  for (let i = 0; i <= n; i++) {
+    for (let j = 0; j <= m; j++) {
+      const c = result[i + j - 1];
+      if (i > 0 && dp[i - 1][j] && a[i - 1] === c) dp[i][j] = true;
+      if (j > 0 && dp[i][j - 1] && b[j - 1] === c) dp[i][j] = true;
+    }
   }
-  return i === a.length && j === b.length;
+  return dp[n][m];
 }`,
-        note: 'This greedy check can miss cases when a and b share a prefix; a fully correct solution uses interleaving DP: dp[i][j] = whether a[..i] + b[..j] forms result[..i+j].',
+        note: 'A greedy two-pointer walk (take the next character from whichever string matches) is not enough: when a and b share characters it can commit to the wrong string. For a = "AB", b = "AC", result = "ACAB" it takes the first A from a and then fails, although the answer is true.',
       },
     ],
   },
@@ -2273,14 +2282,14 @@ function findKthLargest(nums, k) {
         idea: 'dp[i] = min total cost to arrange words i..n. Try every valid end word for the current line; cost = (trailing spaces)² summed over lines (last line free).',
         time: 'O(n²)',
         space: 'O(n)',
-        code: `function wordWrap(words, width) {
-  const n = words.length;
+        code: `function wordWrap(lengths, width) {
+  const n = lengths.length;
   const dp = Array(n + 1).fill(Infinity);
   dp[n] = 0;
   for (let i = n - 1; i >= 0; i--) {
     let lineLen = -1;
     for (let j = i; j < n; j++) {
-      lineLen += words[j].length + 1;
+      lineLen += lengths[j] + 1;
       if (lineLen > width) break;
       const extra = j === n - 1 ? 0 : (width - lineLen) ** 2;
       dp[i] = Math.min(dp[i], extra + dp[j + 1]);
@@ -2579,7 +2588,11 @@ function findKthLargest(nums, k) {
   while (s <= n - m) {
     let j = m - 1;
     while (j >= 0 && pat[j] === text[s + j]) j--;
-    if (j < 0) { res.push(s); s += m; }
+    if (j < 0) {
+      res.push(s);
+      // line the next text character up with its last occurrence, so overlapping matches are found
+      s += s + m < n ? m - (last.has(text[s + m]) ? last.get(text[s + m]) : -1) : 1;
+    }
     else {
       const lo = last.has(text[s + j]) ? last.get(text[s + j]) : -1;
       s += Math.max(1, j - lo);
@@ -2683,7 +2696,7 @@ function findKthLargest(nums, k) {
       if (count.get(lc) === 0) have--;
     }
   }
-  return best;
+  return best.length;
 }`,
       },
     ],
@@ -4172,16 +4185,27 @@ function binarySearchAnswer(lo, hi, feasible) {
     difficulty: 'Easy',
     approaches: [
       {
-        name: 'Walk until you return to head or hit null',
-        idea: 'A circular list’s traversal comes back to head; a normal list ends in null.',
+        name: 'Find the cycle with fast/slow pointers, then check that head is on it',
+        idea: 'A normal list ends in null, so the fast pointer falls off the end. If the pointers meet, there is a cycle, but it may start at a later node; walk once around the cycle to see whether it passes through head.',
         time: 'O(n)',
         space: 'O(1)',
         code: `function isCircular(head) {
   if (!head) return true;
-  let n = head.next;
-  while (n && n !== head) n = n.next;
-  return n === head;
+  let slow = head, fast = head;
+  do {
+    if (!fast || !fast.next) return false;   // reached the end: no cycle
+    slow = slow.next;
+    fast = fast.next.next;
+  } while (slow !== fast);
+  // slow is somewhere on the cycle: circular only if head is on it too
+  let n = slow;
+  do {
+    if (n === head) return true;
+    n = n.next;
+  } while (n !== slow);
+  return false;
 }`,
+        note: 'Simply walking until you return to head never stops on a list whose cycle starts at a later node.',
       },
     ],
   },
@@ -5078,7 +5102,7 @@ function sortedInsert(s, x) {
   for (let i = 0; i < half; i++) q.push(q.shift());
   for (let i = 0; i < half; i++) { st.push(q.shift()); }
   const res = [];
-  for (let i = 0; i < half; i++) { res.push(st.shift()); res.push(q.shift()); }
+  for (let i = 0; i < half; i++) { res.push(st.pop()); res.push(q.shift()); }
   q.push(...res);
   return q;
 }`,
@@ -5947,7 +5971,14 @@ function sortedArrayToBST(a, lo = 0, hi = a.length - 1) {
 }
 
 function balanceBST(root) { return sortedArrayToBST(inorderVals(root)); }
-function treeToBST(root) { return sortedArrayToBST(inorderVals(root).sort((x, y) => x - y)); }
+function treeToBST(root) {
+  // keep the shape: write the sorted values back in in-order
+  const vals = inorderVals(root).sort((x, y) => x - y);
+  let i = 0;
+  const fill = (n) => { if (n) { fill(n.left); n.val = vals[i++]; fill(n.right); } };
+  fill(root);
+  return root;
+}
 
 function flattenToSortedList(root) {
   const a = inorderVals(root);
@@ -6090,20 +6121,36 @@ function flattenToSortedList(root) {
     difficulty: 'Medium',
     approaches: [
       {
-        name: 'Interval-BST (or sort + sweep)',
-        idea: 'Insert each [start, end] into an interval tree keyed by start; on insert, any node whose range overlaps the new one is a conflict. Simpler: sort by start, and any appointment whose start < previous max end conflicts.',
-        time: 'O(n log n)',
+        name: 'Interval tree (BST by start, each node stores its subtree’s max end)',
+        idea: 'Keep the earlier appointments in a BST keyed by start, where every node also stores the largest end in its subtree. Before inserting a new appointment, search for an overlap: check the node, then go left only if the left subtree’s max end is after the new start, otherwise go right.',
+        time: 'O(n log n) on average, O(n²) if the tree degenerates',
         space: 'O(n)',
         code: `function conflictingAppointments(appts) {
-  const sorted = [...appts].sort((a, b) => a[0] - b[0]);
+  let root = null;
   const conflicts = [];
-  let maxEnd = -Infinity, prev = null;
-  for (const [s, e] of sorted) {
-    if (s < maxEnd) conflicts.push([[prev[0], prev[1]], [s, e]]);
-    if (e > maxEnd) { maxEnd = e; prev = [s, e]; }
+  // does any appointment in the tree overlap [s, e]?
+  const overlaps = (node, s, e) => {
+    while (node) {
+      if (s < node.end && node.start < e) return true;
+      // the left subtree can only overlap if one of its appointments ends after s
+      node = node.left && node.left.max > s ? node.left : node.right;
+    }
+    return false;
+  };
+  const insert = (node, s, e) => {
+    if (!node) return { start: s, end: e, max: e, left: null, right: null };
+    if (s < node.start) node.left = insert(node.left, s, e);
+    else node.right = insert(node.right, s, e);
+    node.max = Math.max(node.max, e);
+    return node;
+  };
+  for (const [s, e] of appts) {
+    if (overlaps(root, s, e)) conflicts.push([s, e]);
+    root = insert(root, s, e);
   }
   return conflicts;
 }`,
+        note: 'Sorting by start and sweeping finds overlaps too, but it loses the arrival order: it would report an appointment as conflicting with one that arrived after it.',
       },
     ],
   },
@@ -6118,10 +6165,10 @@ function flattenToSortedList(root) {
         idea: 'A dead-end leaf value v can’t accept any new node because both v−1 and v+1 are boundaries. That happens exactly when the leaf’s open interval is (v−1, v+1).',
         time: 'O(n)',
         space: 'O(h)',
-        code: `function hasDeadEnd(root, lo = 1, hi = Infinity) {
+        code: `function hasDeadEnd(root, lo = 0, hi = Infinity) {
   if (!root) return false;
   if (!root.left && !root.right) return root.val - lo === 1 && hi - root.val === 1;
-  return hasDeadEnd(root.left, lo, root.val - 1) || hasDeadEnd(root.right, root.val + 1, hi);
+  return hasDeadEnd(root.left, lo, root.val) || hasDeadEnd(root.right, root.val, hi);
 }`,
       },
     ],

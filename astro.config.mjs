@@ -19,6 +19,7 @@ export default defineConfig({
   // Old URLs of pages that were split or renamed. Astro does not add `base` to the target.
   redirects: {
     '/machine-coding/map-filter-reduce': `${BASE}/machine-coding/foreach-map-filter`,
+    '/dsa/checklist': `${BASE}/dsa/solutions`,
   },
   markdown: {
     remarkPlugins: [remarkCallouts],
