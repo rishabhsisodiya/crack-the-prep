@@ -1223,6 +1223,62 @@ export default React.memo(Chart, (prev, next) => prev.data.version === next.data
 8.  **Avoid new objects/functions** as props to memoized children and as context values.
 9.  **Optimize assets**: image sizes, lazy-loaded images, fewer third-party scripts.
 
+[Deep dive → Performance Optimization](/react/31-performance-optimization/)
+
+### What causes a component to re-render?
+
+1.  Its **state** changes.
+2.  Its **parent re-renders**, even if the props it receives are the same.
+3.  A **context** it reads gets a new value.
+
+A re-render is React **calling the component function**, not a DOM update. It flows down the **whole subtree**, unless a child is wrapped in `React.memo` and its props are shallowly equal.
+
+### How do you render a large list (10,000 items) in React?
+
+**Don't render them all** — the user sees about 20 rows at a time.
+
+-   **Data on a server:** paginate, or use infinite scroll. Filter and sort on the server.
+-   **Full list on the client:** **virtualize** it, so only the visible rows exist in the DOM.
+-   Give rows **stable keys**, wrap the row in **`React.memo`**, and keep each row light.
+
+[Deep dive → Rendering long lists](/react/31-performance-optimization/#rendering-long-lists)
+
+### What is list virtualization (windowing)?
+
+**Rendering only the rows inside the visible window**, plus a few extra above and below (**overscan**). A spacer element as tall as the full list keeps the scrollbar correct, and the visible rows are positioned at their offset inside it.
+
+```jsx
+const firstVisible = Math.floor(scrollTop / ROW_HEIGHT);
+const visibleCount = Math.ceil(VIEWPORT_HEIGHT / ROW_HEIGHT);
+const visibleItems = items.slice(firstVisible, firstVisible + visibleCount);
+// 10,000 items, but only about 20 DOM nodes
+```
+
+Libraries: **`@tanstack/react-virtual`**, **`react-window`**.
+
+**Trade-offs:** browser find (`Ctrl+F`) misses unrendered rows, row state is lost when a row scrolls out, and screen readers need `aria-rowcount`/`aria-rowindex`.
+
+### What is the difference between pagination, infinite scroll and virtualization?
+
+| | Pagination | Infinite scroll | Virtualization |
+|---|---|---|---|
+| Idea | one page of rows at a time | append the next page near the bottom | render only visible rows |
+| DOM size | small, constant | **grows** as you scroll | small, constant |
+| Best for | tables, search results | feeds, timelines | very large lists, chat, logs |
+
+Pagination and infinite scroll limit how much **data** is loaded. Virtualization limits how much **DOM** exists. A feed often uses infinite scroll **and** virtualization together.
+
+### How do you find out why a React app is slow?
+
+1.  Record the slow interaction in the React DevTools **Profiler**.
+2.  In the flamegraph, find components that rendered but should not have, and read **"Why did this render?"**
+3.  Use the **Ranked** view to find the slowest components.
+4.  For load time, check the browser **Performance** panel, **Lighthouse** and a **bundle analyzer**.
+
+Measure timings on a **production build** — development is slower and Strict Mode renders twice.
+
+[Deep dive → Debugging React](/react/30-debugging-react/)
+
 ### What is the difference between debouncing and useTransition?
 
 -   **Debouncing** waits a fixed delay after the user stops typing before running work — it **delays** the update.
