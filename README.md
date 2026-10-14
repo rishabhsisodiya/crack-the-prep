@@ -15,11 +15,12 @@ worked examples in one place.
 | **Node.js** | Runtime model, modules, Express, middleware, auth, backend fundamentals |
 | **Machine Coding** | Polyfills, utilities, async helpers and UI components, built step by step |
 | **System Design** | A framework, the building blocks, 40+ worked HLD problems with diagrams, and frontend system design |
+| **Low-Level Design** | OOP and SOLID, design patterns, concurrency, and 17 classic object-oriented design problems with class diagrams and tested TypeScript |
 | **DSA** | Theory, two dozen patterns, an interview core list, practice problems with an editor, tests and worked solutions |
 | **Behavioral** | The STAR method and a bank of leadership and teamwork prompts |
 | **AI Engineering** | Python for AI, LLMs, prompts, RAG, agents, memory, voice, MCP, evals, guardrails |
 
-Around 170 notes and question sets. JavaScript, React and Node.js each have a dedicated
+Around 190 notes and question sets. JavaScript, React and Node.js each have a dedicated
 questions drill page. Everything is searchable from any page.
 
 ## Running it locally
@@ -38,8 +39,8 @@ npm run preview    # serve the built site
 ```
 
 `npm run check` is what CI runs before deploying: it verifies the DSA solutions against
-their tests, compiles and runs the "Final code" from each Machine Coding page, and lints the
-notes. Run it before opening a pull request.
+their tests, compiles and runs the "Final code" from each Machine Coding and Low-Level Design
+page, and lints the notes. Run it before opening a pull request.
 
 Node 22, matching CI.
 

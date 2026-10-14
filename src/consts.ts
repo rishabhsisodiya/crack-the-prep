@@ -11,7 +11,7 @@ export const SITE = {
   base: ROOT,
   title: 'CrackThePrep — Full-Stack Interview Preparation',
   description:
-    'Free, practitioner-grade interview preparation for full-stack engineers: JavaScript, React, Node.js, system design, DSA, AI engineering and behavioral — notes, questions and worked examples in one place.',
+    'Free, practitioner-grade interview preparation for full-stack engineers: JavaScript, React, Node.js, system design, low-level design, DSA, AI engineering and behavioral — notes, questions and worked examples in one place.',
 } as const;
 
 export type RoadmapId = 'fullstack' | 'ai';
@@ -23,7 +23,7 @@ export const ROADMAPS: Roadmap[] = [
   {
     id: 'fullstack',
     title: 'Full-Stack Interview Prep',
-    blurb: 'JavaScript, React, Node.js, machine coding, system design, DSA and behavioral.',
+    blurb: 'JavaScript, React, Node.js, machine coding, system design, low-level design, DSA and behavioral.',
   },
   {
     id: 'ai',
@@ -89,6 +89,13 @@ export const TRACKS: Track[] = [
     title: 'System Design',
     blurb: 'A framework, the building blocks, 40+ worked HLD problems with diagrams, and frontend system design.',
     badge: '▤',
+  },
+  {
+    slug: 'lld',
+    roadmap: 'fullstack',
+    title: 'Low-Level Design',
+    blurb: 'Object-oriented design rounds — OOP and SOLID, the design patterns that matter, and classic problems (parking lot, elevator, Splitwise, BookMyShow) with class diagrams and tested TypeScript.',
+    badge: '◇',
   },
   {
     slug: 'dsa',

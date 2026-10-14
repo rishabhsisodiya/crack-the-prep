@@ -1,0 +1,253 @@
+---
+title: "In-Memory File System"
+track: "lld"
+kind: "notes"
+order: 25
+slug: "file-system"
+updated: 2026-10-14
+description: "The Composite pattern problem — files and directories behind one node interface, path resolution with . and .., mkdir -p, read/write/append, ls, recursive size, delete, and move with the 'into its own subtree' check."
+---
+
+import Callout from '../../components/Callout.astro';
+import Mermaid from '../../components/Mermaid.astro';
+
+## Problem
+
+Design an in-memory file system with Unix-style paths. Support creating directories, writing and reading files, listing, computing sizes, deleting and moving.
+
+## Requirements
+
+- Absolute paths only (`/docs/notes.txt`), with `.` and `..` segments resolved; the root is `/`.
+- `mkdir(path, recursive)` — with `recursive`, create missing parents (`mkdir -p`).
+- `writeFile(path, content, append?)` — creates or overwrites/appends; the parent directory must exist.
+- `readFile(path)`; `ls(path)` → sorted names for a directory, or the file's own name for a file.
+- `size(path)` — a file's content length; a directory's total size of everything under it.
+- `rm(path, recursive)` — a non-empty directory needs `recursive`; the root can't be removed.
+- `mv(from, to)` — move or rename; can't move a directory into its own subtree, can't overwrite an existing path.
+
+## Entities and class diagram
+
+<Mermaid caption="Composite: a Directory contains Nodes, which are Files or Directories" code={`classDiagram
+  class FsNode {
+    <<abstract>>
+    +name: string
+    +parent: Directory
+    +size() number
+    +isDirectory() boolean
+  }
+  class File {
+    +content: string
+    +size() number
+  }
+  class Directory {
+    -children: Map
+    +size() number
+    +child(name) FsNode
+    +add(node)
+    +remove(name)
+  }
+  class FileSystem {
+    -root: Directory
+    +mkdir(path, recursive)
+    +writeFile(path, content, append)
+    +readFile(path) string
+    +ls(path) string[]
+    +size(path) number
+    +rm(path, recursive)
+    +mv(from, to)
+  }
+  FsNode <|-- File
+  FsNode <|-- Directory
+  Directory o-- FsNode : children
+  FileSystem *-- Directory : root
+`} />
+
+## Design decisions
+
+- **Composite pattern.** `File` and `Directory` share `FsNode`, so `size()` is polymorphic: a file returns its length, a directory sums its children recursively. Callers never check the type to compute sizes.
+- **Children in a `Map<name, node>`** for O(1) lookup per path segment; `ls` sorts on output.
+- **Parent pointers** make `..`, moves and "is this inside that?" checks simple.
+- **One path parser** that normalizes `.`/`..` and rejects relative paths, used by every operation. Most bugs in this problem come from ad hoc path handling.
+- **`FileSystem` is a facade** over the node tree; nodes enforce their own local invariants (no duplicate names in a directory).
+
+## Final code
+
+```ts
+abstract class FsNode {
+  parent: Directory | null = null;
+  constructor(public name: string) {}
+  abstract size(): number;
+  abstract isDirectory(): boolean;
+
+  path(): string {
+    if (!this.parent) return '/';
+    const parentPath = this.parent.path();
+    return (parentPath === '/' ? '' : parentPath) + '/' + this.name;
+  }
+}
+
+class File extends FsNode {
+  content = '';
+  size(): number { return this.content.length; }
+  isDirectory(): boolean { return false; }
+}
+
+class Directory extends FsNode {
+  private children = new Map<string, FsNode>();
+
+  size(): number {
+    let total = 0;
+    for (const c of this.children.values()) total += c.size();
+    return total;
+  }
+
+  isDirectory(): boolean { return true; }
+
+  child(name: string): FsNode | undefined {
+    return this.children.get(name);
+  }
+
+  names(): string[] {
+    return [...this.children.keys()].sort();
+  }
+
+  get isEmpty(): boolean {
+    return this.children.size === 0;
+  }
+
+  add(node: FsNode): void {
+    if (this.children.has(node.name)) throw new Error(`${node.name} already exists in ${this.path()}`);
+    node.parent = this;
+    this.children.set(node.name, node);
+  }
+
+  remove(name: string): void {
+    const node = this.children.get(name);
+    if (node) node.parent = null;
+    this.children.delete(name);
+  }
+}
+
+class FileSystem {
+  private root = new Directory('');
+
+  mkdir(path: string, recursive = false): void {
+    const parts = this.parse(path);
+    let dir = this.root;
+    parts.forEach((name, i) => {
+      const existing = dir.child(name);
+      if (existing) {
+        if (!existing.isDirectory()) throw new Error(`${existing.path()} is a file`);
+        if (i === parts.length - 1 && !recursive) throw new Error(`${existing.path()} already exists`);
+        dir = existing as Directory;
+        return;
+      }
+      if (i < parts.length - 1 && !recursive) throw new Error(`Parent of ${path} does not exist`);
+      const created = new Directory(name);
+      dir.add(created);
+      dir = created;
+    });
+  }
+
+  writeFile(path: string, content: string, append = false): void {
+    const { parent, name } = this.parentOf(path);
+    const existing = parent.child(name);
+    if (existing?.isDirectory()) throw new Error(`${path} is a directory`);
+    const file = (existing as File | undefined) ?? new File(name);
+    if (!existing) parent.add(file);
+    file.content = append ? file.content + content : content;
+  }
+
+  readFile(path: string): string {
+    const node = this.resolve(path);
+    if (node.isDirectory()) throw new Error(`${path} is a directory`);
+    return (node as File).content;
+  }
+
+  ls(path: string): string[] {
+    const node = this.resolve(path);
+    return node.isDirectory() ? (node as Directory).names() : [node.name];
+  }
+
+  size(path: string): number {
+    return this.resolve(path).size();
+  }
+
+  rm(path: string, recursive = false): void {
+    const node = this.resolve(path);
+    if (!node.parent) throw new Error('Cannot remove the root directory');
+    if (node.isDirectory() && !(node as Directory).isEmpty && !recursive) {
+      throw new Error(`${path} is not empty; use recursive`);
+    }
+    node.parent.remove(node.name);
+  }
+
+  mv(from: string, to: string): void {
+    const node = this.resolve(from);
+    if (!node.parent) throw new Error('Cannot move the root directory');
+    const { parent: target, name } = this.parentOf(to);
+    for (let d: Directory | null = target; d; d = d.parent) {
+      if (d === node) throw new Error('Cannot move a directory into itself');
+    }
+    if (target.child(name)) throw new Error(`${to} already exists`);
+    node.parent.remove(node.name);
+    node.name = name;
+    target.add(node);
+  }
+
+  /** Absolute path -> normalized segments, resolving . and .. (.. at root stays at root). */
+  private parse(path: string): string[] {
+    if (!path.startsWith('/')) throw new Error(`Path must be absolute: ${path}`);
+    const out: string[] = [];
+    for (const seg of path.split('/')) {
+      if (seg === '' || seg === '.') continue;
+      if (seg === '..') out.pop();
+      else out.push(seg);
+    }
+    return out;
+  }
+
+  private resolve(path: string): FsNode {
+    let node: FsNode = this.root;
+    for (const name of this.parse(path)) {
+      const next: FsNode | undefined = node.isDirectory() ? (node as Directory).child(name) : undefined;
+      if (!next) throw new Error(`No such file or directory: ${path}`);
+      node = next;
+    }
+    return node;
+  }
+
+  private parentOf(path: string): { parent: Directory; name: string } {
+    const parts = this.parse(path);
+    if (parts.length === 0) throw new Error('The root has no parent');
+    const name = parts.pop()!;
+    const parent = this.resolve('/' + parts.join('/'));
+    if (!parent.isDirectory()) throw new Error(`${parent.path()} is not a directory`);
+    return { parent: parent as Directory, name };
+  }
+}
+```
+
+## Edge cases
+
+- `/a/./b/../c` → `/a/c`; `/..` stays at the root.
+- `mkdir /a/b/c` without recursive when `/a/b` is missing → error; with recursive → creates all; with recursive on an existing path → no-op.
+- Writing a file inside a file, or over a directory → error.
+- `rm` of a non-empty directory without recursive, or of `/` → error.
+- `mv /a /a/b` → error (into its own subtree); `mv` onto an existing name → error.
+
+## Extensions
+
+- **Relative paths and `cd`** — a current-directory pointer per session.
+- **Permissions and owners** — fields on `FsNode`, checks in the facade.
+- **Metadata** — created/modified timestamps (inject a clock).
+- **Find / glob** — a recursive visitor over the composite (Visitor pattern).
+- **Symlinks** — a third node type that resolves to another path, with loop detection.
+- **Large files** — content as chunks or a rope instead of one string.
+
+## Interview follow-ups
+
+- *"Which pattern and why?"* — Composite: files and directories share an interface, so recursive operations (size, delete, search) are uniform.
+- *"How is `..` handled?"* — Normalize the path once into segments; `..` pops.
+- *"Directory size is called a lot — make it O(1)."* — Cache the size on each directory and update ancestors on every write/delete (trade write cost for read cost).
+- *"Thread safety?"* — A read-write lock for the whole tree is simplest; finer-grained locking needs a lock order (parent before child) to avoid deadlocks in `mv`.

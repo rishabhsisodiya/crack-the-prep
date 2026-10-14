@@ -1,0 +1,250 @@
+---
+title: "Vending Machine"
+track: "lld"
+kind: "notes"
+order: 12
+slug: "vending-machine"
+updated: 2026-10-14
+description: "The canonical State-pattern problem — idle and has-money states, product slots, accepting coins, dispensing with change from a limited coin inventory (where greedy fails), refunds on cancel, and admin restocking."
+---
+
+import Callout from '../../components/Callout.astro';
+import Mermaid from '../../components/Mermaid.astro';
+
+## Problem
+
+Design a vending machine. Users insert coins/notes, pick a product by code, and receive the product plus change. They can cancel and get their money back. An operator restocks products and loads coins for change.
+
+## Requirements
+
+- Products sit in slots identified by a code (`A1`), with a price and a quantity.
+- Accepted denominations: 1, 2, 5, 10, 20, 50, 100. Anything else is rejected.
+- Money can be inserted in several steps; the running balance is shown.
+- Selecting a product: fails with a clear message if not enough money, out of stock, unknown code, or **exact change can't be given** — and the user can still add money, choose again or cancel.
+- Change comes from a **limited** coin inventory (inserted coins join the inventory).
+- Cancel refunds exactly what was inserted.
+- Selecting before inserting money is not allowed.
+
+## Entities and states
+
+<Mermaid caption="States decide which actions are valid; the machine delegates to its current state" code={`stateDiagram-v2
+  [*] --> Idle
+  Idle --> HasMoney: insert coin
+  HasMoney --> HasMoney: insert coin
+  HasMoney --> HasMoney: select fails (funds, stock, change)
+  HasMoney --> Idle: select succeeds, dispense + change
+  HasMoney --> Idle: cancel, refund
+`} />
+
+<Mermaid caption="Classes" code={`classDiagram
+  class VendingMachine {
+    -state: VendingState
+    -slots: Map
+    -cash: Map
+    +insert(coin)
+    +select(code) DispenseResult
+    +cancel() number[]
+  }
+  class VendingState {
+    <<interface>>
+    +insert(machine, coin)
+    +select(machine, code)
+    +cancel(machine)
+  }
+  class Slot {
+    +product: Product
+    +quantity: number
+  }
+  class Product {
+    +code: string
+    +name: string
+    +price: number
+  }
+  VendingMachine o-- VendingState
+  VendingState <|.. IdleState
+  VendingState <|.. HasMoneyState
+  VendingMachine *-- Slot
+  Slot --> Product
+`} />
+
+## Design decisions
+
+- **State pattern.** Without it, every method starts with `if (state === 'IDLE') … else if …`. With it, each state class says what its actions mean, and adding a state (`OutOfService`, `Maintenance`) means adding a class.
+- **States hold no data.** The machine owns the balance, slots and cash; states only decide behaviour and transitions. That keeps them trivially reusable.
+- **A failed selection doesn't change state.** The user keeps their balance and can retry — the exception is thrown before any transition.
+- **Change-making with a limited inventory.** Greedy (largest coin first) fails with limited coins: making 6 from `{5×1, 2×3}` takes the 5 and gets stuck, though `2+2+2` works. A small backtracking search over denominations is correct and fast for vending-machine sizes.
+
+## Final code
+
+```ts
+const DENOMINATIONS = [100, 50, 20, 10, 5, 2, 1];
+
+class Product {
+  constructor(readonly code: string, readonly name: string, readonly price: number) {}
+}
+
+class Slot {
+  constructor(readonly product: Product, public quantity: number) {}
+}
+
+type DispenseResult = { product: Product; change: number[] };
+
+interface VendingState {
+  insert(machine: VendingMachine, coin: number): void;
+  select(machine: VendingMachine, code: string): DispenseResult;
+  cancel(machine: VendingMachine): number[];
+}
+
+class IdleState implements VendingState {
+  insert(machine: VendingMachine, coin: number): void {
+    machine.acceptCoin(coin);
+    machine.setState(new HasMoneyState());
+  }
+  select(): DispenseResult {
+    throw new Error('Insert money first');
+  }
+  cancel(): number[] {
+    return [];
+  }
+}
+
+class HasMoneyState implements VendingState {
+  insert(machine: VendingMachine, coin: number): void {
+    machine.acceptCoin(coin);
+  }
+  select(machine: VendingMachine, code: string): DispenseResult {
+    const result = machine.dispense(code); // throws without changing state
+    machine.setState(new IdleState());
+    return result;
+  }
+  cancel(machine: VendingMachine): number[] {
+    const refund = machine.refund();
+    machine.setState(new IdleState());
+    return refund;
+  }
+}
+
+/** Backtracking change-maker: correct for a limited coin inventory, where greedy is not. */
+function makeChange(amount: number, cash: Map<number, number>): number[] | null {
+  const denoms = DENOMINATIONS.filter((d) => (cash.get(d) ?? 0) > 0);
+  const search = (i: number, remaining: number): number[] | null => {
+    if (remaining === 0) return [];
+    if (i === denoms.length) return null;
+    const d = denoms[i];
+    for (let n = Math.min(cash.get(d)!, Math.floor(remaining / d)); n >= 0; n--) {
+      const rest = search(i + 1, remaining - n * d);
+      if (rest) return [...Array(n).fill(d), ...rest];
+    }
+    return null;
+  };
+  return search(0, amount);
+}
+
+class VendingMachine {
+  private state: VendingState = new IdleState();
+  private slots = new Map<string, Slot>();
+  private cash = new Map<number, number>();
+  private inserted: number[] = [];
+
+  // ---- operator actions
+  addProduct(code: string, name: string, price: number, quantity: number): void {
+    if (price <= 0 || quantity < 0) throw new Error('Invalid price or quantity');
+    this.slots.set(code, new Slot(new Product(code, name, price), quantity));
+  }
+
+  restock(code: string, quantity: number): void {
+    this.slotOrThrow(code).quantity += quantity;
+  }
+
+  loadCash(denomination: number, count: number): void {
+    this.assertDenomination(denomination);
+    this.addCash(denomination, count);
+  }
+
+  // ---- user actions (delegated to the current state)
+  insert(coin: number): void {
+    this.assertDenomination(coin);
+    this.state.insert(this, coin);
+  }
+
+  select(code: string): DispenseResult {
+    return this.state.select(this, code);
+  }
+
+  cancel(): number[] {
+    return this.state.cancel(this);
+  }
+
+  get balance(): number {
+    return this.inserted.reduce((sum, c) => sum + c, 0);
+  }
+
+  // ---- used by states
+  setState(state: VendingState): void {
+    this.state = state;
+  }
+
+  acceptCoin(coin: number): void {
+    this.inserted.push(coin);
+    this.addCash(coin, 1);
+  }
+
+  dispense(code: string): DispenseResult {
+    const slot = this.slotOrThrow(code);
+    if (slot.quantity === 0) throw new Error(`${slot.product.name} is out of stock`);
+    if (this.balance < slot.product.price) {
+      throw new Error(`Insufficient funds: ${slot.product.price - this.balance} more needed`);
+    }
+    const change = makeChange(this.balance - slot.product.price, this.cash);
+    if (!change) throw new Error('Cannot make change; choose another product or cancel');
+    for (const c of change) this.addCash(c, -1);
+    slot.quantity--;
+    this.inserted = [];
+    return { product: slot.product, change };
+  }
+
+  refund(): number[] {
+    const coins = this.inserted;
+    for (const c of coins) this.addCash(c, -1);
+    this.inserted = [];
+    return coins;
+  }
+
+  private addCash(denomination: number, count: number): void {
+    this.cash.set(denomination, (this.cash.get(denomination) ?? 0) + count);
+  }
+
+  private assertDenomination(d: number): void {
+    if (!DENOMINATIONS.includes(d)) throw new Error(`Unsupported denomination ${d}`);
+  }
+
+  private slotOrThrow(code: string): Slot {
+    const slot = this.slots.get(code);
+    if (!slot) throw new Error(`Unknown product code ${code}`);
+    return slot;
+  }
+}
+```
+
+## Edge cases
+
+- Select with no money → "Insert money first".
+- Not enough money → error with the shortfall; state stays `HasMoney`, user can add more.
+- Out of stock / unknown code → error; balance kept.
+- Exact change impossible → error; user picks another product or cancels.
+- Cancel refunds the exact coins inserted, not an equivalent amount.
+- Unsupported denomination (a 3) → rejected before any state change.
+
+## Extensions
+
+- **More states**: `OutOfService` (no change available, maintenance), `Dispensing` for a physical delay.
+- **Card/UPI payments**: a `PaymentMethod` interface; card payments skip change-making.
+- **Inventory alerts**: Observer on slot quantity reaching a threshold.
+- **Audit log**: Command objects for each transaction.
+
+## Interview follow-ups
+
+- *"Why the State pattern instead of a switch?"* — Each state's rules live in one class; adding a state doesn't touch the others; illegal actions are explicit.
+- *"Greedy change-making — when does it fail?"* — With limited coin counts (or non-canonical coin systems); use backtracking or DP.
+- *"What if the machine dispenses the product but crashes before giving change?"* — Persist the transaction state before dispensing; on restart, complete or refund from the log.
+- *"Two users at the same machine?"* — Physically impossible; but for a networked/kiosk version, serialize actions per machine.

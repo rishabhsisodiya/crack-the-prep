@@ -1,0 +1,268 @@
+---
+title: "Shopping Cart with Discounts"
+track: "lld"
+kind: "notes"
+order: 26
+slug: "shopping-cart"
+updated: 2026-10-14
+description: "Designing an e-commerce cart and pricing engine — products and inventory, cart lines with stock validation, automatic promotions and coupon codes as pluggable rules (percent off category, buy X get Y, flat off above a minimum), integer money, and all-or-nothing checkout."
+---
+
+import Callout from '../../components/Callout.astro';
+import Mermaid from '../../components/Mermaid.astro';
+
+## Problem
+
+Design the cart and checkout for an online store. Users add products to a cart, see the price after promotions, optionally apply a coupon, and check out. Stock must never go negative.
+
+## Requirements
+
+- Products (id, name, price, category) and an inventory with stock per product.
+- Cart: add, change quantity, remove. Quantities can't exceed available stock.
+- **Automatic promotions** apply to every cart when eligible (e.g. 10% off electronics, buy 2 get 1 free on socks).
+- **One coupon** at a time (e.g. ₹200 off orders above ₹2,000); an invalid or ineligible coupon is rejected with a reason.
+- Price breakdown: subtotal, each discount with a label, total. Total never goes below zero.
+- Checkout: re-validate stock and reserve it **all or nothing**, then create an order.
+- Money in integer paise.
+
+## Entities and class diagram
+
+<Mermaid caption="Promotions are rules evaluated by the pricing engine over the cart's lines" code={`classDiagram
+  class Cart {
+    -lines: Map
+    -couponCode: string
+    +add(productId, qty)
+    +setQuantity(productId, qty)
+    +remove(productId)
+    +applyCoupon(code)
+  }
+  class CartLine {
+    +product: Product
+    +quantity: number
+  }
+  class Product {
+    +id: string
+    +price: number
+    +category: string
+  }
+  class Inventory {
+    +available(productId) number
+    +reserve(items)
+  }
+  class Promotion {
+    <<interface>>
+    +label: string
+    +discount(lines, subtotal) number
+  }
+  class PricingEngine {
+    -automatic: Promotion[]
+    -coupons: Map
+    +price(cart) PriceBreakdown
+  }
+  class CheckoutService {
+    +checkout(cart) Order
+  }
+  Cart *-- CartLine
+  CartLine --> Product
+  PricingEngine o-- Promotion
+  Promotion <|.. CategoryPercentOff
+  Promotion <|.. BuyXGetYFree
+  Promotion <|.. FlatOffAboveMinimum
+  CheckoutService --> PricingEngine
+  CheckoutService --> Inventory
+`} />
+
+## Design decisions
+
+- **Every promotion is the same interface**: given the lines and the subtotal, return a discount amount (0 if not eligible). New promotion types are new classes; the engine doesn't change. That's Strategy (and, since the engine applies a list of them, close to a rules engine).
+- **Automatic promotions and coupons share the interface.** A coupon is just a promotion that's looked up by code and has an eligibility message.
+- **Stacking order is a business rule — make it explicit.** Here: item-level automatic promotions apply to the subtotal first; the coupon applies to what remains. Write the order down in the code, not implicitly by array position elsewhere.
+- **Pricing is computed, never stored on the cart.** The cart holds products and quantities; prices are recalculated on every view and again at checkout, so price changes and expired promotions are always reflected.
+- **Checkout reserves stock atomically**: check every line first, then decrement all. In production this is one DB transaction with conditional updates.
+
+## Final code
+
+```ts
+class Product {
+  constructor(readonly id: string, readonly name: string, readonly price: number, readonly category: string) {}
+}
+
+type CartLine = { product: Product; quantity: number };
+
+class Inventory {
+  private stock = new Map<string, number>();
+
+  setStock(productId: string, quantity: number): void {
+    this.stock.set(productId, quantity);
+  }
+
+  available(productId: string): number {
+    return this.stock.get(productId) ?? 0;
+  }
+
+  /** All or nothing: verify every line, then decrement every line. */
+  reserve(lines: CartLine[]): void {
+    for (const l of lines) {
+      if (this.available(l.product.id) < l.quantity) throw new Error(`Only ${this.available(l.product.id)} of ${l.product.name} left`);
+    }
+    for (const l of lines) this.stock.set(l.product.id, this.available(l.product.id) - l.quantity);
+  }
+}
+
+class Cart {
+  private lines = new Map<string, CartLine>();
+  couponCode: string | null = null;
+
+  constructor(private inventory: Inventory) {}
+
+  add(product: Product, quantity = 1): void {
+    const current = this.lines.get(product.id)?.quantity ?? 0;
+    this.setQuantity(product, current + quantity);
+  }
+
+  setQuantity(product: Product, quantity: number): void {
+    if (!Number.isInteger(quantity) || quantity < 0) throw new Error('Quantity must be a whole number');
+    if (quantity === 0) return void this.lines.delete(product.id);
+    if (quantity > this.inventory.available(product.id)) {
+      throw new Error(`Only ${this.inventory.available(product.id)} of ${product.name} available`);
+    }
+    this.lines.set(product.id, { product, quantity });
+  }
+
+  remove(productId: string): void {
+    this.lines.delete(productId);
+  }
+
+  items(): CartLine[] {
+    return [...this.lines.values()];
+  }
+
+  clear(): void {
+    this.lines.clear();
+    this.couponCode = null;
+  }
+}
+
+interface Promotion {
+  readonly label: string;
+  /** Discount in paise for these lines; 0 when not eligible. */
+  discount(lines: CartLine[], subtotal: number): number;
+}
+
+class CategoryPercentOff implements Promotion {
+  readonly label: string;
+  constructor(private category: string, private percent: number) {
+    this.label = `${percent}% off ${category}`;
+  }
+  discount(lines: CartLine[]): number {
+    const base = lines.filter((l) => l.product.category === this.category).reduce((s, l) => s + l.product.price * l.quantity, 0);
+    return Math.floor((base * this.percent) / 100);
+  }
+}
+
+class BuyXGetYFree implements Promotion {
+  readonly label: string;
+  constructor(private productId: string, private buy: number, private free: number) {
+    this.label = `Buy ${buy} get ${free} free`;
+  }
+  discount(lines: CartLine[]): number {
+    const line = lines.find((l) => l.product.id === this.productId);
+    if (!line) return 0;
+    const groups = Math.floor(line.quantity / (this.buy + this.free));
+    return groups * this.free * line.product.price;
+  }
+}
+
+class FlatOffAboveMinimum implements Promotion {
+  readonly label: string;
+  constructor(private amount: number, readonly minimum: number) {
+    this.label = `${amount / 100} off above ${minimum / 100}`;
+  }
+  discount(_lines: CartLine[], subtotal: number): number {
+    return subtotal >= this.minimum ? this.amount : 0;
+  }
+}
+
+type PriceBreakdown = { subtotal: number; discounts: { label: string; amount: number }[]; total: number };
+
+class PricingEngine {
+  constructor(private automatic: Promotion[], private coupons: Map<string, Promotion>) {}
+
+  validateCoupon(code: string, cart: Cart): void {
+    const coupon = this.coupons.get(code);
+    if (!coupon) throw new Error(`Coupon ${code} is not valid`);
+    const { total } = this.price(cart, null);
+    if (coupon.discount(cart.items(), total) === 0) throw new Error(`Cart is not eligible for ${code}`);
+  }
+
+  /** Order of application: automatic promotions on the subtotal, then the coupon on what remains. */
+  price(cart: Cart, couponCode: string | null = cart.couponCode): PriceBreakdown {
+    const lines = cart.items();
+    const subtotal = lines.reduce((s, l) => s + l.product.price * l.quantity, 0);
+    const discounts: { label: string; amount: number }[] = [];
+    let running = subtotal;
+
+    for (const promo of this.automatic) {
+      const amount = Math.min(running, promo.discount(lines, subtotal));
+      if (amount > 0) {
+        discounts.push({ label: promo.label, amount });
+        running -= amount;
+      }
+    }
+    const coupon = couponCode ? this.coupons.get(couponCode) : undefined;
+    if (coupon) {
+      const amount = Math.min(running, coupon.discount(lines, running));
+      if (amount > 0) {
+        discounts.push({ label: `Coupon ${couponCode}`, amount });
+        running -= amount;
+      }
+    }
+    return { subtotal, discounts, total: running };
+  }
+}
+
+type Order = { id: string; items: { productId: string; quantity: number }[]; price: PriceBreakdown };
+
+class CheckoutService {
+  private seq = 1;
+  constructor(private inventory: Inventory, private pricing: PricingEngine) {}
+
+  applyCoupon(cart: Cart, code: string): void {
+    this.pricing.validateCoupon(code, cart);
+    cart.couponCode = code;
+  }
+
+  checkout(cart: Cart): Order {
+    const items = cart.items();
+    if (items.length === 0) throw new Error('Cart is empty');
+    const price = this.pricing.price(cart); // recompute at checkout; never trust an earlier total
+    this.inventory.reserve(items); // throws without changing stock if any line is short
+    cart.clear();
+    return { id: `O${this.seq++}`, items: items.map((l) => ({ productId: l.product.id, quantity: l.quantity })), price };
+  }
+}
+```
+
+## Edge cases
+
+- Adding more than the stock → rejected with the available count; setting quantity 0 removes the line.
+- Stock drops between "add to cart" and checkout → checkout fails without reserving anything.
+- Coupon unknown or cart below its minimum → rejected with a reason; a coupon that becomes ineligible later (items removed) simply contributes 0.
+- Discounts larger than the remaining amount → capped; the total never goes negative.
+- Buy 2 get 1 free with 5 items → one free item (only complete groups of 3 count).
+
+## Extensions
+
+- **Coupon rules**: expiry dates, per-user usage limits, first-order-only — eligibility checks on the coupon object (inject a clock and the user).
+- **Best-coupon suggestion**: evaluate every available coupon and show the one with the largest discount.
+- **Exclusive promotions**: flags for "cannot combine with other offers".
+- **Cart persistence and merge** on login (guest cart + account cart).
+- **Inventory reservations with expiry** during payment, like [seat holds](/prep/lld/movie-ticket-booking).
+- **Taxes and shipping** as further steps in the pricing pipeline.
+
+## Interview follow-ups
+
+- *"How do you add a new kind of discount?"* — A new `Promotion` class; register it as automatic or under a coupon code.
+- *"In what order do discounts apply, and why does it matter?"* — Percent-then-flat vs flat-then-percent give different totals; make the order an explicit rule in the engine.
+- *"Why recompute prices at checkout?"* — Prices, stock and promotions change; never trust a total computed earlier (or sent by the client).
+- *"Two users buy the last unit."* — Atomic reservation: conditional decrement in a DB transaction across all lines; see [Flash Sale](/prep/system-design/flash-sale) at scale.

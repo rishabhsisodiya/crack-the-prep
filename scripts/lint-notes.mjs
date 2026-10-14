@@ -166,12 +166,17 @@ function lintFile(file) {
   let inFence = false;
   let fenceLang = '';
   let fmDelims = 0;
+  let inDiagram = false;
   const findings = [];
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     if (fmDelims < 2 && line.trim() === '---') { fmDelims++; continue; }
     if (fmDelims < 2) continue; // skip frontmatter entirely
+    // Mermaid source inside <Mermaid code={`...`} /> is diagram syntax, not prose
+    // ("A --> B : label" needs the space before the colon), so no rule applies to it.
+    if (inDiagram) { if (line.includes('`}')) inDiagram = false; continue; }
+    if (/code=\{`/.test(line) && !/code=\{`[^`]*`\}/.test(line)) { inDiagram = true; continue; }
     const fenceMatch = line.match(/^\s*```(\w*)/);
     if (fenceMatch) {
       if (!inFence) { inFence = true; fenceLang = fenceMatch[1] || ''; }

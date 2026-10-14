@@ -1,0 +1,155 @@
+---
+title: "OOP and SOLID"
+track: "lld"
+kind: "notes"
+order: 2
+slug: "oop-solid"
+updated: 2026-10-14
+description: "The four OOP pillars and the five SOLID principles with before/after TypeScript examples, plus composition over inheritance, DRY/KISS/YAGNI, and the questions interviewers ask about each."
+---
+
+import Callout from '../../components/Callout.astro';
+
+## The four pillars of OOP
+
+**Encapsulation** — an object owns its state and exposes behaviour, not fields. Invariants are enforced in one place.
+
+```ts
+class BankAccount {
+  #balance = 0; // private: no one outside can set it to -500
+
+  deposit(amount: number): void {
+    if (amount <= 0) throw new Error('Deposit must be positive');
+    this.#balance += amount;
+  }
+
+  withdraw(amount: number): void {
+    if (amount > this.#balance) throw new Error('Insufficient funds');
+    this.#balance -= amount;
+  }
+
+  get balance(): number {
+    return this.#balance;
+  }
+}
+```
+
+**Abstraction** — callers depend on *what* something does, not *how*. A `PaymentGateway` interface with `charge()` hides whether it's Razorpay or Stripe.
+
+**Inheritance** — a subclass reuses and specializes a parent (`SavingsAccount extends BankAccount`). Powerful but couples tightly; prefer it only for genuine is-a relationships that won't change.
+
+**Polymorphism** — one interface, many implementations, chosen at runtime. It's what lets you delete `if/else` chains on type:
+
+```ts
+interface Shape {
+  area(): number;
+}
+class Circle implements Shape {
+  constructor(private r: number) {}
+  area() { return Math.PI * this.r ** 2; }
+}
+class Rect implements Shape {
+  constructor(private w: number, private h: number) {}
+  area() { return this.w * this.h; }
+}
+const total = (shapes: Shape[]) => shapes.reduce((sum, s) => sum + s.area(), 0);
+```
+
+## SOLID
+
+### S — Single Responsibility Principle
+
+A class should have **one reason to change**. "Reason to change" means one stakeholder or concern.
+
+```ts
+// Before: report logic, formatting and delivery all change for different reasons
+class SalesReport {
+  compute() { /* totals */ }
+  toPdf() { /* layout */ }
+  email(to: string) { /* SMTP */ }
+}
+
+// After: each class changes for one reason
+class SalesReport { compute() { /* totals */ } }
+class PdfFormatter { format(report: SalesReport) { /* layout */ } }
+class EmailSender { send(to: string, file: Uint8Array) { /* SMTP */ } }
+```
+
+### O — Open/Closed Principle
+
+Open for extension, closed for modification: adding a new case means **adding a class**, not editing existing, tested code.
+
+```ts
+// Before: every new vehicle type edits this function
+function fee(type: string, hours: number) {
+  if (type === 'bike') return hours * 10;
+  if (type === 'car') return hours * 20;
+  throw new Error('unknown');
+}
+
+// After: new types plug in without touching existing ones
+interface FeeRule { fee(hours: number): number; }
+class BikeFee implements FeeRule { fee(h: number) { return h * 10; } }
+class CarFee implements FeeRule { fee(h: number) { return h * 20; } }
+```
+
+### L — Liskov Substitution Principle
+
+Anywhere a base type is expected, any subtype must work **without surprising the caller** — same contract, no stronger preconditions, no weaker guarantees.
+
+The classic violation: `Square extends Rectangle`. Code that sets width to 5 and height to 4 expects area 20; a square silently makes it 16. Another: a `ReadOnlyFile extends File` whose `write()` throws. If a subclass has to throw "not supported" for an inherited method, the hierarchy is wrong — split the interface instead.
+
+### I — Interface Segregation Principle
+
+Clients shouldn't depend on methods they don't use. Prefer several small interfaces over one fat one.
+
+```ts
+// Before: a basic printer is forced to implement scan() and fax()
+interface Machine { print(d: Doc): void; scan(d: Doc): void; fax(d: Doc): void; }
+
+// After
+interface Printer { print(d: Doc): void; }
+interface Scanner { scan(d: Doc): void; }
+class BasicPrinter implements Printer { print(d: Doc) { /* ... */ } }
+class OfficeMachine implements Printer, Scanner { print(d: Doc) {} scan(d: Doc) {} }
+```
+
+### D — Dependency Inversion Principle
+
+High-level policy shouldn't depend on low-level details; **both depend on abstractions**. In practice: depend on interfaces and inject implementations through the constructor.
+
+```ts
+interface Notifier { send(userId: string, msg: string): Promise<void>; }
+
+class OrderService {
+  constructor(private notifier: Notifier) {} // injected: SMS, email, push, or a fake in tests
+  async place(userId: string) {
+    // ... create order
+    await this.notifier.send(userId, 'Order placed');
+  }
+}
+```
+
+<Callout type="tip">
+Dependency inversion is what makes LLD code testable: inject the clock, the ID generator, the payment gateway. Interviewers notice when your `ParkingLot` takes a `clock` parameter instead of calling `Date.now()` inside.
+</Callout>
+
+## Composition over inheritance
+
+Inheritance hierarchies explode when behaviour varies along two axes. `Duck` → `FlyingDuck`, `QuackingDuck`, `FlyingQuackingDuck`, `RubberDuck`… Instead, a `Duck` *has* a `FlyBehaviour` and a `QuackBehaviour`. Swap behaviours at runtime, combine freely, test separately. This is the [Strategy pattern](/prep/lld/design-patterns).
+
+Use inheritance when: the relationship is truly is-a, stable, and the subclass doesn't need to disable parent behaviour. Use composition for everything that varies.
+
+## DRY, KISS, YAGNI
+
+- **DRY** — one source of truth for each piece of knowledge (not "never write similar-looking lines").
+- **KISS** — the simplest design that meets the requirements.
+- **YAGNI** — don't build for hypothetical requirements. In an interview: design extension *points* (interfaces), don't implement imagined features.
+
+## Interview follow-ups
+
+- *"Abstraction vs encapsulation?"* — Abstraction hides complexity behind a simpler interface (what); encapsulation hides internal state and protects invariants (how it's kept valid).
+- *"Give an LSP violation."* — Square/Rectangle, or a subclass that throws for an inherited method.
+- *"Interface vs abstract class?"* — Interface is a pure contract, a class can implement many; abstract class can share code and state but you inherit only one.
+- *"Where did you apply open/closed in your design?"* — Point to the interface where new types/rules plug in.
+- *"Isn't dependency injection just passing things into constructors?"* — Yes; the principle is depending on abstractions, and DI is the mechanism.

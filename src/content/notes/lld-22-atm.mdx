@@ -1,0 +1,245 @@
+---
+title: "ATM"
+track: "lld"
+kind: "notes"
+order: 22
+slug: "atm"
+updated: 2026-10-14
+description: "Designing an ATM — State pattern for the card/PIN session, a bank service behind an interface, PIN retry limits with card retention, and a Chain of Responsibility cash dispenser that plans notes before debiting (with backtracking where greedy fails)."
+---
+
+import Callout from '../../components/Callout.astro';
+import Mermaid from '../../components/Mermaid.astro';
+
+## Problem
+
+Design an ATM. A user inserts a card, enters a PIN, and can check the balance or withdraw cash. The ATM talks to the bank to verify PINs and debit accounts, and dispenses cash from its own limited stock of notes.
+
+## Requirements
+
+- Session: insert card → enter PIN → operations → eject card.
+- **Three wrong PINs** → card retained, session ends.
+- Operations: balance enquiry, withdrawal. Only one card at a time.
+- Withdrawal: positive multiple of 100, at most ₹20,000 per transaction; the bank must approve (sufficient funds); the ATM must be able to make the amount from its notes (₹2000, ₹500, ₹200, ₹100) — **check that before debiting**.
+- Actions in the wrong state (withdraw before PIN, enter PIN with no card) are rejected.
+
+## Entities and states
+
+<Mermaid caption="Session states" code={`stateDiagram-v2
+  [*] --> Idle
+  Idle --> CardInserted: insert card
+  CardInserted --> Authenticated: correct PIN
+  CardInserted --> CardInserted: wrong PIN, attempts left
+  CardInserted --> Idle: third wrong PIN, card retained
+  Authenticated --> Authenticated: balance, withdraw
+  CardInserted --> Idle: eject
+  Authenticated --> Idle: eject
+`} />
+
+<Mermaid caption="Classes" code={`classDiagram
+  class ATM {
+    -state: ATMState
+    -card: Card
+    -dispenser: NoteDispenser
+    +insertCard(card)
+    +enterPin(pin)
+    +balance() number
+    +withdraw(amount) Map
+    +ejectCard()
+  }
+  class ATMState {
+    <<interface>>
+  }
+  class BankService {
+    <<interface>>
+    +verifyPin(cardNumber, pin) boolean
+    +balance(cardNumber) number
+    +debit(cardNumber, amount) boolean
+  }
+  class NoteDispenser {
+    -denomination: number
+    -count: number
+    -next: NoteDispenser
+    +plan(amount) Map
+    +dispense(plan)
+  }
+  ATM o-- ATMState
+  ATM o-- BankService
+  ATM o-- NoteDispenser
+  ATMState <|.. IdleState
+  ATMState <|.. CardInsertedState
+  ATMState <|.. AuthenticatedState
+  NoteDispenser --> NoteDispenser : next
+`} />
+
+## Design decisions
+
+- **State pattern** for the session: each state implements every action and rejects the ones that don't apply, so there's no `if (!authenticated)` sprinkled through the code.
+- **The bank is an interface.** The ATM never knows balances itself; it asks `BankService`. Tests use an in-memory fake.
+- **Chain of Responsibility for notes**: a ₹2000 handler, then ₹500, ₹200, ₹100, each taking what it can and passing the remainder on. This is the classic pattern answer.
+- **Plan, then debit, then dispense.** If the ATM can't make ₹600 from its notes, the account must not be debited. So the chain first produces a *plan* without touching stock; only after the bank approves is the plan committed.
+- **The chain backtracks.** Pure greedy fails with limited notes: ₹600 with one ₹500 and three ₹200s → greedy takes the ₹500 and is stuck with ₹100. Each handler tries its maximum count first, then fewer, so ₹200×3 is found.
+
+## Final code
+
+```ts
+interface BankService {
+  verifyPin(cardNumber: string, pin: string): boolean;
+  balance(cardNumber: string): number;
+  debit(cardNumber: string, amount: number): boolean;
+}
+
+class Card {
+  constructor(readonly number: string) {}
+}
+
+type NotePlan = Map<number, number>; // denomination -> count
+
+/** Chain of Responsibility: each handler dispenses its denomination and passes the rest on. */
+class NoteDispenser {
+  constructor(readonly denomination: number, private count: number, private next: NoteDispenser | null = null) {}
+
+  /** A plan that makes `amount` exactly, trying the most notes of this denomination first. Does not change stock. */
+  plan(amount: number): NotePlan | null {
+    for (let n = Math.min(this.count, Math.floor(amount / this.denomination)); n >= 0; n--) {
+      const rest = amount - n * this.denomination;
+      const tail = rest === 0 ? new Map<number, number>() : this.next ? this.next.plan(rest) : null;
+      if (tail) {
+        if (n > 0) tail.set(this.denomination, n);
+        return tail;
+      }
+    }
+    return null;
+  }
+
+  dispense(plan: NotePlan): void {
+    const n = plan.get(this.denomination) ?? 0;
+    if (n > this.count) throw new Error(`Not enough ${this.denomination} notes`);
+    this.count -= n;
+    this.next?.dispense(plan);
+  }
+
+  stock(): Record<number, number> {
+    return { [this.denomination]: this.count, ...this.next?.stock() };
+  }
+}
+
+interface ATMState {
+  insertCard(atm: ATM, card: Card): void;
+  enterPin(atm: ATM, pin: string): void;
+  balance(atm: ATM): number;
+  withdraw(atm: ATM, amount: number): NotePlan;
+  ejectCard(atm: ATM): void;
+}
+
+class IdleState implements ATMState {
+  insertCard(atm: ATM, card: Card) { atm.startSession(card); }
+  enterPin(): void { throw new Error('Insert a card first'); }
+  balance(): number { throw new Error('Insert a card first'); }
+  withdraw(): NotePlan { throw new Error('Insert a card first'); }
+  ejectCard(): void { throw new Error('No card to eject'); }
+}
+
+class CardInsertedState implements ATMState {
+  private attempts = 0;
+  insertCard(): void { throw new Error('A card is already inserted'); }
+  enterPin(atm: ATM, pin: string): void {
+    if (atm.verifyPin(pin)) return atm.setState(new AuthenticatedState());
+    if (++this.attempts >= ATM.MAX_PIN_ATTEMPTS) {
+      atm.retainCard();
+      throw new Error('Too many wrong PINs; card retained');
+    }
+    throw new Error(`Wrong PIN; ${ATM.MAX_PIN_ATTEMPTS - this.attempts} attempts left`);
+  }
+  balance(): number { throw new Error('Enter your PIN first'); }
+  withdraw(): NotePlan { throw new Error('Enter your PIN first'); }
+  ejectCard(atm: ATM): void { atm.endSession(); }
+}
+
+class AuthenticatedState implements ATMState {
+  insertCard(): void { throw new Error('A card is already inserted'); }
+  enterPin(): void { throw new Error('Already authenticated'); }
+  balance(atm: ATM): number { return atm.accountBalance(); }
+  withdraw(atm: ATM, amount: number): NotePlan { return atm.performWithdrawal(amount); }
+  ejectCard(atm: ATM): void { atm.endSession(); }
+}
+
+class ATM {
+  static readonly MAX_PIN_ATTEMPTS = 3;
+  static readonly MAX_WITHDRAWAL = 20_000;
+
+  private state: ATMState = new IdleState();
+  private card: Card | null = null;
+  readonly retainedCards: Card[] = [];
+
+  constructor(private bank: BankService, private dispenser: NoteDispenser) {}
+
+  insertCard(card: Card) { this.state.insertCard(this, card); }
+  enterPin(pin: string) { this.state.enterPin(this, pin); }
+  balance(): number { return this.state.balance(this); }
+  withdraw(amount: number): NotePlan { return this.state.withdraw(this, amount); }
+  ejectCard() { this.state.ejectCard(this); }
+  cashStock() { return this.dispenser.stock(); }
+
+  // ---- used by states
+  setState(state: ATMState) { this.state = state; }
+
+  startSession(card: Card) {
+    this.card = card;
+    this.state = new CardInsertedState();
+  }
+
+  endSession() {
+    this.card = null;
+    this.state = new IdleState();
+  }
+
+  retainCard() {
+    this.retainedCards.push(this.card!);
+    this.endSession();
+  }
+
+  verifyPin(pin: string): boolean {
+    return this.bank.verifyPin(this.card!.number, pin);
+  }
+
+  accountBalance(): number {
+    return this.bank.balance(this.card!.number);
+  }
+
+  performWithdrawal(amount: number): NotePlan {
+    if (!Number.isInteger(amount) || amount <= 0 || amount % 100 !== 0) {
+      throw new Error('Amount must be a positive multiple of 100');
+    }
+    if (amount > ATM.MAX_WITHDRAWAL) throw new Error(`Maximum per withdrawal is ${ATM.MAX_WITHDRAWAL}`);
+    const plan = this.dispenser.plan(amount); // 1. can the machine pay it?
+    if (!plan) throw new Error('ATM cannot dispense this amount; try a different amount');
+    if (!this.bank.debit(this.card!.number, amount)) throw new Error('Insufficient funds'); // 2. bank approves
+    this.dispenser.dispense(plan); // 3. only now remove notes
+    return plan;
+  }
+}
+```
+
+## Edge cases
+
+- Wrong PIN twice then right → authenticated; three wrong → card retained, back to idle.
+- Withdraw 150, 0, −100, 25,000 → rejected before contacting the bank.
+- Machine can't make the amount → rejected and **not debited**.
+- Bank declines → notes untouched.
+- Insert a second card, enter PIN without a card, withdraw before PIN → rejected by the state.
+
+## Extensions
+
+- **Deposits** — a cash acceptor that counts notes; credit after counting.
+- **Dispense failure after debit** (jam) → a reversal call to the bank (`credit`) and a logged incident; banks reconcile against the ATM's journal.
+- **Session timeout** — auto-eject after inactivity (a timer that triggers `ejectCard`).
+- **Daily limits** — enforced by the bank service, not the ATM.
+- **Low-cash alerts** — Observer on dispenser stock.
+
+## Interview follow-ups
+
+- *"Why check the notes before debiting?"* — Otherwise the account is charged for cash that can't be dispensed; debits are hard to undo.
+- *"Why does the chain need backtracking?"* — Limited note counts make greedy fail (₹600 from 500×1 + 200×3).
+- *"What if the network to the bank fails mid-withdrawal?"* — Don't dispense without a confirmed debit; if the debit status is unknown, reverse it or reconcile using an idempotent transaction id.
+- *"Why the State pattern?"* — Clear rules per session stage; adding `OutOfService` or `Maintenance` is one class.

@@ -1,0 +1,188 @@
+---
+title: "Tic-Tac-Toe"
+track: "lld"
+kind: "notes"
+order: 13
+slug: "tic-tac-toe"
+updated: 2026-10-14
+description: "A small but frequently asked LLD warm-up — board, players, turns and game status for an N×N board, with O(1) win detection using row, column and diagonal counters instead of rescanning the board."
+---
+
+import Callout from '../../components/Callout.astro';
+import Mermaid from '../../components/Mermaid.astro';
+
+## Problem
+
+Design a two-player Tic-Tac-Toe game on an N×N board. Players alternate placing their mark; the first to fill a full row, column or diagonal wins; a full board with no winner is a draw.
+
+## Requirements
+
+- Board size N (default 3); two players with marks X and O; X moves first.
+- `play(row, col)` places the current player's mark, then returns the game status.
+- Reject moves that are out of range, on an occupied cell, or after the game has ended.
+- Detect a win or draw after every move.
+
+## Entities and class diagram
+
+<Mermaid caption="Game owns the board, the players and the win tracking" code={`classDiagram
+  class Game {
+    -board: Board
+    -players: Player[]
+    -turn: number
+    -status: GameStatus
+    +play(row, col) GameStatus
+    +currentPlayer() Player
+    +winner() Player
+  }
+  class Board {
+    +size: number
+    +place(row, col, mark)
+    +get(row, col) Mark
+    +isFull() boolean
+  }
+  class WinTracker {
+    +record(row, col, mark) boolean
+  }
+  class Player {
+    +name: string
+    +mark: Mark
+  }
+  Game *-- Board
+  Game *-- WinTracker
+  Game o-- Player
+`} />
+
+## Design decisions
+
+- **Board knows cells, Game knows rules.** `Board` validates coordinates and occupancy; `Game` handles turns, status and winning. A different game on the same board (Connect Four–style) reuses `Board`.
+- **O(1) win detection.** Rescanning the row, column and diagonals after each move is O(N). Instead keep a counter per row, per column and for the two diagonals: +1 for X, −1 for O. A counter reaching ±N means that line is complete. Each move updates at most four counters.
+- **Status is explicit** (`InProgress`, `Won`, `Draw`), so "move after game over" is a simple guard.
+
+## Final code
+
+```ts
+enum Mark { X = 'X', O = 'O' }
+enum GameStatus { InProgress = 'IN_PROGRESS', Won = 'WON', Draw = 'DRAW' }
+
+class Player {
+  constructor(readonly name: string, readonly mark: Mark) {}
+}
+
+class Board {
+  private cells: (Mark | null)[][];
+  private filled = 0;
+
+  constructor(readonly size: number) {
+    if (size < 3) throw new Error('Board size must be at least 3');
+    this.cells = Array.from({ length: size }, () => Array<Mark | null>(size).fill(null));
+  }
+
+  get(row: number, col: number): Mark | null {
+    this.assertInRange(row, col);
+    return this.cells[row][col];
+  }
+
+  place(row: number, col: number, mark: Mark): void {
+    if (this.get(row, col) !== null) throw new Error(`Cell (${row}, ${col}) is occupied`);
+    this.cells[row][col] = mark;
+    this.filled++;
+  }
+
+  isFull(): boolean {
+    return this.filled === this.size * this.size;
+  }
+
+  private assertInRange(row: number, col: number): void {
+    if (!Number.isInteger(row) || !Number.isInteger(col) || row < 0 || col < 0 || row >= this.size || col >= this.size) {
+      throw new Error(`Cell (${row}, ${col}) is off the board`);
+    }
+  }
+}
+
+/** Tracks line sums: +1 for X, -1 for O. A sum of ±n completes the line. */
+class WinTracker {
+  private rows: number[];
+  private cols: number[];
+  private diag = 0;
+  private antiDiag = 0;
+
+  constructor(private n: number) {
+    this.rows = Array(n).fill(0);
+    this.cols = Array(n).fill(0);
+  }
+
+  record(row: number, col: number, mark: Mark): boolean {
+    const v = mark === Mark.X ? 1 : -1;
+    this.rows[row] += v;
+    this.cols[col] += v;
+    if (row === col) this.diag += v;
+    if (row + col === this.n - 1) this.antiDiag += v;
+    const target = v * this.n;
+    return (
+      this.rows[row] === target || this.cols[col] === target || this.diag === target || this.antiDiag === target
+    );
+  }
+}
+
+class Game {
+  private board: Board;
+  private tracker: WinTracker;
+  private turn = 0;
+  private status = GameStatus.InProgress;
+  private winningPlayer: Player | null = null;
+
+  constructor(private players: [Player, Player], size = 3) {
+    if (players[0].mark === players[1].mark) throw new Error('Players need different marks');
+    this.board = new Board(size);
+    this.tracker = new WinTracker(size);
+  }
+
+  currentPlayer(): Player {
+    return this.players[this.turn % 2];
+  }
+
+  getStatus(): GameStatus {
+    return this.status;
+  }
+
+  winner(): Player | null {
+    return this.winningPlayer;
+  }
+
+  play(row: number, col: number): GameStatus {
+    if (this.status !== GameStatus.InProgress) throw new Error('Game is over');
+    const player = this.currentPlayer();
+    this.board.place(row, col, player.mark); // validates range and occupancy
+    if (this.tracker.record(row, col, player.mark)) {
+      this.status = GameStatus.Won;
+      this.winningPlayer = player;
+    } else if (this.board.isFull()) {
+      this.status = GameStatus.Draw;
+    } else {
+      this.turn++;
+    }
+    return this.status;
+  }
+}
+```
+
+## Edge cases
+
+- Occupied cell, off-board coordinates, non-integer coordinates → rejected, and the turn doesn't pass.
+- Move after a win or draw → "Game is over".
+- A win on the very last cell is a win, not a draw — check win before full.
+- Both diagonals pass through the centre on odd N; the counters handle it.
+
+## Extensions
+
+- **Undo** — Command pattern storing `(row, col, mark)`; reverse the counters.
+- **AI player** — a `Player` with a `MoveStrategy` (random, minimax with alpha-beta for 3×3).
+- **K-in-a-row on a large board** (Gomoku) — counters no longer work; check the four directions from the last move, counting consecutive marks (O(K)).
+- **More than two players** — marks as values, counters per player per line.
+
+## Interview follow-ups
+
+- *"How do you check for a winner efficiently?"* — Row/column/diagonal counters, O(1) per move, O(N) memory.
+- *"Why separate Board from Game?"* — Board is reusable state with validation; rules change between games.
+- *"How would you add an AI opponent?"* — A strategy interface for choosing moves; minimax for small boards.
+- *"Make it a networked multiplayer game."* — Server-authoritative `Game`, players send moves, server validates turn ownership and broadcasts state.

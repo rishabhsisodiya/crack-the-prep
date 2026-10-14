@@ -1,0 +1,106 @@
+---
+title: "Concurrency in LLD"
+track: "lld"
+kind: "notes"
+order: 4
+slug: "concurrency"
+updated: 2026-10-14
+description: "The concurrency questions LLD rounds ask — race conditions on shared state, locks and their granularity, atomic operations, optimistic vs pessimistic locking, deadlocks, thread-safe singletons and collections — in Java terms and their JavaScript/Node equivalents."
+---
+
+import Callout from '../../components/Callout.astro';
+
+Most LLD problems have a concurrency question hiding in them: two cars entering through different gates for the last spot, two users booking seat F12, two threads withdrawing from one account. You're expected to spot the race and fix it at the right granularity.
+
+## The race condition, in one picture
+
+Check-then-act on shared state without protection:
+
+```ts
+// Two callers run this at the same time on the last free spot
+const spot = lot.findFreeSpot();  // both see spot 42 free
+spot.assign(vehicle);             // both assign -> double allocation
+```
+
+Both read "free", both write "taken". The fix is to make **check and act one atomic step**.
+
+## Tools, from coarse to fine
+
+| Tool | Java | Node / TypeScript |
+|---|---|---|
+| One lock for everything | `synchronized` method on the service | A single async mutex around the operation |
+| Lock per resource | `ReentrantLock` per floor/spot/seat; `synchronized (spot)` | A mutex per key (`Map<key, Mutex>`) |
+| Atomic primitives | `AtomicInteger.compareAndSet`, `ConcurrentHashMap.computeIfAbsent` | Synchronous code between `await`s is already atomic |
+| Database | `SELECT … FOR UPDATE`, conditional `UPDATE … WHERE status='FREE'`, version columns | Same — the DB is the real arbiter across processes |
+| Distributed | Redis `SET NX PX` locks, Redlock | Same |
+
+**Granularity matters.** A single lock around the whole parking lot is correct but serializes every entry gate. A lock per floor or per spot lets unrelated operations proceed in parallel. Say this trade-off out loud.
+
+## Node.js: single thread, but not race-free
+
+JavaScript runs one piece of synchronous code at a time, so code with no `await` between check and act is atomic within one process:
+
+```ts
+assignSpot(vehicle: Vehicle) {
+  const spot = this.spots.find((s) => s.isFree());   // no await between
+  if (!spot) throw new Error('Lot full');
+  spot.assign(vehicle);                               // check-and-act is atomic here
+  return spot;
+}
+```
+
+The race comes back as soon as there's an `await` in the middle (a DB call, a payment) or more than one process/server. Then use a per-key async mutex in-process, and a database or Redis guard across processes:
+
+```ts
+class Mutex {
+  private tail: Promise<void> = Promise.resolve();
+  async run<T>(fn: () => Promise<T> | T): Promise<T> {
+    const prev = this.tail;
+    let release!: () => void;
+    this.tail = new Promise<void>((r) => (release = r));
+    await prev;
+    try { return await fn(); } finally { release(); }
+  }
+}
+```
+
+## Optimistic vs pessimistic locking
+
+- **Pessimistic**: lock first, then read and write (`FOR UPDATE`, `synchronized`). Good under high contention; risks blocking and deadlocks.
+- **Optimistic**: read a version, write only if the version is unchanged (`UPDATE … SET …, version = version + 1 WHERE id = ? AND version = ?`); retry on failure. Good when conflicts are rare; no locks held while the user thinks.
+
+Seat booking with a payment step usually combines them: an atomic conditional update to **hold** the seat with a TTL, then confirm.
+
+## Deadlocks
+
+Two threads each hold one lock and wait for the other's. Four conditions must all hold (mutual exclusion, hold-and-wait, no preemption, circular wait); break one:
+- **Lock ordering** — always acquire locks in a global order (e.g. by account id when transferring between two accounts). This is the standard answer.
+- **Timeouts** — `tryLock(timeout)` and back off.
+- **One lock** for operations that touch several resources, if contention allows.
+
+```java
+// Transfer between accounts without deadlock: lock in id order
+Account first = a.id < b.id ? a : b, second = a.id < b.id ? b : a;
+synchronized (first) { synchronized (second) { a.debit(x); b.credit(x); } }
+```
+
+## Thread-safe building blocks (Java)
+
+- `ConcurrentHashMap` instead of `HashMap` + `synchronized`; `computeIfAbsent` for atomic get-or-create.
+- `AtomicInteger`/`AtomicLong` for counters and ID generators.
+- `BlockingQueue` (`LinkedBlockingQueue`, `ArrayBlockingQueue`) for producer-consumer — e.g. elevator requests, a logger's async writer, a job queue.
+- `ReadWriteLock` when reads dominate (a cache).
+- `ExecutorService` thread pools rather than raw threads.
+- **Singletons**: enum singleton or holder idiom; never unsynchronized lazy init.
+
+<Callout type="tip">
+A strong pattern for interviews: "In this single-process demo the critical section is synchronous, so it's atomic. In production with multiple servers, the guarantee moves to the database: a conditional update on the spot/seat row, or a unique constraint." It shows you know where the real boundary is.
+</Callout>
+
+## Interview follow-ups
+
+- *"Two gates, one spot left."* — Atomic check-and-assign: per-floor lock in-process, conditional update in the DB across servers.
+- *"Why not one global lock?"* — Correct but kills throughput; lock at the finest granularity that preserves the invariant.
+- *"How do you avoid deadlock in a money transfer?"* — Acquire locks in a consistent order (by id).
+- *"Optimistic or pessimistic for seat booking?"* — Atomic conditional hold (optimistic-style) with TTL; pessimistic locks across a payment step would hold locks for minutes.
+- *"Is Node.js code thread safe?"* — No data races within synchronous code, but logical races across `await`s and across processes still need guards.

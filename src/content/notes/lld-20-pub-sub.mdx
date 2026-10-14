@@ -1,0 +1,207 @@
+---
+title: "Pub-Sub / Message Broker"
+track: "lld"
+kind: "notes"
+order: 20
+slug: "pub-sub"
+updated: 2026-10-14
+description: "Designing an in-memory publish-subscribe broker — topics as append-only logs with offsets, consumer groups that share work, replay from the beginning, retries with a dead-letter list, and how this maps to Kafka."
+---
+
+import Callout from '../../components/Callout.astro';
+import Mermaid from '../../components/Mermaid.astro';
+
+The distributed version (partitions, replication, durability) is in [Distributed Message Queue](/prep/system-design/distributed-message-queue). This page designs the in-process object model, which interviewers often ask as a machine-coding problem.
+
+## Problem
+
+Design a message broker. Publishers send messages to named topics. Subscribers register handlers on a topic and receive messages. Several independent services can each receive every message, while several instances of the same service share the work.
+
+## Requirements
+
+- Create topics; publish a message (any payload) to a topic.
+- Subscribe with a **group id** and a handler. Every **group** gets every message; within a group, each message goes to **one** member (round-robin).
+- A new group can start from the **latest** message or replay from the **beginning**.
+- If a handler throws, retry up to N attempts; then move the message to a **dead-letter** list for that group.
+- Unsubscribe; a group with no members keeps its position and resumes when someone rejoins.
+- Delivery order within a topic is the publish order.
+
+## Entities and class diagram
+
+<Mermaid caption="Topics are logs; each consumer group keeps its own offset into the log" code={`classDiagram
+  class Broker {
+    -topics: Map
+    +createTopic(name)
+    +publish(topic, payload) Message
+    +subscribe(topic, groupId, handler, options) Unsubscribe
+    +deadLetters(topic, groupId) Message[]
+  }
+  class Topic {
+    +name: string
+    -log: Message[]
+    -groups: Map
+    +append(payload) Message
+  }
+  class ConsumerGroup {
+    +id: string
+    -offset: number
+    -members: Handler[]
+    -deadLetters: Message[]
+    +drain(log)
+  }
+  class Message {
+    +offset: number
+    +topic: string
+    +payload: any
+    +timestamp: number
+  }
+  Broker *-- Topic
+  Topic *-- Message
+  Topic *-- ConsumerGroup
+`} />
+
+## Design decisions
+
+- **A topic is an append-only log; consumers track offsets.** Messages aren't deleted when consumed, so a new group can replay history and a slow group doesn't affect a fast one. This is the Kafka model rather than a classic queue that deletes on delivery.
+- **Consumer groups give both pub-sub and work-sharing.** Different groups = broadcast; members of one group = competing consumers.
+- **The group, not the member, owns the offset.** Members come and go; the group's position survives.
+- **Retries and dead letters per group**, so one group's poison message doesn't block the others.
+- **Synchronous delivery** keeps the demo deterministic. A real broker delivers asynchronously; the extension section covers it.
+
+## Final code
+
+```ts
+type Message<T = unknown> = { offset: number; topic: string; payload: T; timestamp: number };
+type Handler = (message: Message) => void;
+type SubscribeOptions = { fromBeginning?: boolean };
+
+class ConsumerGroup {
+  private members: Handler[] = [];
+  private next = 0; // round-robin pointer
+  readonly deadLetters: Message[] = [];
+
+  constructor(readonly id: string, public offset: number, private maxAttempts: number) {}
+
+  get hasMembers(): boolean {
+    return this.members.length > 0;
+  }
+
+  add(handler: Handler): void {
+    this.members.push(handler);
+  }
+
+  remove(handler: Handler): void {
+    this.members = this.members.filter((h) => h !== handler);
+    this.next = 0;
+  }
+
+  /** Deliver everything from the group's offset to the end of the log. */
+  drain(log: Message[]): void {
+    while (this.hasMembers && this.offset < log.length) {
+      // Advance before delivering: a handler that publishes re-enters drain() and must not see this message again.
+      const message = log[this.offset++];
+      this.deliver(message);
+    }
+  }
+
+  private deliver(message: Message): void {
+    for (let attempt = 1; attempt <= this.maxAttempts; attempt++) {
+      const handler = this.members[this.next % this.members.length];
+      this.next++;
+      try {
+        handler(message);
+        return;
+      } catch {
+        // retry, possibly on another member
+      }
+    }
+    this.deadLetters.push(message);
+  }
+}
+
+class Topic {
+  private log: Message[] = [];
+  private groups = new Map<string, ConsumerGroup>();
+
+  constructor(readonly name: string, private clock: () => number, private maxAttempts: number) {}
+
+  append(payload: unknown): Message {
+    const message: Message = { offset: this.log.length, topic: this.name, payload, timestamp: this.clock() };
+    this.log.push(message);
+    for (const group of this.groups.values()) group.drain(this.log);
+    return message;
+  }
+
+  join(groupId: string, handler: Handler, options: SubscribeOptions): () => void {
+    let group = this.groups.get(groupId);
+    if (!group) {
+      group = new ConsumerGroup(groupId, options.fromBeginning ? 0 : this.log.length, this.maxAttempts);
+      this.groups.set(groupId, group);
+    }
+    group.add(handler);
+    group.drain(this.log); // catch up anything missed while the group had no members
+    const g = group;
+    return () => g.remove(handler);
+  }
+
+  group(groupId: string): ConsumerGroup | undefined {
+    return this.groups.get(groupId);
+  }
+}
+
+class Broker {
+  private topics = new Map<string, Topic>();
+
+  constructor(private clock: () => number = Date.now, private maxAttempts = 3) {}
+
+  createTopic(name: string): void {
+    if (this.topics.has(name)) throw new Error(`Topic ${name} already exists`);
+    this.topics.set(name, new Topic(name, this.clock, this.maxAttempts));
+  }
+
+  publish(topic: string, payload: unknown): Message {
+    return this.topic(topic).append(payload);
+  }
+
+  subscribe(topic: string, groupId: string, handler: Handler, options: SubscribeOptions = {}): () => void {
+    return this.topic(topic).join(groupId, handler, options);
+  }
+
+  deadLetters(topic: string, groupId: string): Message[] {
+    return this.topic(topic).group(groupId)?.deadLetters ?? [];
+  }
+
+  offset(topic: string, groupId: string): number | undefined {
+    return this.topic(topic).group(groupId)?.offset;
+  }
+
+  private topic(name: string): Topic {
+    const t = this.topics.get(name);
+    if (!t) throw new Error(`Unknown topic ${name}`);
+    return t;
+  }
+}
+```
+
+## Edge cases
+
+- Publish to an unknown topic → error (no silent auto-creation, which hides typos).
+- A group whose members all unsubscribed → keeps its offset; messages wait and are delivered when a member rejoins.
+- Handler throws every time → after `maxAttempts` the message is dead-lettered and the group moves on (no poison-message deadlock).
+- A new group with `fromBeginning` → replays the whole log; without it, starts at the next message.
+
+## Extensions
+
+- **Async delivery**: each group drains from its own queue on its own worker (Java: an `ExecutorService` per group; Node: a microtask/async loop), so a slow consumer doesn't block publishers.
+- **Partitions**: split a topic into partitions by key to scale consumers while keeping per-key order; each group member owns some partitions.
+- **Retention**: trim the log by age or size; groups behind the retention point jump forward.
+- **Filters**: subscribers only receive messages matching a predicate (content-based routing).
+- **Acknowledgements and at-least-once**: commit the offset after the handler succeeds, persisted, so a crash redelivers.
+
+## Interview follow-ups
+
+- *"Queue vs pub-sub?"* — Queue: each message to one consumer. Pub-sub: each message to every subscriber. Consumer groups give both.
+- *"Why keep messages after delivery?"* — Replay, multiple independent groups, debugging; deletion becomes a retention policy.
+- *"A consumer keeps failing on one message."* — Bounded retries, then dead-letter; alert on dead-letter growth.
+- *"How do you keep order with multiple consumers?"* — Order only within a partition/key; one consumer per partition at a time.
+- *"Thread safety?"* — Appends to a topic are serialized (a lock per topic); each group's offset is updated only by its own delivery loop.

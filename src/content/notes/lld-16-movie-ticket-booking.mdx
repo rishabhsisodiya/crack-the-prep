@@ -1,0 +1,284 @@
+---
+title: "Movie Ticket Booking (BookMyShow)"
+track: "lld"
+kind: "notes"
+order: 16
+slug: "movie-ticket-booking"
+updated: 2026-10-14
+description: "The class-level design of BookMyShow — movies, screens, shows and per-show seat state, all-or-nothing seat holds with a TTL, confirming through an injected payment gateway, cancellation, and the concurrency question of two users picking the same seat."
+---
+
+import Callout from '../../components/Callout.astro';
+import Mermaid from '../../components/Mermaid.astro';
+
+The system-level design (waiting rooms, on-sale spikes, caching) is in [Ticket Booking HLD](/prep/system-design/ticket-booking). This page is the object model and the core booking logic.
+
+## Problem
+
+Design the booking core of a movie ticketing app: a cinema has screens with seat layouts; a show is a movie on a screen at a time. Users pick specific seats, hold them while paying, then confirm. Two users must never book the same seat.
+
+## Requirements
+
+- Movies, screens (with seats and a category per seat: regular, premium), shows (movie + screen + start time + price per category).
+- See available seats for a show.
+- **Hold** a set of seats for a user — all or nothing — for a limited time (e.g. 8 minutes). Expired holds free their seats automatically.
+- **Confirm** a hold by charging the user through a payment gateway; creates a booking. Fails if the hold expired or payment failed.
+- **Cancel** a booking → seats become available.
+- Release a hold explicitly (user backs out).
+- Out of scope: search, cinemas list, offers, refund rules.
+
+## Entities and class diagram
+
+<Mermaid caption="Static layout (Screen, Seat) is separate from per-show state (ShowSeat)" code={`classDiagram
+  class Movie {
+    +id: string
+    +title: string
+  }
+  class Screen {
+    +id: string
+    +seats: Seat[]
+  }
+  class Seat {
+    +id: string
+    +category: SeatCategory
+  }
+  class Show {
+    +id: string
+    +startTime: number
+    +prices: Map
+  }
+  class ShowSeat {
+    +seatId: string
+    +status: SeatStatus
+    +holdId: string
+    +holdExpiresAt: number
+  }
+  class Hold {
+    +id: string
+    +userId: string
+    +seatIds: string[]
+    +amount: number
+    +expiresAt: number
+  }
+  class Booking {
+    +id: string
+    +status: BookingStatus
+  }
+  class BookingService {
+    +holdSeats(showId, userId, seatIds) Hold
+    +confirm(holdId) Booking
+    +cancel(bookingId)
+  }
+  class PaymentGateway {
+    <<interface>>
+    +charge(userId, amount) boolean
+  }
+  Screen *-- Seat
+  Show --> Movie
+  Show --> Screen
+  Show *-- ShowSeat
+  BookingService o-- PaymentGateway
+  BookingService --> Hold
+  BookingService --> Booking
+`} />
+
+## Design decisions
+
+- **Separate layout from state.** `Seat` belongs to a `Screen` and never changes. `ShowSeat` is the seat's status *for one show*. A seat is free at 6 pm and booked at 9 pm — that only works if state lives on the show.
+- **Holds are first-class.** A `Hold` has an id, a user, seats, an amount and an expiry. Payment happens against a hold, not against raw seats.
+- **Expiry is checked on read, not by a timer.** A seat is available if it's `Available`, or `Held` with an expired hold. No background job is needed for correctness; a sweeper is only housekeeping.
+- **All-or-nothing holds.** Check every requested seat first; only if all are available, mark them all. In a single process this check-and-set is synchronous, so it's atomic.
+- **Facade.** `BookingService` is the one entry point coordinating seats, holds, payment and bookings.
+
+## Final code
+
+```ts
+enum SeatCategory { Regular = 'REGULAR', Premium = 'PREMIUM' }
+enum SeatStatus { Available = 'AVAILABLE', Held = 'HELD', Booked = 'BOOKED' }
+enum BookingStatus { Confirmed = 'CONFIRMED', Cancelled = 'CANCELLED' }
+
+class Movie {
+  constructor(readonly id: string, readonly title: string) {}
+}
+
+class Seat {
+  constructor(readonly id: string, readonly category: SeatCategory) {}
+}
+
+class Screen {
+  constructor(readonly id: string, readonly seats: Seat[]) {}
+}
+
+class Show {
+  constructor(
+    readonly id: string,
+    readonly movie: Movie,
+    readonly screen: Screen,
+    readonly startTime: number,
+    readonly prices: Record<SeatCategory, number>,
+  ) {}
+}
+
+class ShowSeat {
+  status = SeatStatus.Available;
+  holdId: string | null = null;
+  holdExpiresAt = 0;
+  constructor(readonly seat: Seat) {}
+
+  isAvailable(now: number): boolean {
+    return this.status === SeatStatus.Available || (this.status === SeatStatus.Held && this.holdExpiresAt <= now);
+  }
+}
+
+type Hold = { id: string; showId: string; userId: string; seatIds: string[]; amount: number; expiresAt: number };
+type Booking = { id: string; showId: string; userId: string; seatIds: string[]; amount: number; status: BookingStatus };
+
+interface PaymentGateway {
+  charge(userId: string, amount: number): boolean;
+}
+
+class BookingService {
+  private shows = new Map<string, { show: Show; seats: Map<string, ShowSeat> }>();
+  private holds = new Map<string, Hold>();
+  private bookings = new Map<string, Booking>();
+  private seq = 1;
+
+  constructor(
+    private payments: PaymentGateway,
+    private clock: () => number = Date.now,
+    private holdTtlMs = 8 * 60 * 1000,
+  ) {}
+
+  addShow(show: Show): void {
+    if (this.shows.has(show.id)) throw new Error(`Show ${show.id} already exists`);
+    const seats = new Map(show.screen.seats.map((s) => [s.id, new ShowSeat(s)]));
+    this.shows.set(show.id, { show, seats });
+  }
+
+  availableSeats(showId: string): string[] {
+    const now = this.clock();
+    return [...this.showOrThrow(showId).seats.values()].filter((s) => s.isAvailable(now)).map((s) => s.seat.id);
+  }
+
+  holdSeats(showId: string, userId: string, seatIds: string[]): Hold {
+    if (seatIds.length === 0) throw new Error('Select at least one seat');
+    if (new Set(seatIds).size !== seatIds.length) throw new Error('Duplicate seats in request');
+    const { show, seats } = this.showOrThrow(showId);
+    const now = this.clock();
+    if (show.startTime <= now) throw new Error('Show has already started');
+
+    // Check every seat first, then mark all of them: all-or-nothing.
+    const chosen = seatIds.map((id) => {
+      const s = seats.get(id);
+      if (!s) throw new Error(`Seat ${id} does not exist`);
+      if (!s.isAvailable(now)) throw new Error(`Seat ${id} is not available`);
+      return s;
+    });
+
+    const hold: Hold = {
+      id: `H${this.seq++}`,
+      showId,
+      userId,
+      seatIds,
+      amount: chosen.reduce((sum, s) => sum + show.prices[s.seat.category], 0),
+      expiresAt: now + this.holdTtlMs,
+    };
+    for (const s of chosen) {
+      s.status = SeatStatus.Held;
+      s.holdId = hold.id;
+      s.holdExpiresAt = hold.expiresAt;
+    }
+    this.holds.set(hold.id, hold);
+    return hold;
+  }
+
+  confirm(holdId: string): Booking {
+    const hold = this.holds.get(holdId);
+    if (!hold) throw new Error(`Unknown hold ${holdId}`);
+    const { seats } = this.showOrThrow(hold.showId);
+    const now = this.clock();
+    const stillHeld = hold.seatIds.every((id) => {
+      const s = seats.get(id)!;
+      return s.status === SeatStatus.Held && s.holdId === hold.id && s.holdExpiresAt > now;
+    });
+    if (!stillHeld) {
+      this.holds.delete(holdId);
+      throw new Error('Hold expired; please select seats again');
+    }
+    if (!this.payments.charge(hold.userId, hold.amount)) throw new Error('Payment failed; seats are still held');
+
+    for (const id of hold.seatIds) {
+      const s = seats.get(id)!;
+      s.status = SeatStatus.Booked;
+      s.holdId = null;
+    }
+    this.holds.delete(holdId);
+    const booking: Booking = {
+      id: `B${this.seq++}`,
+      showId: hold.showId,
+      userId: hold.userId,
+      seatIds: hold.seatIds,
+      amount: hold.amount,
+      status: BookingStatus.Confirmed,
+    };
+    this.bookings.set(booking.id, booking);
+    return booking;
+  }
+
+  releaseHold(holdId: string): void {
+    const hold = this.holds.get(holdId);
+    if (!hold) return;
+    const { seats } = this.showOrThrow(hold.showId);
+    for (const id of hold.seatIds) {
+      const s = seats.get(id)!;
+      if (s.holdId === holdId && s.status === SeatStatus.Held) this.free(s);
+    }
+    this.holds.delete(holdId);
+  }
+
+  cancel(bookingId: string): Booking {
+    const booking = this.bookings.get(bookingId);
+    if (!booking) throw new Error(`Unknown booking ${bookingId}`);
+    if (booking.status === BookingStatus.Cancelled) throw new Error('Booking already cancelled');
+    const { seats } = this.showOrThrow(booking.showId);
+    for (const id of booking.seatIds) this.free(seats.get(id)!);
+    booking.status = BookingStatus.Cancelled;
+    return booking;
+  }
+
+  private free(s: ShowSeat): void {
+    s.status = SeatStatus.Available;
+    s.holdId = null;
+    s.holdExpiresAt = 0;
+  }
+
+  private showOrThrow(showId: string) {
+    const entry = this.shows.get(showId);
+    if (!entry) throw new Error(`Unknown show ${showId}`);
+    return entry;
+  }
+}
+```
+
+## Edge cases
+
+- Requested seats overlap an existing hold or booking → the whole request fails; no seats change.
+- Hold expired → its seats are available to others immediately, and confirming it fails.
+- Payment fails → hold stays until expiry so the user can retry.
+- Seat doesn't exist, duplicate seat ids, show already started → rejected.
+- Releasing an unknown or already-confirmed hold → no-op.
+
+## Extensions
+
+- **Pricing rules** — weekend/peak pricing as a `PricingStrategy` on the show.
+- **Seat-adjacency rules** — no single empty seat left between bookings (a validation strategy).
+- **Notifications** — Observer on booking confirmed/cancelled (email, SMS).
+- **Refund policy** — cancellation fee by time before show, a strategy.
+- **Persistence** — `ShowSeatRepository` with a conditional update for holds (see below).
+
+## Interview follow-ups
+
+- *"Two users click the same seat at the same time."* — In one process the check-and-mark is synchronous and atomic. With threads (Java), lock per show (or per seat, acquiring in sorted order to avoid deadlock). Across servers, a conditional update: `UPDATE show_seats SET status='HELD' … WHERE seat_id IN (…) AND (status='AVAILABLE' OR hold_expires_at < now())` and check the row count. See [Concurrency in LLD](/prep/lld/concurrency).
+- *"Why not lock seats for the whole payment?"* — A database lock held for minutes blocks everyone; a hold with an expiry is a logical lock that frees itself.
+- *"Payment succeeds just after the hold expires."* — Confirm checks the hold first; if it's gone, refund. Real systems extend the hold when the user is redirected to the payment page.
+- *"Why separate Seat and ShowSeat?"* — Layout is static per screen; availability is per show.

@@ -9,7 +9,7 @@
  *   - test specs are well-formed, and every reference approach passes its tests
  *   - every tested problem yields starter code that compiles and defines the entry point
  *   - every problem has tests or an entry in `untestable` with a reason, never both
- *   - notes: no duplicate `order` within a track (warn)
+ *   - notes: no duplicate `order` within a track (warn); no duplicate `slug` site-wide (error)
  *   - machine-coding problem pages follow the fixed section template, in order
  */
 import fs from 'node:fs';
@@ -159,10 +159,15 @@ for (const s of untested) err('tests', `"${s.problem}" has neither tests nor an 
 // ---------------------------------------------------------------- notes
 const NOTES = path.join(ROOT, 'src/content/notes');
 const orders = new Map();
+const slugs = new Map();
 for (const f of fs.readdirSync(NOTES).filter((f) => /\.mdx?$/.test(f))) {
   const fm = fs.readFileSync(path.join(NOTES, f), 'utf8').match(/^---\n([\s\S]*?)\n---/);
   if (!fm) continue;
   const get = (k) => fm[1].match(new RegExp(`^${k}:\\s*"?([^"\\n]+)"?`, 'm'))?.[1];
+  // The glob loader uses `slug` as the entry id across ALL tracks; a repeat silently drops a page.
+  const slug = get('slug');
+  if (slug && slugs.has(slug)) err('notes', `${f} and ${slugs.get(slug)} share slug "${slug}" (slugs must be unique site-wide)`);
+  else if (slug) slugs.set(slug, f);
   if (get('draft') === 'true') continue;
   const k = `${get('track')}|${get('kind') ?? 'notes'}|${get('order') ?? '1'}`;
   if (orders.has(k)) warn('notes', `${f} and ${orders.get(k)} share track/kind/order ${k}`);

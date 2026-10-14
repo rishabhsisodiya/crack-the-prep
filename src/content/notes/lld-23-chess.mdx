@@ -1,0 +1,292 @@
+---
+title: "Chess"
+track: "lld"
+kind: "notes"
+order: 23
+slug: "chess"
+updated: 2026-10-14
+description: "Designing chess — board and positions, a polymorphic Piece hierarchy where each piece knows its own movement, path checks for sliding pieces, turn order, rejecting moves that leave your king in check, and detecting check, checkmate and stalemate."
+---
+
+import Callout from '../../components/Callout.astro';
+import Mermaid from '../../components/Mermaid.astro';
+
+## Problem
+
+Design a two-player chess game. Players alternate moves; illegal moves are rejected; the game detects check, checkmate and stalemate.
+
+## Requirements
+
+- 8×8 board, standard starting position; white moves first.
+- `move("e2", "e4")` validates and applies a move for the side to play.
+- Piece movement rules for king, queen, rook, bishop, knight and pawn (one or two squares forward from the start, diagonal capture, promotion to a queen).
+- A move may not leave the mover's own king in check.
+- After each move, report: in progress, check, checkmate or stalemate.
+- Scope cut (say it out loud): castling, en passant, draw by repetition and the 50-move rule are extensions.
+
+## Entities and class diagram
+
+<Mermaid caption="Each piece knows how it moves; the game knows the rules that involve the whole board" code={`classDiagram
+  class Game {
+    -board: Board
+    -turn: Color
+    +move(from, to) GameStatus
+    +status() GameStatus
+  }
+  class Board {
+    -grid: Piece[][]
+    +get(pos) Piece
+    +set(pos, piece)
+    +isPathClear(from, to) boolean
+  }
+  class Piece {
+    <<abstract>>
+    +color: Color
+    +canMove(board, from, to) boolean
+  }
+  class Position {
+    +row: number
+    +col: number
+  }
+  Game *-- Board
+  Board *-- Piece
+  Piece <|-- King
+  Piece <|-- Queen
+  Piece <|-- Rook
+  Piece <|-- Bishop
+  Piece <|-- Knight
+  Piece <|-- Pawn
+`} />
+
+## Design decisions
+
+- **Polymorphic pieces.** Each subclass implements `canMove(board, from, to)` with its own geometry. No `switch (piece.type)` anywhere — this is the classic open/closed example (a fairy-chess piece is a new class).
+- **Two layers of legality.** `Piece.canMove` checks movement shape and path ("pseudo-legal"). `Game` checks rules that need the whole position: whose turn it is, and that the move doesn't leave your own king in check (simulate the move, test, undo).
+- **Check detection reuses `canMove`**: a king is attacked if any enemy piece can move to its square.
+- **Checkmate/stalemate**: if the side to move has no legal move, it's checkmate when in check, stalemate otherwise. Brute force over all pieces and squares (at most 16 × 64 candidate moves) is fine for an interview.
+- **Algebraic notation at the edge only**: the game converts `"e2"` to a `Position` once; everything inside uses row/col.
+
+## Final code
+
+```ts
+enum Color { White = 'WHITE', Black = 'BLACK' }
+enum GameStatus { InProgress = 'IN_PROGRESS', Check = 'CHECK', Checkmate = 'CHECKMATE', Stalemate = 'STALEMATE' }
+
+type Position = { row: number; col: number }; // row 0 = rank 1, col 0 = file a
+
+function parse(square: string): Position {
+  const m = /^([a-h])([1-8])$/.exec(square);
+  if (!m) throw new Error(`Invalid square ${square}`);
+  return { row: Number(m[2]) - 1, col: m[1].charCodeAt(0) - 97 };
+}
+
+abstract class Piece {
+  constructor(readonly color: Color) {}
+  abstract readonly symbol: string;
+  abstract canMove(board: Board, from: Position, to: Position): boolean;
+}
+
+class Board {
+  private grid: (Piece | null)[][] = Array.from({ length: 8 }, () => Array<Piece | null>(8).fill(null));
+
+  get(p: Position): Piece | null {
+    return this.grid[p.row][p.col];
+  }
+
+  set(p: Position, piece: Piece | null): void {
+    this.grid[p.row][p.col] = piece;
+  }
+
+  /** Squares strictly between from and to are empty (straight or diagonal lines only). */
+  isPathClear(from: Position, to: Position): boolean {
+    const dr = Math.sign(to.row - from.row);
+    const dc = Math.sign(to.col - from.col);
+    let r = from.row + dr;
+    let c = from.col + dc;
+    while (r !== to.row || c !== to.col) {
+      if (this.grid[r][c]) return false;
+      r += dr;
+      c += dc;
+    }
+    return true;
+  }
+
+  *squares(): Generator<Position> {
+    for (let row = 0; row < 8; row++) for (let col = 0; col < 8; col++) yield { row, col };
+  }
+
+  static standard(): Board {
+    const b = new Board();
+    const back = [Rook, Knight, Bishop, Queen, King, Bishop, Knight, Rook];
+    back.forEach((P, col) => {
+      b.set({ row: 0, col }, new P(Color.White));
+      b.set({ row: 7, col }, new P(Color.Black));
+      b.set({ row: 1, col }, new Pawn(Color.White));
+      b.set({ row: 6, col }, new Pawn(Color.Black));
+    });
+    return b;
+  }
+}
+
+const delta = (from: Position, to: Position) => ({ dr: to.row - from.row, dc: to.col - from.col });
+
+class King extends Piece {
+  readonly symbol = 'K';
+  canMove(_b: Board, from: Position, to: Position) {
+    const { dr, dc } = delta(from, to);
+    return Math.max(Math.abs(dr), Math.abs(dc)) === 1;
+  }
+}
+
+class Rook extends Piece {
+  readonly symbol = 'R';
+  canMove(b: Board, from: Position, to: Position) {
+    const { dr, dc } = delta(from, to);
+    return (dr === 0) !== (dc === 0) && b.isPathClear(from, to);
+  }
+}
+
+class Bishop extends Piece {
+  readonly symbol = 'B';
+  canMove(b: Board, from: Position, to: Position) {
+    const { dr, dc } = delta(from, to);
+    return dr !== 0 && Math.abs(dr) === Math.abs(dc) && b.isPathClear(from, to);
+  }
+}
+
+class Queen extends Piece {
+  readonly symbol = 'Q';
+  canMove(b: Board, from: Position, to: Position) {
+    return new Rook(this.color).canMove(b, from, to) || new Bishop(this.color).canMove(b, from, to);
+  }
+}
+
+class Knight extends Piece {
+  readonly symbol = 'N';
+  canMove(_b: Board, from: Position, to: Position) {
+    const { dr, dc } = delta(from, to);
+    return (Math.abs(dr) === 2 && Math.abs(dc) === 1) || (Math.abs(dr) === 1 && Math.abs(dc) === 2);
+  }
+}
+
+class Pawn extends Piece {
+  readonly symbol = 'P';
+  canMove(b: Board, from: Position, to: Position) {
+    const dir = this.color === Color.White ? 1 : -1;
+    const startRow = this.color === Color.White ? 1 : 6;
+    const { dr, dc } = delta(from, to);
+    const target = b.get(to);
+    if (dc === 0 && !target) {
+      if (dr === dir) return true;
+      return dr === 2 * dir && from.row === startRow && !b.get({ row: from.row + dir, col: from.col });
+    }
+    return Math.abs(dc) === 1 && dr === dir && target !== null; // diagonal capture
+  }
+}
+
+class Game {
+  private turn = Color.White;
+  private current = GameStatus.InProgress;
+
+  constructor(private board: Board = Board.standard()) {}
+
+  get sideToMove(): Color {
+    return this.turn;
+  }
+
+  status(): GameStatus {
+    return this.current;
+  }
+
+  pieceAt(square: string): string | null {
+    const p = this.board.get(parse(square));
+    return p ? `${p.color === Color.White ? 'w' : 'b'}${p.symbol}` : null;
+  }
+
+  move(fromSquare: string, toSquare: string): GameStatus {
+    if (this.current === GameStatus.Checkmate || this.current === GameStatus.Stalemate) throw new Error('Game is over');
+    const from = parse(fromSquare);
+    const to = parse(toSquare);
+    const piece = this.board.get(from);
+    if (!piece) throw new Error(`No piece on ${fromSquare}`);
+    if (piece.color !== this.turn) throw new Error(`It is ${this.turn}'s turn`);
+    if (!this.isLegal(from, to)) throw new Error(`Illegal move ${fromSquare}-${toSquare}`);
+
+    this.board.set(to, piece);
+    this.board.set(from, null);
+    const lastRow = piece.color === Color.White ? 7 : 0;
+    if (piece instanceof Pawn && to.row === lastRow) this.board.set(to, new Queen(piece.color)); // promotion
+
+    this.turn = this.turn === Color.White ? Color.Black : Color.White;
+    const inCheck = this.isInCheck(this.turn);
+    const canMove = this.hasLegalMove(this.turn);
+    this.current = canMove
+      ? inCheck ? GameStatus.Check : GameStatus.InProgress
+      : inCheck ? GameStatus.Checkmate : GameStatus.Stalemate;
+    return this.current;
+  }
+
+  /** Pseudo-legal move that also doesn't leave the mover's king in check. */
+  private isLegal(from: Position, to: Position): boolean {
+    const piece = this.board.get(from);
+    if (!piece || (from.row === to.row && from.col === to.col)) return false;
+    const captured = this.board.get(to);
+    if (captured?.color === piece.color) return false;
+    if (!piece.canMove(this.board, from, to)) return false;
+    // simulate, test, undo
+    this.board.set(to, piece);
+    this.board.set(from, null);
+    const leavesKingInCheck = this.isInCheck(piece.color);
+    this.board.set(from, piece);
+    this.board.set(to, captured);
+    return !leavesKingInCheck;
+  }
+
+  private isInCheck(color: Color): boolean {
+    let king: Position | null = null;
+    for (const sq of this.board.squares()) {
+      const p = this.board.get(sq);
+      if (p instanceof King && p.color === color) king = sq;
+    }
+    if (!king) throw new Error(`No ${color} king on the board`);
+    for (const sq of this.board.squares()) {
+      const p = this.board.get(sq);
+      if (p && p.color !== color && p.canMove(this.board, sq, king)) return true;
+    }
+    return false;
+  }
+
+  private hasLegalMove(color: Color): boolean {
+    for (const from of this.board.squares()) {
+      if (this.board.get(from)?.color !== color) continue;
+      for (const to of this.board.squares()) if (this.isLegal(from, to)) return true;
+    }
+    return false;
+  }
+}
+```
+
+## Edge cases
+
+- Moving the opponent's piece, moving from an empty square, capturing your own piece → rejected.
+- Pinned piece moving off the line to the king → rejected (it would leave the king in check).
+- Pawn: blocked forward move, double step after the first move, straight "capture" → rejected.
+- Moves after checkmate or stalemate → "Game is over".
+- Promotion → the pawn becomes a queen on the last rank.
+
+## Extensions
+
+- **Castling** — track `hasMoved` on king and rooks; king may not pass through attacked squares.
+- **En passant** — store the last move; a pawn that just moved two squares can be captured as if it moved one.
+- **Promotion choice** — pass the desired piece type.
+- **Draw rules** — threefold repetition (hash positions), 50-move rule (counter reset on pawn moves/captures), insufficient material.
+- **Move history and undo** — Command pattern storing the moved piece, the captured piece and the promotion.
+- **Clocks** — a `ChessClock` per player with increments.
+- **AI** — minimax with alpha-beta over legal moves.
+
+## Interview follow-ups
+
+- *"Why does each piece implement its own movement?"* — Open/closed: new piece types don't change existing code; rules live next to the data they're about.
+- *"Where does 'cannot leave king in check' live?"* — In `Game`, because it depends on the whole board, not one piece's geometry.
+- *"How do you detect checkmate?"* — In check and no legal move exists.
+- *"Performance?"* — Brute force is fine for a game; engines use move generators per piece and bitboards.

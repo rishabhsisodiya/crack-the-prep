@@ -1,0 +1,173 @@
+---
+title: "Snake and Ladder"
+track: "lld"
+kind: "notes"
+order: 14
+slug: "snake-and-ladder"
+updated: 2026-10-14
+description: "A common machine-coding LLD round — board with snakes and ladders as jumps, validated configuration, players and turns, an injectable dice for deterministic tests, exact-landing win rule, and extensions like extra turns on six."
+---
+
+import Callout from '../../components/Callout.astro';
+import Mermaid from '../../components/Mermaid.astro';
+
+## Problem
+
+Design Snake and Ladder for 2+ players on a 100-cell board. Players roll a die in turn and move forward; landing on a ladder's foot climbs it, landing on a snake's head slides down. The first player to land exactly on 100 wins.
+
+## Requirements
+
+- Board of `size` cells (default 100), with any number of snakes and ladders given as `from → to` jumps.
+- Validate the board: jumps stay on the board, snakes go down, ladders go up, nothing starts at the last cell, and no jump starts where another jump starts or ends (no chains or loops).
+- Players start off the board at 0 and take turns in order.
+- A roll that would overshoot the last cell means the player doesn't move.
+- The game ends when someone reaches the last cell; further turns are rejected.
+- The die must be swappable (fair die, loaded die for testing, two dice).
+
+## Entities and class diagram
+
+<Mermaid caption="Game drives turns; Board resolves movement; Dice is a strategy" code={`classDiagram
+  class Game {
+    -players: Player[]
+    -turn: number
+    +playTurn() TurnResult
+    +winner() Player
+  }
+  class Board {
+    +size: number
+    -jumps: Map
+    +move(position, roll) Move
+  }
+  class Jump {
+    +from: number
+    +to: number
+  }
+  class Player {
+    +name: string
+    +position: number
+  }
+  class Dice {
+    <<interface>>
+    +roll() number
+  }
+  Game *-- Board
+  Game o-- Player
+  Game o-- Dice
+  Board *-- Jump
+  Dice <|.. RandomDice
+`} />
+
+## Design decisions
+
+- **Snakes and ladders are the same thing: a jump.** One `Map<from, to>` handles both; the only difference is direction, used for validation and for reporting. No `Snake` and `Ladder` class hierarchy needed.
+- **Board owns movement rules** (overshoot, jumps), **Game owns turn order and winning.** A variant with different movement rules changes `Board` only.
+- **Dice is an interface.** `RandomDice` takes an injectable random function; tests pass a scripted die. This is the single most useful thing for making a game testable.
+- **Validate the board up front** so the game loop never has to handle impossible configurations.
+
+## Final code
+
+```ts
+interface Dice {
+  roll(): number;
+}
+
+class RandomDice implements Dice {
+  constructor(private faces = 6, private random: () => number = Math.random) {}
+  roll(): number {
+    return 1 + Math.floor(this.random() * this.faces);
+  }
+}
+
+type Jump = { from: number; to: number };
+type Move = { from: number; to: number; jump: 'snake' | 'ladder' | null };
+
+class Board {
+  private jumps = new Map<number, number>();
+
+  constructor(readonly size: number, jumps: Jump[]) {
+    if (size < 2) throw new Error('Board too small');
+    const ends = new Set(jumps.map((j) => j.to));
+    for (const { from, to } of jumps) {
+      if (from < 1 || to < 1 || from > size || to > size) throw new Error(`Jump ${from}->${to} is off the board`);
+      if (from === to) throw new Error(`Jump ${from}->${to} goes nowhere`);
+      if (from === size) throw new Error('No jump may start on the last cell');
+      if (this.jumps.has(from)) throw new Error(`Two jumps start at ${from}`);
+      if (ends.has(from)) throw new Error(`Jump at ${from} starts where another jump ends`);
+      this.jumps.set(from, to);
+    }
+  }
+
+  move(position: number, roll: number): Move {
+    const target = position + roll;
+    if (target > this.size) return { from: position, to: position, jump: null }; // overshoot: stay
+    const jumpTo = this.jumps.get(target);
+    if (jumpTo === undefined) return { from: position, to: target, jump: null };
+    return { from: position, to: jumpTo, jump: jumpTo > target ? 'ladder' : 'snake' };
+  }
+}
+
+class Player {
+  position = 0;
+  constructor(readonly name: string) {}
+}
+
+type TurnResult = Move & { player: string; roll: number; won: boolean };
+
+class Game {
+  private turn = 0;
+  private winningPlayer: Player | null = null;
+
+  constructor(private board: Board, private players: Player[], private dice: Dice) {
+    if (players.length < 2) throw new Error('Need at least two players');
+    if (new Set(players.map((p) => p.name)).size !== players.length) throw new Error('Player names must be unique');
+  }
+
+  winner(): Player | null {
+    return this.winningPlayer;
+  }
+
+  currentPlayer(): Player {
+    return this.players[this.turn % this.players.length];
+  }
+
+  playTurn(): TurnResult {
+    if (this.winningPlayer) throw new Error(`Game over: ${this.winningPlayer.name} won`);
+    const player = this.currentPlayer();
+    const roll = this.dice.roll();
+    const move = this.board.move(player.position, roll);
+    player.position = move.to;
+    const won = player.position === this.board.size;
+    if (won) this.winningPlayer = player;
+    else this.turn++;
+    return { ...move, player: player.name, roll, won };
+  }
+
+  /** Plays until someone wins; maxTurns guards against an endless test loop. */
+  playToEnd(maxTurns = 10_000): Player {
+    for (let i = 0; i < maxTurns && !this.winningPlayer; i++) this.playTurn();
+    if (!this.winningPlayer) throw new Error('No winner within the turn limit');
+    return this.winningPlayer;
+  }
+}
+```
+
+## Edge cases
+
+- Overshooting the last cell → no movement, turn passes.
+- Landing on a ladder that reaches the last cell → that's a win.
+- Board misconfigured (snake head on 100, two jumps from one cell, a ladder ending on a snake head) → rejected at construction.
+- Duplicate player names → rejected (results are reported by name).
+- Turns after a win → "Game over".
+
+## Extensions
+
+- **Extra turn on a six**, and "three sixes in a row forfeits" — a `TurnRule` strategy consulted by `Game`.
+- **Two dice** — a `MultiDice` implementing `Dice` that sums several.
+- **Snakes/ladders generated randomly** — a `BoardFactory` that generates valid jumps (using the same validation).
+- **Event log / replay** — each `TurnResult` is already a full event; store them.
+
+## Interview follow-ups
+
+- *"Why not separate Snake and Ladder classes?"* — They behave identically (a jump); separate classes add code without adding behaviour. If they gain different behaviour (a ladder that needs a key), introduce a `Jump` interface then.
+- *"How do you test a game that uses randomness?"* — Inject the dice (or the random function); use a scripted die in tests.
+- *"How would you support millions of concurrent games?"* — Games are independent, small and in-memory; shard by game id, persist turn events.

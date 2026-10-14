@@ -1,0 +1,236 @@
+---
+title: "Splitwise (Expense Sharing)"
+track: "lld"
+kind: "notes"
+order: 15
+slug: "splitwise"
+updated: 2026-10-14
+description: "Designing Splitwise — users and expenses, equal/exact/percentage splits as strategies, money in integer paise with fair remainder handling, a pairwise balance ledger, settlements, and simplifying debts to fewer transactions."
+---
+
+import Callout from '../../components/Callout.astro';
+import Mermaid from '../../components/Mermaid.astro';
+
+## Problem
+
+Design an expense-sharing app. A user pays for something and splits it among participants — equally, by exact amounts, or by percentages. The app tracks who owes whom, supports settling up, and can simplify a group's debts into fewer payments.
+
+## Requirements
+
+- Users with ids and names.
+- Add an expense: description, payer, total amount, participants (may include the payer), split type, and split values for exact/percent.
+- Split types: **equal**, **exact** (values must sum to the total), **percent** (values must sum to 100).
+- Show a user's net balance and the list of "A owes B ₹x".
+- Record a settlement (A pays B).
+- **Simplify debts**: produce a small set of payments that clears all balances.
+- Money must be exact — no floating-point drift.
+
+## Entities and class diagram
+
+<Mermaid caption="ExpenseManager records expenses through split strategies into a pairwise ledger" code={`classDiagram
+  class ExpenseManager {
+    -users: Map
+    -ledger: Map
+    +addUser(id, name)
+    +addExpense(input) Expense
+    +settle(from, to, amount)
+    +balanceOf(userId) number
+    +debts() Debt[]
+    +simplify() Debt[]
+  }
+  class Expense {
+    +id: string
+    +paidBy: string
+    +amount: number
+    +shares: Map
+  }
+  class SplitStrategy {
+    <<interface>>
+    +split(amount, participants, values) Map
+  }
+  ExpenseManager *-- Expense
+  ExpenseManager ..> SplitStrategy
+  SplitStrategy <|.. EqualSplit
+  SplitStrategy <|.. ExactSplit
+  SplitStrategy <|.. PercentSplit
+`} />
+
+## Design decisions
+
+- **Money is an integer in the smallest unit (paise).** ₹100 split three ways is 3333 + 3333 + 3334 paise, never 33.333… The leftover paise go to the first participants deterministically.
+- **Strategy for split types**, chosen through a registry. Adding "split by shares" (2:1:1) is one new class.
+- **Pairwise ledger.** `ledger[a][b]` = how much b owes a, kept netted in both directions, so "A owes B" is a direct lookup. Net balance per user is derived from it.
+- **Simplify debts with greedy matching**: compute each user's net balance, then repeatedly match the largest creditor with the largest debtor. This needs at most n − 1 payments. (Finding the true minimum number of payments is NP-hard; greedy is what Splitwise-style apps describe and what interviewers expect.)
+
+## Final code
+
+```ts
+enum SplitType { Equal = 'EQUAL', Exact = 'EXACT', Percent = 'PERCENT' }
+
+interface SplitStrategy {
+  /** Returns each participant's share, in paise, summing exactly to amount. */
+  split(amount: number, participants: string[], values?: number[]): Map<string, number>;
+}
+
+/** Spread leftover paise one at a time to the first participants, so shares sum exactly. */
+function distribute(amount: number, participants: string[], raw: number[]): Map<string, number> {
+  const shares = raw.map(Math.floor);
+  let leftover = amount - shares.reduce((a, b) => a + b, 0);
+  for (let i = 0; leftover > 0; i = (i + 1) % shares.length, leftover--) shares[i]++;
+  return new Map(participants.map((p, i) => [p, shares[i]]));
+}
+
+class EqualSplit implements SplitStrategy {
+  split(amount: number, participants: string[]): Map<string, number> {
+    return distribute(amount, participants, participants.map(() => amount / participants.length));
+  }
+}
+
+class ExactSplit implements SplitStrategy {
+  split(amount: number, participants: string[], values: number[] = []): Map<string, number> {
+    if (values.length !== participants.length) throw new Error('Exact split needs one amount per participant');
+    if (values.some((v) => !Number.isInteger(v) || v < 0)) throw new Error('Exact amounts must be whole paise');
+    if (values.reduce((a, b) => a + b, 0) !== amount) throw new Error('Exact amounts must add up to the total');
+    return new Map(participants.map((p, i) => [p, values[i]]));
+  }
+}
+
+class PercentSplit implements SplitStrategy {
+  split(amount: number, participants: string[], values: number[] = []): Map<string, number> {
+    if (values.length !== participants.length) throw new Error('Percent split needs one percentage per participant');
+    if (values.some((v) => v < 0)) throw new Error('Percentages cannot be negative');
+    if (Math.abs(values.reduce((a, b) => a + b, 0) - 100) > 1e-9) throw new Error('Percentages must add up to 100');
+    return distribute(amount, participants, values.map((pct) => (amount * pct) / 100));
+  }
+}
+
+const SPLITS: Record<SplitType, SplitStrategy> = {
+  [SplitType.Equal]: new EqualSplit(),
+  [SplitType.Exact]: new ExactSplit(),
+  [SplitType.Percent]: new PercentSplit(),
+};
+
+type ExpenseInput = {
+  description: string;
+  paidBy: string;
+  amount: number; // paise
+  participants: string[];
+  split: SplitType;
+  values?: number[];
+};
+
+type Expense = ExpenseInput & { id: string; shares: Map<string, number> };
+type Debt = { from: string; to: string; amount: number };
+
+class ExpenseManager {
+  private users = new Map<string, string>();
+  private expenses: Expense[] = [];
+  /** ledger.get(a).get(b) = amount b owes a (always > 0; netted pairwise). */
+  private ledger = new Map<string, Map<string, number>>();
+
+  addUser(id: string, name: string): void {
+    if (this.users.has(id)) throw new Error(`User ${id} already exists`);
+    this.users.set(id, name);
+  }
+
+  addExpense(input: ExpenseInput): Expense {
+    const { paidBy, amount, participants } = input;
+    if (!Number.isInteger(amount) || amount <= 0) throw new Error('Amount must be a positive number of paise');
+    if (participants.length === 0) throw new Error('An expense needs participants');
+    if (new Set(participants).size !== participants.length) throw new Error('Duplicate participants');
+    for (const u of [paidBy, ...participants]) if (!this.users.has(u)) throw new Error(`Unknown user ${u}`);
+
+    const shares = SPLITS[input.split].split(amount, participants, input.values);
+    for (const [user, share] of shares) if (user !== paidBy && share > 0) this.addDebt(user, paidBy, share);
+    const expense = { ...input, id: `E${this.expenses.length + 1}`, shares };
+    this.expenses.push(expense);
+    return expense;
+  }
+
+  settle(from: string, to: string, amount: number): void {
+    if (!Number.isInteger(amount) || amount <= 0) throw new Error('Settlement must be a positive number of paise');
+    const owed = this.owed(to, from);
+    if (amount > owed) throw new Error(`${from} only owes ${to} ${owed}`);
+    this.addDebt(to, from, amount); // paying back is a debt in the other direction, which nets out
+  }
+
+  /** Positive: others owe this user. Negative: this user owes others. */
+  balanceOf(userId: string): number {
+    let net = 0;
+    for (const amount of this.ledger.get(userId)?.values() ?? []) net += amount;
+    for (const [creditor, debtors] of this.ledger) if (creditor !== userId) net -= debtors.get(userId) ?? 0;
+    return net;
+  }
+
+  debts(): Debt[] {
+    const out: Debt[] = [];
+    for (const [to, debtors] of this.ledger) for (const [from, amount] of debtors) out.push({ from, to, amount });
+    return out.sort((a, b) => a.from.localeCompare(b.from) || a.to.localeCompare(b.to));
+  }
+
+  /** Greedy: match the biggest creditor with the biggest debtor until everyone is at zero. */
+  simplify(): Debt[] {
+    const net = [...this.users.keys()].map((id) => ({ id, amount: this.balanceOf(id) }));
+    const creditors = net.filter((n) => n.amount > 0);
+    const debtors = net.filter((n) => n.amount < 0).map((n) => ({ id: n.id, amount: -n.amount }));
+    const payments: Debt[] = [];
+    while (creditors.length && debtors.length) {
+      creditors.sort((a, b) => b.amount - a.amount);
+      debtors.sort((a, b) => b.amount - a.amount);
+      const c = creditors[0];
+      const d = debtors[0];
+      const pay = Math.min(c.amount, d.amount);
+      payments.push({ from: d.id, to: c.id, amount: pay });
+      c.amount -= pay;
+      d.amount -= pay;
+      if (c.amount === 0) creditors.shift();
+      if (d.amount === 0) debtors.shift();
+    }
+    return payments;
+  }
+
+  private owed(creditor: string, debtor: string): number {
+    return this.ledger.get(creditor)?.get(debtor) ?? 0;
+  }
+
+  /** Record that debtor owes creditor `amount`, netting against any opposite debt. */
+  private addDebt(debtor: string, creditor: string, amount: number): void {
+    const opposite = this.owed(debtor, creditor);
+    const net = amount - opposite;
+    this.setOwed(debtor, creditor, Math.max(0, -net));
+    this.setOwed(creditor, debtor, Math.max(0, net));
+  }
+
+  private setOwed(creditor: string, debtor: string, amount: number): void {
+    if (!this.ledger.has(creditor)) this.ledger.set(creditor, new Map());
+    const row = this.ledger.get(creditor)!;
+    if (amount > 0) row.set(debtor, amount);
+    else row.delete(debtor);
+  }
+}
+```
+
+## Edge cases
+
+- ₹100 split three ways → 3334, 3333, 3333 paise; shares always sum to the total.
+- Payer not among participants (paid for others) → everyone else owes the full share.
+- Exact amounts or percentages that don't add up → rejected before anything is recorded.
+- A owes B 500, then B owes A 200 → stored as A owes B 300 (netted).
+- Settling more than is owed → rejected.
+
+## Extensions
+
+- **Groups** — expenses belong to a group; balances and simplification are per group.
+- **Split by shares** (2:1:1) — a new strategy using `distribute`.
+- **Multiple payers** for one expense — model `paidBy` as a map of user → amount.
+- **Currencies** — store currency per expense; convert at settlement time.
+- **Notifications** — Observer on new expenses and settlements.
+- **Edit/delete expense** — reverse its ledger entries (store shares on the expense, which we already do).
+
+## Interview follow-ups
+
+- *"Why integers?"* — Floating-point can't represent 0.1 exactly; balances drift. Store paise.
+- *"Who gets the extra paisa?"* — A deterministic rule (first participants); document it.
+- *"How do you simplify debts?"* — Net balances, then greedy biggest-creditor/biggest-debtor; at most n − 1 payments. Optimal minimum is NP-hard.
+- *"Add a new split type."* — New `SplitStrategy` class and a registry entry; nothing else changes.
+- *"Concurrent expense additions in a group?"* — Ledger updates for one group are serialized (per-group lock or DB transaction).

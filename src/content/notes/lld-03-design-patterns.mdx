@@ -1,0 +1,207 @@
+---
+title: "Design Patterns for LLD Interviews"
+track: "lld"
+kind: "notes"
+order: 3
+slug: "design-patterns"
+updated: 2026-10-14
+description: "The design patterns that actually come up in LLD rounds — Strategy, State, Observer, Factory, Builder, Singleton, Decorator, Adapter, Facade, Composite, Command, Chain of Responsibility, Template Method — each with the problem it solves, a short TypeScript sketch, and where it appears in classic problems."
+---
+
+import Callout from '../../components/Callout.astro';
+
+A pattern is a named solution to a recurring design problem. In an interview, the name matters less than being able to say **what varies and how the pattern isolates it**. Learn these ~13 well; the rest of the Gang of Four catalogue rarely comes up.
+
+## Cheat sheet
+
+| Pattern | Use when… | Shows up in |
+|---|---|---|
+| **Strategy** | An algorithm/rule varies and should be swappable | Parking fees, ride matching, split types, rate limiting, eviction policy |
+| **State** | Behaviour depends on an object's state with defined transitions | Vending machine, ATM, elevator, order lifecycle |
+| **Observer** | Many parties react to an event | Pub-sub, notifications, stock price alerts, display boards |
+| **Factory** | Creation logic depends on input type; hide `new` | Vehicles, payment methods, notification channels, pieces |
+| **Builder** | Many optional parameters / step-by-step construction | Orders, HTTP requests, complex configs |
+| **Singleton** | Exactly one shared instance | Logger, configuration, a parking lot instance |
+| **Decorator** | Add responsibilities by wrapping, combinable | Pizza/coffee toppings, discounts, logging/caching wrappers |
+| **Adapter** | Make an existing interface fit the one you need | Third-party payment gateways, legacy APIs |
+| **Facade** | One simple entry point over a subsystem | `BookingService` over seats, payment, notifications |
+| **Composite** | Tree where leaves and groups are treated the same | File system, org chart, menus |
+| **Command** | Encapsulate a request as an object (queue, undo) | Text editor undo, elevator requests, job queues |
+| **Chain of Responsibility** | Pass a request along handlers until one handles it | Logger levels, ATM cash dispenser, approval flows, middleware |
+| **Template Method** | Fixed algorithm skeleton, varying steps | Game turn loop, report generation |
+
+## Behavioural patterns
+
+### Strategy
+
+Define a family of algorithms behind one interface; pick one at runtime.
+
+```ts
+interface PricingStrategy { price(hours: number): number; }
+class FlatRate implements PricingStrategy { price() { return 50; } }
+class Hourly implements PricingStrategy { constructor(private rate: number) {} price(h: number) { return Math.ceil(h) * this.rate; } }
+
+class Checkout {
+  constructor(private pricing: PricingStrategy) {}
+  total(hours: number) { return this.pricing.price(hours); }
+}
+```
+
+### State
+
+Each state is a class; the context delegates to its current state, and states decide transitions. Replaces large `switch (this.state)` blocks.
+
+```ts
+interface MachineState { insertCoin(m: VendingMachine): void; select(m: VendingMachine, code: string): void; }
+
+class Idle implements MachineState {
+  insertCoin(m: VendingMachine) { m.setState(new HasMoney()); }
+  select() { throw new Error('Insert money first'); }
+}
+class HasMoney implements MachineState {
+  insertCoin() { /* add to balance */ }
+  select(m: VendingMachine, code: string) { /* dispense, then */ m.setState(new Idle()); }
+}
+class VendingMachine {
+  private state: MachineState = new Idle();
+  setState(s: MachineState) { this.state = s; }
+  insertCoin() { this.state.insertCoin(this); }
+  select(code: string) { this.state.select(this, code); }
+}
+```
+
+<Callout type="tip">
+Strategy vs State look identical in code. The difference is **who chooses**: with Strategy the client picks the algorithm; with State the object switches itself as transitions happen.
+</Callout>
+
+### Observer
+
+Subjects keep a list of observers and notify them on change. Decouples the event source from reactions.
+
+```ts
+type Listener<T> = (event: T) => void;
+class EventBus<T> {
+  private listeners = new Set<Listener<T>>();
+  subscribe(l: Listener<T>) { this.listeners.add(l); return () => this.listeners.delete(l); }
+  publish(e: T) { for (const l of this.listeners) l(e); }
+}
+```
+
+### Command
+
+Wrap an action as an object with `execute()` (and `undo()`), so actions can be queued, logged, retried or undone.
+
+```ts
+interface Command { execute(): void; undo(): void; }
+class InsertText implements Command {
+  constructor(private doc: { text: string }, private s: string) {}
+  execute() { this.doc.text += this.s; }
+  undo() { this.doc.text = this.doc.text.slice(0, -this.s.length); }
+}
+```
+
+### Chain of Responsibility
+
+Handlers are linked; each handles the request or passes it on. Used for log levels, approval limits, and the ATM note dispenser (2000s, then 500s, then 100s).
+
+### Template Method
+
+A base class fixes the steps of an algorithm and lets subclasses fill in some of them (`playTurn()` = `roll()` → `move()` → `checkWin()`). Prefer Strategy when you'd otherwise need many subclasses.
+
+## Creational patterns
+
+### Factory
+
+Centralize "which concrete class do I create?" so callers don't `new` concrete types.
+
+```ts
+type Channel = 'email' | 'sms' | 'push';
+interface Notifier { send(to: string, msg: string): void; }
+class NotifierFactory {
+  static create(channel: Channel): Notifier {
+    switch (channel) {
+      case 'email': return new EmailNotifier();
+      case 'sms': return new SmsNotifier();
+      case 'push': return new PushNotifier();
+    }
+  }
+}
+```
+
+The switch lives in **one** place; adding a channel touches the factory and a new class, nothing else. A registry (`Map<Channel, () => Notifier>`) removes even that switch.
+
+### Builder
+
+Construct complex objects step by step with readable, validated calls instead of a 9-argument constructor.
+
+```ts
+const order = new OrderBuilder()
+  .forCustomer('u1')
+  .addItem('pizza', 2)
+  .withCoupon('SAVE10')
+  .deliverTo(address)
+  .build(); // validates required fields once
+```
+
+### Singleton
+
+One instance, globally accessible. Useful for a logger or config; overused everywhere else because it's hidden global state that makes testing hard. Prefer creating one instance at startup and injecting it.
+
+```ts
+class Logger {
+  private static instance?: Logger;
+  private constructor() {}
+  static get(): Logger { return (Logger.instance ??= new Logger()); }
+}
+```
+
+<Callout type="warn">
+In Java, a lazily created singleton needs thread safety: use an enum singleton, the holder-class idiom, or double-checked locking with a `volatile` field. A plain `if (instance == null) instance = new X()` can create two instances under concurrency — a classic follow-up question.
+</Callout>
+
+## Structural patterns
+
+### Decorator
+
+Wrap an object to add behaviour while keeping the same interface; wrappers stack.
+
+```ts
+interface Beverage { cost(): number; describe(): string; }
+class Coffee implements Beverage { cost() { return 100; } describe() { return 'Coffee'; } }
+class WithMilk implements Beverage {
+  constructor(private inner: Beverage) {}
+  cost() { return this.inner.cost() + 20; }
+  describe() { return this.inner.describe() + ', milk'; }
+}
+const drink = new WithMilk(new WithMilk(new Coffee())); // 140, "Coffee, milk, milk"
+```
+
+### Adapter
+
+Translate one interface into another so incompatible classes work together — wrap a third-party SDK so the rest of your code sees your own `PaymentGateway` interface.
+
+### Facade
+
+A single high-level entry point over a set of classes: `BookingService.book(showId, seats, user)` coordinates seat locking, payment and notification so callers don't.
+
+### Composite
+
+Treat single objects and groups uniformly via a shared interface — a `Folder` and a `File` both have `size()`; a folder's size sums its children.
+
+## Choosing a pattern in the interview
+
+Ask "what is likely to change?":
+- New **types** of something → Factory + polymorphism.
+- New **rules/algorithms** → Strategy.
+- **Lifecycle** with allowed/forbidden actions per stage → State.
+- **Reactions** to events → Observer.
+- **Optional add-ons** that combine → Decorator.
+- **Undo/queue/retry** of actions → Command.
+
+## Interview follow-ups
+
+- *"Strategy vs State?"* — Client chooses the strategy; the object transitions its own state.
+- *"Decorator vs inheritance?"* — Decorators combine at runtime without a class per combination.
+- *"Why is Singleton considered an anti-pattern?"* — Hidden global state, hard to test and mock, concurrency pitfalls on lazy creation; prefer DI of a single instance.
+- *"Factory vs Builder?"* — Factory decides *which* class to create; Builder decides *how* to assemble one complex object.
+- *"Observer vs pub-sub?"* — Observer: subject knows its observers directly. Pub-sub: a broker/topic decouples publishers and subscribers entirely.

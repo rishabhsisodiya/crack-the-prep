@@ -1,0 +1,290 @@
+---
+title: "Library Management System"
+track: "lld"
+kind: "notes"
+order: 21
+slug: "library-management"
+updated: 2026-10-14
+description: "Designing a library system — books vs physical copies, members with borrowing limits, loans with due dates, a pluggable fine policy, reservations with a first-come queue and copies held for the next member, and search."
+---
+
+import Callout from '../../components/Callout.astro';
+import Mermaid from '../../components/Mermaid.astro';
+
+## Problem
+
+Design a library management system. The library owns several physical copies of each book. Members borrow and return copies, pay fines when late, and can reserve a book when no copy is available.
+
+## Requirements
+
+- Catalogue: books (ISBN, title, author) and physical copies (copy id, status).
+- Members with a borrowing limit (default 3 active loans).
+- Borrow a book by ISBN → any available copy; loan due in 14 days.
+- Members with unpaid fines can't borrow.
+- Return a copy → fine for each day late, by a configurable policy (₹10/day, capped).
+- **Reserve** a book when no copies are available. On return, the copy is **held** for the first member in the queue for 3 days; only that member can borrow it.
+- Search by title or author (case-insensitive substring).
+
+## Entities and class diagram
+
+<Mermaid caption="Book is the title; BookCopy is the physical item a Loan refers to" code={`classDiagram
+  class Library {
+    +addBook(book, copies) string[]
+    +addMember(member)
+    +borrow(memberId, isbn) Loan
+    +returnCopy(copyId) number
+    +reserve(memberId, isbn)
+    +payFine(memberId, amount)
+    +search(query) Book[]
+  }
+  class Book {
+    +isbn: string
+    +title: string
+    +author: string
+  }
+  class BookCopy {
+    +id: string
+    +status: CopyStatus
+    +heldFor: string
+  }
+  class Member {
+    +id: string
+    +maxLoans: number
+    +fineDue: number
+  }
+  class Loan {
+    +copyId: string
+    +dueAt: number
+    +returnedAt: number
+  }
+  class FinePolicy {
+    <<interface>>
+    +fine(daysLate) number
+  }
+  Library *-- Book
+  Library *-- BookCopy
+  Library *-- Member
+  Library *-- Loan
+  Library o-- FinePolicy
+  BookCopy --> Book
+  Loan --> BookCopy
+  Loan --> Member
+`} />
+
+## Design decisions
+
+- **Book vs BookCopy** is the key modelling point. The catalogue entry (title, author) exists once; physical copies each have their own status and history. Loans refer to copies.
+- **Copy status is explicit**: `Available`, `Borrowed`, `OnHold` (reserved for a specific member). Borrowing checks it; the reservation logic sets it.
+- **Reservations are a FIFO queue per ISBN.** Returning a copy hands it to the head of the queue instead of the shelf. Holds expire; an expired hold passes to the next member or back to the shelf.
+- **Fine policy is a strategy** — per-day with a cap today; tiered or member-type-based later.
+- **Days are computed from an injected clock**, so tests can move time forward.
+
+## Final code
+
+```ts
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+enum CopyStatus { Available = 'AVAILABLE', Borrowed = 'BORROWED', OnHold = 'ON_HOLD' }
+
+class Book {
+  constructor(readonly isbn: string, readonly title: string, readonly author: string) {}
+}
+
+class BookCopy {
+  status = CopyStatus.Available;
+  heldFor: string | null = null;
+  holdExpiresAt = 0;
+  constructor(readonly id: string, readonly book: Book) {}
+}
+
+class Member {
+  fineDue = 0;
+  activeLoans = 0;
+  constructor(readonly id: string, readonly name: string, readonly maxLoans = 3) {}
+}
+
+type Loan = { id: string; copyId: string; memberId: string; borrowedAt: number; dueAt: number; returnedAt: number | null };
+
+interface FinePolicy {
+  fine(daysLate: number): number;
+}
+
+class PerDayFine implements FinePolicy {
+  constructor(private perDay = 10, private cap = 500) {}
+  fine(daysLate: number): number {
+    return Math.min(this.cap, Math.max(0, daysLate) * this.perDay);
+  }
+}
+
+class Library {
+  private books = new Map<string, Book>();
+  private copies = new Map<string, BookCopy>();
+  private members = new Map<string, Member>();
+  private loans = new Map<string, Loan>(); // active loans by copy id
+  private reservations = new Map<string, string[]>(); // isbn -> member ids, FIFO
+  private seq = 1;
+
+  constructor(
+    private finePolicy: FinePolicy = new PerDayFine(),
+    private clock: () => number = Date.now,
+    private loanDays = 14,
+    private holdDays = 3,
+  ) {}
+
+  addBook(book: Book, copies: number): string[] {
+    this.books.set(book.isbn, book);
+    const ids: string[] = [];
+    for (let i = 0; i < copies; i++) {
+      const copy = new BookCopy(`${book.isbn}-${this.seq++}`, book);
+      this.copies.set(copy.id, copy);
+      ids.push(copy.id);
+    }
+    return ids;
+  }
+
+  addMember(member: Member): void {
+    if (this.members.has(member.id)) throw new Error(`Member ${member.id} already exists`);
+    this.members.set(member.id, member);
+  }
+
+  search(query: string): Book[] {
+    const q = query.trim().toLowerCase();
+    return [...this.books.values()].filter(
+      (b) => b.title.toLowerCase().includes(q) || b.author.toLowerCase().includes(q),
+    );
+  }
+
+  borrow(memberId: string, isbn: string): Loan {
+    const member = this.memberOrThrow(memberId);
+    if (!this.books.has(isbn)) throw new Error(`Unknown book ${isbn}`);
+    if (member.fineDue > 0) throw new Error(`Pay outstanding fine of ${member.fineDue} first`);
+    if (member.activeLoans >= member.maxLoans) throw new Error(`Loan limit of ${member.maxLoans} reached`);
+
+    this.expireHolds(isbn);
+    const copy =
+      this.copiesOf(isbn).find((c) => c.status === CopyStatus.OnHold && c.heldFor === memberId) ??
+      this.copiesOf(isbn).find((c) => c.status === CopyStatus.Available);
+    if (!copy) throw new Error('No copy available; you can reserve this book');
+
+    copy.status = CopyStatus.Borrowed;
+    copy.heldFor = null;
+    member.activeLoans++;
+    this.removeReservation(isbn, memberId);
+    const now = this.clock();
+    const loan: Loan = {
+      id: `L${this.seq++}`,
+      copyId: copy.id,
+      memberId,
+      borrowedAt: now,
+      dueAt: now + this.loanDays * DAY_MS,
+      returnedAt: null,
+    };
+    this.loans.set(copy.id, loan);
+    return loan;
+  }
+
+  /** Returns the fine charged for this return. */
+  returnCopy(copyId: string): number {
+    const loan = this.loans.get(copyId);
+    if (!loan) throw new Error(`Copy ${copyId} is not on loan`);
+    const copy = this.copies.get(copyId)!;
+    const member = this.memberOrThrow(loan.memberId);
+    const now = this.clock();
+
+    loan.returnedAt = now;
+    this.loans.delete(copyId);
+    member.activeLoans--;
+    const daysLate = Math.ceil((now - loan.dueAt) / DAY_MS);
+    const fine = this.finePolicy.fine(daysLate);
+    member.fineDue += fine;
+
+    this.placeOnHoldOrShelf(copy, now);
+    return fine;
+  }
+
+  reserve(memberId: string, isbn: string): number {
+    this.memberOrThrow(memberId);
+    if (!this.books.has(isbn)) throw new Error(`Unknown book ${isbn}`);
+    this.expireHolds(isbn);
+    if (this.copiesOf(isbn).some((c) => c.status === CopyStatus.Available)) {
+      throw new Error('A copy is available; borrow it instead');
+    }
+    const queue = this.reservations.get(isbn) ?? [];
+    if (queue.includes(memberId)) throw new Error('Already reserved');
+    queue.push(memberId);
+    this.reservations.set(isbn, queue);
+    return queue.length; // position in the queue
+  }
+
+  payFine(memberId: string, amount: number): void {
+    const member = this.memberOrThrow(memberId);
+    if (amount <= 0 || amount > member.fineDue) throw new Error('Invalid payment amount');
+    member.fineDue -= amount;
+  }
+
+  copyStatus(copyId: string): { status: CopyStatus; heldFor: string | null } {
+    const c = this.copies.get(copyId);
+    if (!c) throw new Error(`Unknown copy ${copyId}`);
+    return { status: c.status, heldFor: c.heldFor };
+  }
+
+  private placeOnHoldOrShelf(copy: BookCopy, now: number): void {
+    const queue = this.reservations.get(copy.book.isbn) ?? [];
+    const next = queue.shift();
+    if (next) {
+      copy.status = CopyStatus.OnHold;
+      copy.heldFor = next;
+      copy.holdExpiresAt = now + this.holdDays * DAY_MS;
+    } else {
+      copy.status = CopyStatus.Available;
+      copy.heldFor = null;
+    }
+  }
+
+  /** Expired holds pass to the next member in the queue, or back to the shelf. */
+  private expireHolds(isbn: string): void {
+    const now = this.clock();
+    for (const c of this.copiesOf(isbn)) {
+      if (c.status === CopyStatus.OnHold && c.holdExpiresAt <= now) this.placeOnHoldOrShelf(c, now);
+    }
+  }
+
+  private removeReservation(isbn: string, memberId: string): void {
+    const queue = this.reservations.get(isbn);
+    if (queue) this.reservations.set(isbn, queue.filter((m) => m !== memberId));
+  }
+
+  private copiesOf(isbn: string): BookCopy[] {
+    return [...this.copies.values()].filter((c) => c.book.isbn === isbn);
+  }
+
+  private memberOrThrow(id: string): Member {
+    const m = this.members.get(id);
+    if (!m) throw new Error(`Unknown member ${id}`);
+    return m;
+  }
+}
+```
+
+## Edge cases
+
+- All copies borrowed → borrowing fails with a hint to reserve; reserving when a copy is available fails with a hint to borrow.
+- A copy on hold for Asha can't be borrowed by Ravi; Asha gets it even if other copies are out.
+- Hold expires unclaimed → passes to the next in the queue, or back to the shelf.
+- Returned on the due date → no fine; one minute late → one day's fine.
+- Member with an unpaid fine or at their loan limit → can't borrow.
+
+## Extensions
+
+- **Notifications** — Observer: "your reserved book is ready", "due tomorrow" reminders from a daily job.
+- **Member types** — students and faculty with different limits and fine policies (strategy per member type).
+- **Renewals** — extend `dueAt` if nobody has reserved the book.
+- **Search index** — a proper inverted index or full-text search for large catalogues.
+- **Lost/damaged copies** — another `CopyStatus` and a replacement fee.
+
+## Interview follow-ups
+
+- *"Why separate Book and BookCopy?"* — The title is catalogue data; copies are physical items with their own status and loan history.
+- *"How do reservations work when a copy is returned?"* — The copy goes on hold for the head of the queue with an expiry, not back to the shelf.
+- *"Two members try to borrow the last copy at once."* — Atomic status change on the copy (synchronous here; a conditional update in a DB).
+- *"Change the fine rules for faculty."* — Another `FinePolicy`, chosen by member type.

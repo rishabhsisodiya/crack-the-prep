@@ -1,0 +1,107 @@
+---
+title: "How to Approach the Low-Level Design Round"
+track: "lld"
+kind: "notes"
+order: 1
+slug: "lld-approach"
+updated: 2026-10-14
+description: "What the LLD / object-oriented design round tests, how it differs from HLD and machine coding, a 45-minute plan, class diagram notation, and how the problem pages are laid out."
+---
+
+import Callout from '../../components/Callout.astro';
+import Mermaid from '../../components/Mermaid.astro';
+
+In a low-level design (LLD) round — also called object-oriented design or OOD — you get a prompt like "design a parking lot" or "design Splitwise" and 45–90 minutes. You turn it into **classes, their responsibilities and relationships, and working code** for the core flows. It's common at Amazon, Flipkart, Swiggy, Uber, PhonePe, Atlassian and most Indian product companies, often as a separate "machine coding" round where the code must actually run.
+
+## How it differs from the other design rounds
+
+| | HLD ([System Design](/prep/system-design)) | LLD (this track) | [Machine Coding](/prep/machine-coding) (frontend) |
+|---|---|---|---|
+| Unit of design | Services, databases, queues | Classes, interfaces, methods | Functions, components |
+| Question | "Design Uber" (millions of users) | "Design the classes for Uber's ride matching" | "Build an autocomplete" |
+| Output | Box-and-arrow diagram, trade-offs | Class diagram + runnable code | Working UI / utility |
+| Scored on | Scale, availability, data choices | Modelling, extensibility, clean code, patterns | Correctness, edge cases, UX |
+
+## What interviewers score
+
+| Signal | What it looks like |
+|---|---|
+| **Requirements** | You pin down scope and rules before modelling: vehicle types, pricing, what happens when full. |
+| **Modelling** | Nouns become sensible classes; each class has one clear responsibility; no "god class" doing everything. |
+| **Extensibility** | Adding a new vehicle type, pricing rule or payment method means adding a class, not editing ten `if` statements. |
+| **Patterns used for a reason** | Strategy for pricing because pricing varies — not patterns sprinkled to show off. |
+| **Working code** | The core flow runs end to end, with a small demo or tests. |
+| **Edge cases and concurrency** | Two cars racing for the last spot, invalid input, state transitions that aren't allowed. |
+
+## A 45-minute plan
+
+1. **Clarify requirements (5 min).** List features, mark core vs nice-to-have, agree on scope out loud. Write down assumptions.
+2. **Identify entities (5 min).** Underline nouns in the requirements → candidate classes. Verbs → methods. Discard nouns that are just attributes (a "colour" is a field, not a class).
+3. **Relationships and class diagram (5–10 min).** Who owns whom, what's an interface, where things vary. Sketch it.
+4. **Identify what varies → patterns (5 min).** Pricing rules, matching algorithms, notification channels, states. Put each behind an interface.
+5. **Code the core flow (15–20 min).** Models first, then services, then a small driver/demo. Keep it compiling as you go.
+6. **Walk through edge cases and extensions (5 min).** Show how a new requirement plugs in.
+
+<Callout type="tip">
+Say "I'll start with the models and the happy path, then add validation and edge cases" — and do it. Interviewers would much rather see a small design that works than a large one that doesn't compile.
+</Callout>
+
+## Class diagram notation
+
+You won't be asked for strict UML, but use the relationships correctly — the difference between composition and association is a frequent follow-up.
+
+<Mermaid caption="The relationships you'll actually use" code={`classDiagram
+  class Vehicle {
+    <<abstract>>
+    +plate: string
+    +type() VehicleType
+  }
+  class Car
+  class Bike
+  Vehicle <|-- Car : inheritance (is-a)
+  Vehicle <|-- Bike
+  class PricingStrategy {
+    <<interface>>
+    +price(ticket) number
+  }
+  class HourlyPricing
+  PricingStrategy <|.. HourlyPricing : implements
+  class ParkingLot
+  class Floor
+  class Spot
+  ParkingLot *-- Floor : composition (owns lifecycle)
+  Floor *-- Spot
+  ParkingLot o-- PricingStrategy : aggregation (has, shared)
+  Spot --> Vehicle : association (uses)
+`} />
+
+- **Inheritance** (`is-a`) — use sparingly; prefer interfaces + composition.
+- **Composition** (filled diamond) — the part can't exist without the whole; a floor's spots are deleted with the floor.
+- **Aggregation** (hollow diamond) — the part is shared or outlives the whole; a pricing strategy object can be swapped or reused.
+- **Association** — one object refers to another (a spot currently holds a vehicle).
+
+## Rules of thumb that keep designs clean
+
+- **Program to interfaces**: `PaymentMethod`, `PricingStrategy`, `MatchingStrategy`. Concrete classes are chosen in one place (a factory or the constructor).
+- **Composition over inheritance**: a `Car` doesn't extend `Vehicle` to get pricing; pricing is a separate strategy.
+- **Keep models dumb, services smart**: entities hold state and enforce their own invariants; services orchestrate flows across entities.
+- **Enums for closed sets** (vehicle type, order status), **classes for behaviour that varies**.
+- **Inject what's non-deterministic** — clocks, ID generators, random — so code is testable.
+- **Don't build persistence** unless asked; in-memory repositories behind an interface are enough.
+
+## Common ways to lose points
+
+- Jumping straight into code without agreeing requirements.
+- One giant class with every method; or the opposite, 30 classes with no behaviour.
+- `if (type === 'car') ... else if (type === 'bike') ...` scattered everywhere — the textbook sign that a polymorphic design is missing.
+- Using a pattern without being able to say what changes it protects against.
+- Ignoring concurrency when the interviewer mentions "multiple entry gates" or "many users booking at once" — see [Concurrency in LLD](/prep/lld/concurrency).
+- Code that doesn't run.
+
+## How the problem pages are laid out
+
+Each problem page follows the same shape: **Problem → Requirements → Entities and class diagram → Design decisions (and the patterns they lead to) → Final code → Edge cases → Extensions → Interview follow-ups**. The final code is TypeScript, self-contained, and is compiled and run against tests on every build, so it's known to work. Read the foundations first: [OOP and SOLID](/prep/lld/oop-solid), [Design Patterns](/prep/lld/design-patterns), [Concurrency in LLD](/prep/lld/concurrency).
+
+<Callout type="note">
+The interview language doesn't matter much — Java, C++, Python, TypeScript and Go are all commonly accepted. The ideas map one to one. Where Java has a specific tool (such as `synchronized` or `ConcurrentHashMap`), the pages name it.
+</Callout>

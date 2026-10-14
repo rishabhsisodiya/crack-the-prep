@@ -1,0 +1,241 @@
+---
+title: "Parking Lot"
+track: "lld"
+kind: "notes"
+order: 10
+slug: "parking-lot"
+updated: 2026-10-14
+description: "The most-asked LLD problem — multi-floor lot, vehicle and spot sizes, tickets, pluggable spot allocation and pricing strategies, availability display, and the two-gates-one-spot concurrency question."
+---
+
+import Callout from '../../components/Callout.astro';
+import Mermaid from '../../components/Mermaid.astro';
+
+## Problem
+
+Design a parking lot with multiple floors. Vehicles enter, get a ticket and a spot that fits them, and pay on exit based on time parked. The design should make it easy to add new vehicle types, spot types and pricing rules.
+
+## Requirements
+
+Agree on these before modelling:
+
+- Vehicle types: **bike, car, truck**. Spot sizes: **small, medium, large**.
+- A vehicle can park in a spot of its size **or larger** (a bike can use a medium spot if all small ones are taken). Prefer the smallest spot that fits, then the lowest floor.
+- Entry issues a **ticket** (id, vehicle, spot, entry time). The same vehicle can't be parked twice.
+- Exit takes a ticket, frees the spot, and returns the **fee**: hourly rate by vehicle type, rounded up to whole hours, minimum one hour.
+- Show free spots per size (for the entrance display board).
+- Out of scope unless asked: payments, reservations, EV charging, multiple entry/exit gates as separate objects (discussed under concurrency).
+
+## Entities and class diagram
+
+<Mermaid caption="ParkingLot coordinates; allocation and pricing are swappable strategies" code={`classDiagram
+  class ParkingLot {
+    -floors: Floor[]
+    -tickets: Map
+    +park(vehicle) Ticket
+    +unpark(ticketId) Receipt
+    +availability() Map
+  }
+  class Floor {
+    +level: number
+    +spots: ParkingSpot[]
+  }
+  class ParkingSpot {
+    +id: string
+    +size: SpotSize
+    +park(vehicle)
+    +release() Vehicle
+  }
+  class Vehicle {
+    +plate: string
+    +type: VehicleType
+  }
+  class Ticket {
+    +id: string
+    +entryTime: number
+  }
+  class SpotAllocationStrategy {
+    <<interface>>
+    +find(floors, vehicle) ParkingSpot
+  }
+  class PricingStrategy {
+    <<interface>>
+    +fee(type, entry, exit) number
+  }
+  ParkingLot *-- Floor
+  Floor *-- ParkingSpot
+  ParkingLot o-- SpotAllocationStrategy
+  ParkingLot o-- PricingStrategy
+  Ticket --> Vehicle
+  Ticket --> ParkingSpot
+  SpotAllocationStrategy <|.. BestFitStrategy
+  PricingStrategy <|.. HourlyPricing
+`} />
+
+## Design decisions
+
+- **Sizes are ordered numbers** (`Small = 1 … Large = 3`), and each vehicle type maps to a minimum size. "Fits" is then one comparison, and adding a new vehicle type is one map entry — no `if (type === 'car')` chains.
+- **Strategy for allocation.** Best-fit-then-nearest is today's rule; "nearest to the exit" or "spread evenly across floors" are plausible changes. Each is a new class implementing `SpotAllocationStrategy`.
+- **Strategy for pricing.** Hourly today; weekend rates, flat fees or first-hour-free are new `PricingStrategy` classes.
+- **`ParkingSpot` enforces its own invariants** (can't park in an occupied spot or one that's too small). The lot orchestrates; the spot protects itself.
+- **The clock is injected**, so fees are testable without waiting hours.
+
+## Final code
+
+```ts
+enum VehicleType { Bike = 'BIKE', Car = 'CAR', Truck = 'TRUCK' }
+enum SpotSize { Small = 1, Medium = 2, Large = 3 }
+
+const MIN_SPOT_SIZE: Record<VehicleType, SpotSize> = {
+  [VehicleType.Bike]: SpotSize.Small,
+  [VehicleType.Car]: SpotSize.Medium,
+  [VehicleType.Truck]: SpotSize.Large,
+};
+
+class Vehicle {
+  constructor(readonly plate: string, readonly type: VehicleType) {}
+}
+
+class ParkingSpot {
+  private vehicle: Vehicle | null = null;
+  constructor(readonly id: string, readonly size: SpotSize) {}
+
+  get isFree(): boolean {
+    return this.vehicle === null;
+  }
+
+  fits(vehicle: Vehicle): boolean {
+    return this.size >= MIN_SPOT_SIZE[vehicle.type];
+  }
+
+  park(vehicle: Vehicle): void {
+    if (!this.isFree) throw new Error(`Spot ${this.id} is occupied`);
+    if (!this.fits(vehicle)) throw new Error(`Spot ${this.id} is too small for ${vehicle.type}`);
+    this.vehicle = vehicle;
+  }
+
+  release(): Vehicle {
+    if (!this.vehicle) throw new Error(`Spot ${this.id} is already free`);
+    const v = this.vehicle;
+    this.vehicle = null;
+    return v;
+  }
+}
+
+class Floor {
+  constructor(readonly level: number, readonly spots: ParkingSpot[]) {}
+}
+
+class Ticket {
+  constructor(
+    readonly id: string,
+    readonly vehicle: Vehicle,
+    readonly spot: ParkingSpot,
+    readonly entryTime: number,
+  ) {}
+}
+
+type Receipt = { ticketId: string; plate: string; fee: number; durationMs: number };
+
+interface SpotAllocationStrategy {
+  find(floors: Floor[], vehicle: Vehicle): ParkingSpot | null;
+}
+
+/** Smallest size that fits first, then lowest floor, then spot order. */
+class BestFitStrategy implements SpotAllocationStrategy {
+  find(floors: Floor[], vehicle: Vehicle): ParkingSpot | null {
+    for (let size = MIN_SPOT_SIZE[vehicle.type]; size <= SpotSize.Large; size++) {
+      for (const floor of floors) {
+        const spot = floor.spots.find((s) => s.isFree && s.size === size);
+        if (spot) return spot;
+      }
+    }
+    return null;
+  }
+}
+
+interface PricingStrategy {
+  fee(type: VehicleType, entryTime: number, exitTime: number): number;
+}
+
+const HOUR_MS = 60 * 60 * 1000;
+
+class HourlyPricing implements PricingStrategy {
+  constructor(private ratePerHour: Record<VehicleType, number>) {}
+
+  fee(type: VehicleType, entryTime: number, exitTime: number): number {
+    const hours = Math.max(1, Math.ceil((exitTime - entryTime) / HOUR_MS));
+    return hours * this.ratePerHour[type];
+  }
+}
+
+class ParkingLot {
+  private tickets = new Map<string, Ticket>();
+  private parkedPlates = new Set<string>();
+  private nextTicket = 1;
+
+  constructor(
+    private floors: Floor[],
+    private allocation: SpotAllocationStrategy,
+    private pricing: PricingStrategy,
+    private clock: () => number = Date.now,
+  ) {}
+
+  park(vehicle: Vehicle): Ticket {
+    if (this.parkedPlates.has(vehicle.plate)) throw new Error(`${vehicle.plate} is already parked`);
+    // Synchronous check-and-assign: atomic within one Node process.
+    const spot = this.allocation.find(this.floors, vehicle);
+    if (!spot) throw new Error('No spot available');
+    spot.park(vehicle);
+    const ticket = new Ticket(`T${this.nextTicket++}`, vehicle, spot, this.clock());
+    this.tickets.set(ticket.id, ticket);
+    this.parkedPlates.add(vehicle.plate);
+    return ticket;
+  }
+
+  unpark(ticketId: string): Receipt {
+    const ticket = this.tickets.get(ticketId);
+    if (!ticket) throw new Error(`Unknown or used ticket ${ticketId}`);
+    const exitTime = this.clock();
+    ticket.spot.release();
+    this.tickets.delete(ticketId);
+    this.parkedPlates.delete(ticket.vehicle.plate);
+    return {
+      ticketId,
+      plate: ticket.vehicle.plate,
+      fee: this.pricing.fee(ticket.vehicle.type, ticket.entryTime, exitTime),
+      durationMs: exitTime - ticket.entryTime,
+    };
+  }
+
+  availability(): Record<SpotSize, number> {
+    const free = { [SpotSize.Small]: 0, [SpotSize.Medium]: 0, [SpotSize.Large]: 0 };
+    for (const floor of this.floors) for (const s of floor.spots) if (s.isFree) free[s.size]++;
+    return free;
+  }
+}
+```
+
+## Edge cases
+
+- Lot full for that vehicle size → clear error; the display board shows zero for that size.
+- Same plate parked twice → rejected (catches a lost-ticket re-entry or a cloned plate).
+- Ticket used twice or invented → rejected; the ticket is deleted on exit.
+- Exactly on the hour (60 minutes) → 1 hour, not 2; 61 minutes → 2 hours.
+- A bike taking a medium spot when smalls are full is allowed; a car never takes a small spot.
+
+## Extensions
+
+- **Multiple entry/exit gates** — `EntryGate` and `ExitGate` classes that call the lot; the concurrency question below.
+- **Spot types beyond size** (EV charging, handicapped): give spots a set of features and let the allocation strategy filter on them.
+- **Payments** — a `PaymentProcessor` interface (cash, card, UPI) called on exit; exit gate opens only after success.
+- **Display boards** — Observer: the lot publishes `SpotFreed`/`SpotTaken` events; each floor's board subscribes.
+- **Reservations** — a spot gets a `reservedUntil` and the allocation strategy skips reserved spots.
+
+## Interview follow-ups
+
+- *"Two cars at two gates, one spot left."* — In one process the check-and-assign is synchronous and atomic; with gates as separate threads (Java), lock per floor or make `ParkingSpot.park` a `synchronized` compare-and-set and retry allocation on failure. Across servers, a conditional DB update on the spot row. See [Concurrency in LLD](/prep/lld/concurrency).
+- *"Add a new vehicle type, e.g. electric scooter."* — One enum value and one entry in `MIN_SPOT_SIZE`; nothing else changes.
+- *"Weekend pricing."* — A new `PricingStrategy`, possibly composed: `WeekendPricing` wraps `HourlyPricing`.
+- *"Why is `ParkingLot` not a singleton?"* — It could be in a one-lot app, but injecting one instance keeps it testable and supports multi-lot later.
+- *"How do you find a free spot faster than scanning?"* — Keep a free-spot set (or min-heap by floor) per size; O(1)/O(log n) allocation.

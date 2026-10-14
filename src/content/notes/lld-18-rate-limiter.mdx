@@ -1,0 +1,173 @@
+---
+title: "Rate Limiter (LLD)"
+track: "lld"
+kind: "notes"
+order: 18
+slug: "lld-rate-limiter"
+updated: 2026-10-14
+description: "The class design of an in-process rate limiter — a RateLimiter interface with token bucket, fixed window and sliding window log implementations, per-key state, an injected clock, and per-tier rules chosen by configuration."
+---
+
+import Callout from '../../components/Callout.astro';
+import Mermaid from '../../components/Mermaid.astro';
+
+The distributed version (Redis, GCRA, what happens when Redis dies) is in [Rate Limiter HLD](/prep/system-design/rate-limiter). Here the focus is the object model and the algorithms.
+
+## Problem
+
+Design a rate limiter library: given a key (user id, API key, IP), decide whether a request is allowed. Different clients get different limits, and the algorithm must be swappable.
+
+## Requirements
+
+- `allow(key)` → `true`/`false`, O(1) or close to it.
+- Algorithms: **token bucket** (allows bursts up to capacity, steady refill), **fixed window** (N per window), **sliding window log** (exactly N in any rolling window).
+- Limits per client tier (free: 5/s, pro: 50/s), configurable.
+- Independent state per key.
+- Deterministic and testable (no real time in tests).
+
+## Entities and class diagram
+
+<Mermaid caption="Each algorithm implements one interface; the registry maps tiers to limiters" code={`classDiagram
+  class RateLimiter {
+    <<interface>>
+    +allow(key) boolean
+  }
+  class TokenBucketLimiter {
+    -capacity: number
+    -refillPerMs: number
+    -buckets: Map
+  }
+  class FixedWindowLimiter {
+    -limit: number
+    -windowMs: number
+    -counters: Map
+  }
+  class SlidingWindowLogLimiter {
+    -limit: number
+    -windowMs: number
+    -logs: Map
+  }
+  class TieredRateLimiter {
+    -limiters: Map
+    +allow(clientId, tier) boolean
+  }
+  RateLimiter <|.. TokenBucketLimiter
+  RateLimiter <|.. FixedWindowLimiter
+  RateLimiter <|.. SlidingWindowLogLimiter
+  TieredRateLimiter o-- RateLimiter
+`} />
+
+## Design decisions
+
+- **Strategy pattern**: callers depend on `RateLimiter`; which algorithm runs is configuration.
+- **Lazy refill** for the token bucket: no timer per key. On each call, add `elapsed × rate` tokens (capped), then try to take one. State per key is just `{tokens, lastRefill}`.
+- **Fixed window** is the simplest and cheapest but allows up to 2× the limit across a window boundary (N at the end of one window, N at the start of the next).
+- **Sliding window log** is exact but stores one timestamp per allowed request — memory O(limit) per key.
+- **Clock injected** through the constructor.
+
+| Algorithm | Memory per key | Bursts | Accuracy |
+|---|---|---|---|
+| Token bucket | O(1) | Up to capacity | Smooth average rate |
+| Fixed window | O(1) | Up to 2× at boundaries | Approximate |
+| Sliding window log | O(limit) | None beyond limit | Exact |
+| Sliding window counter (extension) | O(1) | Small | Close approximation |
+
+## Final code
+
+```ts
+interface RateLimiter {
+  allow(key: string): boolean;
+}
+
+class TokenBucketLimiter implements RateLimiter {
+  private buckets = new Map<string, { tokens: number; lastRefill: number }>();
+  private refillPerMs: number;
+
+  constructor(private capacity: number, refillPerSecond: number, private clock: () => number = Date.now) {
+    if (capacity < 1 || refillPerSecond <= 0) throw new Error('Invalid token bucket settings');
+    this.refillPerMs = refillPerSecond / 1000;
+  }
+
+  allow(key: string): boolean {
+    const now = this.clock();
+    const b = this.buckets.get(key) ?? { tokens: this.capacity, lastRefill: now };
+    b.tokens = Math.min(this.capacity, b.tokens + (now - b.lastRefill) * this.refillPerMs);
+    b.lastRefill = now;
+    this.buckets.set(key, b);
+    if (b.tokens < 1) return false;
+    b.tokens -= 1;
+    return true;
+  }
+}
+
+class FixedWindowLimiter implements RateLimiter {
+  private counters = new Map<string, { window: number; count: number }>();
+
+  constructor(private limit: number, private windowMs: number, private clock: () => number = Date.now) {
+    if (limit < 1 || windowMs <= 0) throw new Error('Invalid fixed window settings');
+  }
+
+  allow(key: string): boolean {
+    const window = Math.floor(this.clock() / this.windowMs);
+    const c = this.counters.get(key);
+    if (!c || c.window !== window) {
+      this.counters.set(key, { window, count: 1 });
+      return true;
+    }
+    if (c.count >= this.limit) return false;
+    c.count++;
+    return true;
+  }
+}
+
+class SlidingWindowLogLimiter implements RateLimiter {
+  private logs = new Map<string, number[]>();
+
+  constructor(private limit: number, private windowMs: number, private clock: () => number = Date.now) {
+    if (limit < 1 || windowMs <= 0) throw new Error('Invalid sliding window settings');
+  }
+
+  allow(key: string): boolean {
+    const now = this.clock();
+    const log = this.logs.get(key) ?? [];
+    while (log.length && log[0] <= now - this.windowMs) log.shift(); // drop timestamps outside the window
+    this.logs.set(key, log);
+    if (log.length >= this.limit) return false;
+    log.push(now);
+    return true;
+  }
+}
+
+/** Picks a limiter by client tier; unknown tiers are rejected rather than silently unlimited. */
+class TieredRateLimiter {
+  constructor(private limiters: Map<string, RateLimiter>) {}
+
+  allow(clientId: string, tier: string): boolean {
+    const limiter = this.limiters.get(tier);
+    if (!limiter) throw new Error(`No rate limit configured for tier ${tier}`);
+    return limiter.allow(clientId);
+  }
+}
+```
+
+## Edge cases
+
+- First request for a key → bucket starts full / window starts fresh.
+- Long idle period → token bucket refills only up to capacity, never beyond.
+- Exactly at the window boundary → fixed window resets; sliding log drops timestamps that are a full window old.
+- Unknown tier → explicit error (fail closed), not "no limit".
+
+## Extensions
+
+- **Sliding window counter**: keep counts for the current and previous fixed windows and weight the previous by its overlap — O(1) memory, close to exact.
+- **Memory cleanup**: evict idle keys (an LRU or periodic sweep), or millions of one-off IPs grow the maps forever.
+- **Response headers**: return remaining quota and retry-after from `allow` (a richer result object).
+- **Thread safety** (Java): per-key `synchronized`, or `ConcurrentHashMap.compute` to update a key's state atomically.
+- **Distributed**: move state to Redis with an atomic script — see the [HLD page](/prep/system-design/rate-limiter).
+
+## Interview follow-ups
+
+- *"Token bucket vs leaky bucket?"* — Token bucket allows bursts up to capacity; leaky bucket smooths output to a constant rate (a queue drained at a fixed rate).
+- *"What's wrong with fixed windows?"* — Up to 2× the limit around boundaries.
+- *"How do you avoid a timer per key?"* — Lazy refill computed from elapsed time on each request.
+- *"How do you test it?"* — Inject a fake clock and advance it.

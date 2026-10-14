@@ -1,0 +1,224 @@
+---
+title: "Logging Framework"
+track: "lld"
+kind: "notes"
+order: 19
+slug: "logger"
+updated: 2026-10-14
+description: "Designing a logging library (log4j / winston style) — levels, named loggers from a singleton manager, pluggable formatters and appenders each with their own threshold, isolation of failing appenders, and async writing as a follow-up."
+---
+
+import Callout from '../../components/Callout.astro';
+import Mermaid from '../../components/Mermaid.astro';
+
+## Problem
+
+Design a logging library. Code calls `logger.info("…")`; the library decides whether the message passes the level threshold, formats it, and sends it to one or more destinations (console, file, a remote service). Destinations and formats must be pluggable.
+
+## Requirements
+
+- Levels in order: DEBUG < INFO < WARN < ERROR. A logger has a minimum level; lower messages are dropped cheaply.
+- Named loggers (`payments`, `auth`) obtained from a central manager; asking twice for the same name returns the same logger.
+- Each logger writes to one or more **appenders**; each appender has its own minimum level (console gets INFO+, an alert sink gets ERROR only).
+- Each appender has a **formatter** (plain text, JSON).
+- A failing appender must not break the application or the other appenders.
+- Structured context (`{ orderId: 42 }`) can be attached to a message.
+
+## Entities and class diagram
+
+<Mermaid caption="LogManager hands out loggers; each logger fans records out to appenders" code={`classDiagram
+  class LogManager {
+    -loggers: Map
+    +getInstance() LogManager
+    +getLogger(name) Logger
+  }
+  class Logger {
+    +name: string
+    +level: LogLevel
+    -appenders: Appender[]
+    +debug(msg, ctx)
+    +info(msg, ctx)
+    +warn(msg, ctx)
+    +error(msg, ctx)
+  }
+  class Appender {
+    <<interface>>
+    +level: LogLevel
+    +append(record)
+  }
+  class Formatter {
+    <<interface>>
+    +format(record) string
+  }
+  class LogRecord {
+    +level: LogLevel
+    +logger: string
+    +message: string
+    +timestamp: number
+    +context: object
+  }
+  LogManager *-- Logger
+  Logger o-- Appender
+  Appender o-- Formatter
+  Appender <|.. ConsoleAppender
+  Appender <|.. MemoryAppender
+  Formatter <|.. TextFormatter
+  Formatter <|.. JsonFormatter
+`} />
+
+## Design decisions
+
+- **Levels are numbers**, so filtering is one comparison and the check happens before any formatting work.
+- **Singleton `LogManager`** — the one place that legitimately wants global access, because every module needs `getLogger(name)` without wiring. It still accepts a clock and default appenders through `configure`, so tests can control it.
+- **Appender (where) and Formatter (how) are separate strategies.** Any formatter works with any appender; adding a Kafka appender doesn't touch formatting.
+- **Fan-out is Observer-like**: a logger publishes a record to all its appenders. (The classic alternative is Chain of Responsibility, where each handler decides whether to handle and pass along; fan-out is simpler when every appender should see every record that meets its own level.)
+- **Isolation**: each `append` call is wrapped; an exception in one appender is counted and reported to a fallback, never thrown into business code.
+
+## Final code
+
+```ts
+enum LogLevel { Debug = 10, Info = 20, Warn = 30, Error = 40 }
+
+type LogRecord = {
+  level: LogLevel;
+  logger: string;
+  message: string;
+  timestamp: number;
+  context?: Record<string, unknown>;
+};
+
+interface Formatter {
+  format(record: LogRecord): string;
+}
+
+class TextFormatter implements Formatter {
+  format(r: LogRecord): string {
+    const ctx = r.context ? ' ' + JSON.stringify(r.context) : '';
+    return `${new Date(r.timestamp).toISOString()} ${LogLevel[r.level].toUpperCase()} [${r.logger}] ${r.message}${ctx}`;
+  }
+}
+
+class JsonFormatter implements Formatter {
+  format(r: LogRecord): string {
+    return JSON.stringify({
+      ts: new Date(r.timestamp).toISOString(),
+      level: LogLevel[r.level].toLowerCase(),
+      logger: r.logger,
+      msg: r.message,
+      ...r.context,
+    });
+  }
+}
+
+interface Appender {
+  readonly level: LogLevel;
+  append(record: LogRecord): void;
+}
+
+class ConsoleAppender implements Appender {
+  constructor(readonly level = LogLevel.Info, private formatter: Formatter = new TextFormatter()) {}
+  append(record: LogRecord): void {
+    const line = this.formatter.format(record);
+    if (record.level >= LogLevel.Error) console.error(line);
+    else console.log(line);
+  }
+}
+
+/** Keeps formatted lines in memory — for tests, or an in-app log viewer. */
+class MemoryAppender implements Appender {
+  readonly lines: string[] = [];
+  constructor(readonly level = LogLevel.Debug, private formatter: Formatter = new TextFormatter()) {}
+  append(record: LogRecord): void {
+    this.lines.push(this.formatter.format(record));
+  }
+}
+
+class Logger {
+  failures = 0;
+
+  constructor(
+    readonly name: string,
+    public level: LogLevel,
+    private appenders: Appender[],
+    private clock: () => number,
+  ) {}
+
+  addAppender(appender: Appender): void {
+    this.appenders.push(appender);
+  }
+
+  debug(message: string, context?: Record<string, unknown>) { this.log(LogLevel.Debug, message, context); }
+  info(message: string, context?: Record<string, unknown>) { this.log(LogLevel.Info, message, context); }
+  warn(message: string, context?: Record<string, unknown>) { this.log(LogLevel.Warn, message, context); }
+  error(message: string, context?: Record<string, unknown>) { this.log(LogLevel.Error, message, context); }
+
+  private log(level: LogLevel, message: string, context?: Record<string, unknown>): void {
+    if (level < this.level) return; // cheap early exit, before building a record
+    const record: LogRecord = { level, logger: this.name, message, timestamp: this.clock(), context };
+    for (const appender of this.appenders) {
+      if (level < appender.level) continue;
+      try {
+        appender.append(record);
+      } catch {
+        this.failures++; // never let logging break the caller
+      }
+    }
+  }
+}
+
+class LogManager {
+  private static instance: LogManager | undefined;
+  private loggers = new Map<string, Logger>();
+  private defaultLevel = LogLevel.Info;
+  private defaultAppenders: () => Appender[] = () => [new ConsoleAppender()];
+  private clock: () => number = Date.now;
+
+  private constructor() {}
+
+  static getInstance(): LogManager {
+    return (LogManager.instance ??= new LogManager());
+  }
+
+  /** For tests: drop the singleton so each test starts clean. */
+  static reset(): void {
+    LogManager.instance = undefined;
+  }
+
+  configure(options: { level?: LogLevel; appenders?: () => Appender[]; clock?: () => number }): void {
+    if (options.level !== undefined) this.defaultLevel = options.level;
+    if (options.appenders) this.defaultAppenders = options.appenders;
+    if (options.clock) this.clock = options.clock;
+  }
+
+  getLogger(name: string): Logger {
+    let logger = this.loggers.get(name);
+    if (!logger) {
+      logger = new Logger(name, this.defaultLevel, this.defaultAppenders(), this.clock);
+      this.loggers.set(name, logger);
+    }
+    return logger;
+  }
+}
+```
+
+## Edge cases
+
+- Message below the logger's level → dropped before a record is built.
+- Message above the logger's level but below an appender's level → skipped for that appender only.
+- An appender throws (disk full, network down) → other appenders still run; the failure is counted.
+- Same name requested twice → same `Logger` instance (so level changes apply everywhere).
+
+## Extensions
+
+- **Async appenders**: put records on a bounded queue drained by a background worker (Java: `BlockingQueue` + thread; Node: batch and flush on an interval). Decide what happens when the queue is full — drop DEBUG first, never block the request path.
+- **Hierarchical loggers**: `payments.refunds` inherits level and appenders from `payments` unless overridden (log4j-style).
+- **File rotation**: a `RollingFileAppender` that rotates by size or date.
+- **Context propagation**: a request id attached automatically from async context (Node `AsyncLocalStorage`, Java MDC).
+- **Sampling / rate limiting** noisy loggers.
+
+## Interview follow-ups
+
+- *"Why is the logger manager a singleton?"* — Every module needs the same registry without dependency wiring; it's configuration-like global state. Keep it resettable and configurable for tests.
+- *"Thread safety?"* — Appenders that write to one file must serialize writes (a lock, or a single writer thread fed by a queue); the logger registry uses `ConcurrentHashMap.computeIfAbsent`.
+- *"Logging is slowing requests."* — Async appenders with bounded queues, cheaper formatting, lazy message construction (pass a function), lower levels in hot paths.
+- *"How do you add a new destination?"* — Implement `Appender`; nothing else changes.

@@ -1,0 +1,245 @@
+---
+title: "Cache with Eviction Policies (LRU / LFU)"
+track: "lld"
+kind: "notes"
+order: 17
+slug: "cache-eviction"
+updated: 2026-10-14
+description: "Designing a fixed-capacity key-value cache with a pluggable eviction policy — O(1) LRU with a hash map and doubly linked list, O(1) LFU with frequency buckets, the policy interface that keeps them swappable, and TTL and thread-safety follow-ups."
+---
+
+import Callout from '../../components/Callout.astro';
+import Mermaid from '../../components/Mermaid.astro';
+
+## Problem
+
+Design an in-memory key-value cache with a fixed capacity. When it's full, adding a new key evicts one existing key chosen by an eviction policy. The policy must be swappable: LRU today, LFU tomorrow. `get` and `put` should be O(1).
+
+## Requirements
+
+- `get(key)` returns the value or `undefined`; it counts as an access.
+- `put(key, value)` inserts or updates; updating counts as an access; inserting into a full cache evicts first.
+- `delete(key)`, `size`.
+- Policies: **LRU** (evict least recently used) and **LFU** (evict least frequently used; ties broken by least recently used).
+- Capacity ≥ 1.
+
+## Entities and class diagram
+
+<Mermaid caption="Cache stores values; the policy only tracks keys and picks a victim" code={`classDiagram
+  class Cache {
+    -capacity: number
+    -store: Map
+    -policy: EvictionPolicy
+    +get(key) V
+    +put(key, value)
+    +delete(key) boolean
+  }
+  class EvictionPolicy {
+    <<interface>>
+    +onAccess(key)
+    +onInsert(key)
+    +onRemove(key)
+    +victim() K
+  }
+  class LRUPolicy {
+    -nodes: Map
+    -head: Node
+    -tail: Node
+  }
+  class LFUPolicy {
+    -freq: Map
+    -buckets: Map
+    -minFreq: number
+  }
+  Cache o-- EvictionPolicy
+  EvictionPolicy <|.. LRUPolicy
+  EvictionPolicy <|.. LFUPolicy
+`} />
+
+## Design decisions
+
+- **Split storage from policy.** `Cache` owns the values and capacity; the policy only tracks keys and answers "which key should go?". That's the Strategy pattern, and it means each policy is tested on its own.
+- **LRU in O(1)**: a hash map from key to a node in a doubly linked list ordered by recency. Access → unlink the node and move it to the front. Evict → the tail. Sentinel head/tail nodes remove null checks.
+- **LFU in O(1)**: `freq[key]`, and `buckets[f]` = keys with frequency f in recency order (a JS `Set` keeps insertion order, so deleting and re-adding moves a key to the end). Track `minFreq`; the victim is the oldest key in `buckets[minFreq]`. A new key always resets `minFreq` to 1.
+- **Interview note**: in JavaScript, a `Map` alone gives a valid LRU (delete and re-set to move a key to the end; the first key is the oldest). Show the linked list anyway — it's what the interviewer is checking, and it's the answer in Java (`LinkedHashMap` with access order does it for you).
+
+## Final code
+
+```ts
+interface EvictionPolicy<K> {
+  onAccess(key: K): void;
+  onInsert(key: K): void;
+  onRemove(key: K): void;
+  victim(): K | undefined;
+}
+
+class ListNode<K> {
+  prev: ListNode<K> | null = null;
+  next: ListNode<K> | null = null;
+  constructor(readonly key: K | null) {}
+}
+
+/** Most recent at the head, least recent at the tail. */
+class LRUPolicy<K> implements EvictionPolicy<K> {
+  private nodes = new Map<K, ListNode<K>>();
+  private head = new ListNode<K>(null);
+  private tail = new ListNode<K>(null);
+
+  constructor() {
+    this.head.next = this.tail;
+    this.tail.prev = this.head;
+  }
+
+  onInsert(key: K): void {
+    const node = new ListNode(key);
+    this.nodes.set(key, node);
+    this.addFront(node);
+  }
+
+  onAccess(key: K): void {
+    const node = this.nodes.get(key);
+    if (!node) return;
+    this.unlink(node);
+    this.addFront(node);
+  }
+
+  onRemove(key: K): void {
+    const node = this.nodes.get(key);
+    if (!node) return;
+    this.unlink(node);
+    this.nodes.delete(key);
+  }
+
+  victim(): K | undefined {
+    const last = this.tail.prev!;
+    return last === this.head ? undefined : (last.key as K);
+  }
+
+  private addFront(node: ListNode<K>): void {
+    node.prev = this.head;
+    node.next = this.head.next;
+    this.head.next!.prev = node;
+    this.head.next = node;
+  }
+
+  private unlink(node: ListNode<K>): void {
+    node.prev!.next = node.next;
+    node.next!.prev = node.prev;
+    node.prev = node.next = null;
+  }
+}
+
+/** Least frequently used; ties go to the least recently used within that frequency. */
+class LFUPolicy<K> implements EvictionPolicy<K> {
+  private freq = new Map<K, number>();
+  private buckets = new Map<number, Set<K>>();
+  private minFreq = 0;
+
+  onInsert(key: K): void {
+    this.freq.set(key, 1);
+    this.bucket(1).add(key);
+    this.minFreq = 1;
+  }
+
+  onAccess(key: K): void {
+    const f = this.freq.get(key);
+    if (f === undefined) return;
+    const old = this.bucket(f);
+    old.delete(key);
+    if (old.size === 0) {
+      this.buckets.delete(f);
+      if (this.minFreq === f) this.minFreq = f + 1;
+    }
+    this.freq.set(key, f + 1);
+    this.bucket(f + 1).add(key);
+  }
+
+  onRemove(key: K): void {
+    const f = this.freq.get(key);
+    if (f === undefined) return;
+    const b = this.bucket(f);
+    b.delete(key);
+    if (b.size === 0) this.buckets.delete(f);
+    this.freq.delete(key);
+    if (this.freq.size === 0) this.minFreq = 0;
+    else if (f === this.minFreq && !this.buckets.has(f)) this.minFreq = Math.min(...this.buckets.keys());
+  }
+
+  victim(): K | undefined {
+    const b = this.buckets.get(this.minFreq);
+    return b?.values().next().value;
+  }
+
+  private bucket(f: number): Set<K> {
+    let b = this.buckets.get(f);
+    if (!b) this.buckets.set(f, (b = new Set()));
+    return b;
+  }
+}
+
+class Cache<K, V> {
+  private store = new Map<K, V>();
+
+  constructor(private capacity: number, private policy: EvictionPolicy<K> = new LRUPolicy<K>()) {
+    if (!Number.isInteger(capacity) || capacity < 1) throw new Error('Capacity must be a positive integer');
+  }
+
+  get size(): number {
+    return this.store.size;
+  }
+
+  get(key: K): V | undefined {
+    if (!this.store.has(key)) return undefined;
+    this.policy.onAccess(key);
+    return this.store.get(key);
+  }
+
+  put(key: K, value: V): void {
+    if (this.store.has(key)) {
+      this.store.set(key, value);
+      this.policy.onAccess(key);
+      return;
+    }
+    if (this.store.size >= this.capacity) {
+      const victim = this.policy.victim()!;
+      this.store.delete(victim);
+      this.policy.onRemove(victim);
+    }
+    this.store.set(key, value);
+    this.policy.onInsert(key);
+  }
+
+  delete(key: K): boolean {
+    if (!this.store.delete(key)) return false;
+    this.policy.onRemove(key);
+    return true;
+  }
+}
+```
+
+<Callout type="note">
+`LFUPolicy.onRemove` recomputes `minFreq` only on an explicit delete, which is rare. Evictions always remove a key from the `minFreq` bucket and are immediately followed by an insert that resets `minFreq` to 1, so the hot path stays O(1).
+</Callout>
+
+## Edge cases
+
+- Capacity 1 → every new key evicts the previous one.
+- Updating an existing key never evicts; it counts as an access.
+- `get` of a missing key doesn't touch the policy.
+- LFU tie → the least recently used among the least frequent keys goes.
+- Deleting the only key at the minimum frequency → `minFreq` moves to the next frequency present.
+
+## Extensions
+
+- **TTL** — store `expiresAt` with each value; treat expired entries as missing on `get` (lazy expiry) plus a periodic sweep.
+- **FIFO / random policies** — new `EvictionPolicy` classes, no change to `Cache`.
+- **Thread safety** — Java: a `ReentrantReadWriteLock`, or segment the cache into N shards each with its own lock (like old `ConcurrentHashMap`). Note that `get` mutates LRU order, so it needs the write lock — a reason real caches (Caffeine) buffer access events instead.
+- **Eviction listener** — Observer callback when a key is evicted (write-back caches).
+- **Distributed** — see [Distributed Cache](/prep/system-design/distributed-cache).
+
+## Interview follow-ups
+
+- *"Why a doubly linked list and not an array?"* — Removing an arbitrary node is O(1) with prev/next pointers; an array shift is O(n).
+- *"Why does LRU `get` need a write lock?"* — It reorders the list.
+- *"LRU vs LFU — when is each better?"* — LRU adapts to changing access patterns; LFU keeps long-term popular items but can hold stale ones (frequency aging fixes that).
+- *"How do you add a new policy?"* — Implement `EvictionPolicy`; inject it.

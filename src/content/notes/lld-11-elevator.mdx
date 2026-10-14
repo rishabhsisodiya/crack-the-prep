@@ -1,0 +1,208 @@
+---
+title: "Elevator System"
+track: "lld"
+kind: "notes"
+order: 11
+slug: "elevator"
+updated: 2026-10-14
+description: "Designing an elevator system — elevator state and direction, the LOOK scheduling algorithm with up/down stop sets, a dispatcher with a pluggable assignment strategy, a tick-based simulation, and the follow-ups on hall-call direction and concurrency."
+---
+
+import Callout from '../../components/Callout.astro';
+import Mermaid from '../../components/Mermaid.astro';
+
+## Problem
+
+Design the control system for a building with N floors and M elevators. People press **hall buttons** on a floor to call an elevator and **cab buttons** inside an elevator to choose a destination. The system decides which elevator answers each call and in what order each elevator visits its stops.
+
+## Requirements
+
+- Floors `min..max`; M elevators, each with a current floor and a direction (up, down, idle).
+- **Hall call** at a floor → the dispatcher assigns one elevator.
+- **Cab request** inside an elevator → added to that elevator's stops.
+- An elevator keeps moving in its current direction while it has stops that way, then reverses (the **LOOK** algorithm — like a disk arm). It doesn't zig-zag to whichever request came first.
+- Time advances in discrete **ticks**: each tick, every elevator moves one floor or stays idle; arriving at a stop opens the doors.
+- Out of scope unless asked: weight limits, door timing, emergency/maintenance modes, express elevators.
+
+## Entities and class diagram
+
+<Mermaid caption="The dispatcher assigns hall calls through a strategy; each elevator schedules its own stops" code={`classDiagram
+  class ElevatorSystem {
+    -elevators: Elevator[]
+    +hallCall(floor) Elevator
+    +cabRequest(elevatorId, floor)
+    +step() Arrival[]
+  }
+  class Elevator {
+    +id: string
+    +floor: number
+    +direction: Direction
+    -upStops: Set
+    -downStops: Set
+    +addStop(floor)
+    +step() number
+  }
+  class AssignmentStrategy {
+    <<interface>>
+    +select(elevators, floor) Elevator
+  }
+  class Direction {
+    <<enumeration>>
+    UP
+    DOWN
+    IDLE
+  }
+  ElevatorSystem *-- Elevator
+  ElevatorSystem o-- AssignmentStrategy
+  AssignmentStrategy <|.. NearestCarStrategy
+  Elevator --> Direction
+`} />
+
+## Design decisions
+
+- **Two stop sets per elevator.** A new stop above the current floor goes into `upStops`; below goes into `downStops`. Moving up, the elevator serves `upStops` in order; when none remain, it switches to `downStops`. That's LOOK in a few lines, and it avoids starvation: a request behind the elevator is served on the way back, not never.
+- **Scheduling vs dispatching are separate responsibilities.** The `Elevator` decides the order of its own stops. The `ElevatorSystem` only decides *which* elevator gets a hall call, through an `AssignmentStrategy` — swap in zone-based or load-aware assignment without touching elevators.
+- **Nearest-car cost**: idle or already heading toward the call → the distance; heading away → the distance plus the detour to its farthest stop and back.
+- **Tick-based simulation** makes behaviour deterministic and testable. A real controller would be event-driven with timers, but the logic is the same.
+
+## Final code
+
+```ts
+enum Direction { Up = 'UP', Down = 'DOWN', Idle = 'IDLE' }
+
+class Elevator {
+  direction = Direction.Idle;
+  private upStops = new Set<number>();
+  private downStops = new Set<number>();
+
+  constructor(
+    readonly id: string,
+    readonly minFloor: number,
+    readonly maxFloor: number,
+    public floor = minFloor,
+  ) {}
+
+  addStop(floor: number): void {
+    if (floor < this.minFloor || floor > this.maxFloor) throw new Error(`Floor ${floor} out of range`);
+    if (floor > this.floor) this.upStops.add(floor);
+    else if (floor < this.floor) this.downStops.add(floor);
+    // floor === current floor: doors simply open; nothing to schedule
+  }
+
+  get pendingStops(): number[] {
+    return [...this.upStops, ...this.downStops];
+  }
+
+  /** Farthest floor this elevator must still reach in its current direction. */
+  farthestStop(): number {
+    if (this.direction === Direction.Up && this.upStops.size) return Math.max(...this.upStops);
+    if (this.direction === Direction.Down && this.downStops.size) return Math.min(...this.downStops);
+    return this.floor;
+  }
+
+  /** Move one floor. Returns the floor if the elevator stopped there, else null. */
+  step(): number | null {
+    this.refreshDirection();
+    if (this.direction === Direction.Idle) return null;
+    this.floor += this.direction === Direction.Up ? 1 : -1;
+    const stops = this.direction === Direction.Up ? this.upStops : this.downStops;
+    const arrived = stops.delete(this.floor);
+    this.refreshDirection();
+    return arrived ? this.floor : null;
+  }
+
+  private refreshDirection(): void {
+    const up = this.upStops.size > 0;
+    const down = this.downStops.size > 0;
+    if (this.direction === Direction.Up && !up) this.direction = down ? Direction.Down : Direction.Idle;
+    else if (this.direction === Direction.Down && !down) this.direction = up ? Direction.Up : Direction.Idle;
+    else if (this.direction === Direction.Idle && (up || down)) {
+      const nearestUp = up ? Math.min(...this.upStops) - this.floor : Infinity;
+      const nearestDown = down ? this.floor - Math.max(...this.downStops) : Infinity;
+      this.direction = nearestUp <= nearestDown ? Direction.Up : Direction.Down;
+    }
+  }
+}
+
+interface AssignmentStrategy {
+  select(elevators: Elevator[], floor: number): Elevator;
+}
+
+class NearestCarStrategy implements AssignmentStrategy {
+  select(elevators: Elevator[], floor: number): Elevator {
+    let best = elevators[0];
+    let bestCost = Infinity;
+    for (const e of elevators) {
+      const cost = this.cost(e, floor);
+      if (cost < bestCost) { best = e; bestCost = cost; }
+    }
+    return best;
+  }
+
+  private cost(e: Elevator, floor: number): number {
+    const distance = Math.abs(e.floor - floor);
+    const headingToward =
+      e.direction === Direction.Idle ||
+      (e.direction === Direction.Up && floor >= e.floor) ||
+      (e.direction === Direction.Down && floor <= e.floor);
+    if (headingToward) return distance;
+    const turnaround = e.farthestStop();
+    return Math.abs(turnaround - e.floor) + Math.abs(turnaround - floor);
+  }
+}
+
+type Arrival = { elevatorId: string; floor: number };
+
+class ElevatorSystem {
+  private byId: Map<string, Elevator>;
+
+  constructor(private elevators: Elevator[], private strategy: AssignmentStrategy = new NearestCarStrategy()) {
+    if (!elevators.length) throw new Error('Need at least one elevator');
+    this.byId = new Map(elevators.map((e) => [e.id, e]));
+  }
+
+  hallCall(floor: number): Elevator {
+    const elevator = this.strategy.select(this.elevators, floor);
+    elevator.addStop(floor);
+    return elevator;
+  }
+
+  cabRequest(elevatorId: string, floor: number): void {
+    const elevator = this.byId.get(elevatorId);
+    if (!elevator) throw new Error(`Unknown elevator ${elevatorId}`);
+    elevator.addStop(floor);
+  }
+
+  step(): Arrival[] {
+    const arrivals: Arrival[] = [];
+    for (const e of this.elevators) {
+      const floor = e.step();
+      if (floor !== null) arrivals.push({ elevatorId: e.id, floor });
+    }
+    return arrivals;
+  }
+}
+```
+
+## Edge cases
+
+- Request for the floor the elevator is on → doors open, nothing scheduled.
+- Request behind a moving elevator → queued in the opposite set, served after the reversal (no starvation).
+- Floor out of range → rejected.
+- All elevators busy and heading away → the strategy still picks the cheapest detour.
+
+## Extensions
+
+- **Hall-call direction.** Real hall buttons are "up" or "down". A person at floor 7 pressing *down* shouldn't be picked up by an elevator passing 7 on its way up. Store hall calls as `(floor, direction)` and only stop for them when travelling in that direction (or at the turnaround).
+- **Capacity/weight** — skip hall calls when full; the strategy factors in load.
+- **States** — `Moving`, `DoorsOpen`, `Maintenance`, `Emergency` as a State pattern; maintenance elevators are excluded from dispatch.
+- **Zoning / express elevators** — a strategy that only considers elevators serving that floor's zone.
+- **Destination dispatch** — passengers enter the destination in the lobby; the system groups people going to nearby floors into the same car.
+
+## Interview follow-ups
+
+- *"Why not serve requests first-come-first-served?"* — The car zig-zags across the building; LOOK minimizes travel and still guarantees every request is served.
+- *"What's the difference between SCAN and LOOK?"* — SCAN goes all the way to the top/bottom floor before reversing; LOOK reverses at the last requested stop.
+- *"How do you assign a hall call?"* — A cost function (nearest car heading toward the call); pluggable as a strategy.
+- *"Concurrency?"* — Button presses arrive on many threads; each elevator's stop sets are guarded (a lock per elevator, or a `BlockingQueue` of requests consumed by that elevator's own thread). The dispatcher's selection reads possibly stale positions, which is acceptable — it's a heuristic.
+- *"How would you test it?"* — Tick-based simulation with deterministic inputs, exactly like the tests for this page.

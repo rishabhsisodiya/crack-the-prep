@@ -1,0 +1,282 @@
+---
+title: "Ride Sharing (Uber / Ola)"
+track: "lld"
+kind: "notes"
+order: 24
+slug: "ride-sharing"
+updated: 2026-10-14
+description: "The class design behind ride hailing — riders, drivers and vehicle types, a ride lifecycle state machine, pluggable driver matching and fare strategies with surge, cancellation rules, and ratings."
+---
+
+import Callout from '../../components/Callout.astro';
+import Mermaid from '../../components/Mermaid.astro';
+
+The system design (geo-indexing millions of drivers, dispatch at city scale) is in [Ride-Sharing Dispatch](/prep/system-design/ride-sharing-dispatch). This page is the object model you'd code in an LLD round.
+
+## Problem
+
+Design the core of a ride-hailing app: riders request rides of a vehicle type from a pickup to a drop; the system finds a driver, the ride goes through its lifecycle, and the fare is calculated at the end.
+
+## Requirements
+
+- Riders and drivers; drivers have a vehicle type (bike, auto, sedan), a location and an availability flag.
+- `requestRide(rider, pickup, drop, vehicleType)` → assigns the **nearest available driver of that type within a radius**, or fails.
+- Ride lifecycle: `Assigned → Started → Completed`, or `Cancelled` before start. Invalid transitions are rejected.
+- A rider can have only one active ride; a driver can be on only one ride.
+- Fare at completion: base fare + per-km rate by vehicle type, times a **surge multiplier**.
+- Rider rates the driver after completion (1–5); driver rating is the average.
+- Matching and fare rules must be swappable.
+
+## Entities and class diagram
+
+<Mermaid caption="RideService orchestrates; matching and fare are strategies; Ride enforces its own lifecycle" code={`classDiagram
+  class RideService {
+    +registerDriver(driver)
+    +registerRider(rider)
+    +requestRide(riderId, pickup, drop, type) Ride
+    +startRide(rideId)
+    +completeRide(rideId) number
+    +cancelRide(rideId)
+    +rateDriver(rideId, stars)
+  }
+  class Ride {
+    +id: string
+    +status: RideStatus
+    +fare: number
+    +start()
+    +complete(fare)
+    +cancel()
+  }
+  class Driver {
+    +id: string
+    +vehicleType: VehicleType
+    +location: Location
+    +available: boolean
+    +rating() number
+  }
+  class Rider {
+    +id: string
+    +activeRideId: string
+  }
+  class MatchingStrategy {
+    <<interface>>
+    +match(drivers, pickup, type) Driver
+  }
+  class FareStrategy {
+    <<interface>>
+    +fare(ride) number
+  }
+  RideService o-- MatchingStrategy
+  RideService o-- FareStrategy
+  RideService *-- Ride
+  Ride --> Driver
+  Ride --> Rider
+  MatchingStrategy <|.. NearestDriverStrategy
+  FareStrategy <|.. DistanceFareStrategy
+`} />
+
+## Design decisions
+
+- **`Ride` owns its state machine.** `start()` only from `Assigned`, `complete()` only from `Started`, `cancel()` only before start. The service can't put a ride in an impossible state even by mistake.
+- **Matching is a strategy.** Nearest-within-radius today; highest-rated, fewest idle minutes or a batch optimizer later.
+- **Fare is a strategy with surge as an input.** The surge multiplier comes from a provider function (in production, a demand/supply service per area), so pricing logic and surge logic change independently.
+- **Availability is the concurrency hot spot.** Assigning a driver flips `available` to false in the same synchronous step as matching, so one driver can't be assigned twice.
+- **Distances are straight-line (Euclidean on x/y) for the demo.** Real systems use road distance/ETA from a routing service — inject a `DistanceCalculator` if asked.
+
+## Final code
+
+```ts
+enum VehicleType { Bike = 'BIKE', Auto = 'AUTO', Sedan = 'SEDAN' }
+enum RideStatus { Assigned = 'ASSIGNED', Started = 'STARTED', Completed = 'COMPLETED', Cancelled = 'CANCELLED' }
+
+type Location = { x: number; y: number }; // km on a flat grid for the demo
+const distanceKm = (a: Location, b: Location) => Math.hypot(a.x - b.x, a.y - b.y);
+
+class Rider {
+  activeRideId: string | null = null;
+  constructor(readonly id: string, readonly name: string) {}
+}
+
+class Driver {
+  available = true;
+  private ratings: number[] = [];
+  constructor(readonly id: string, readonly name: string, readonly vehicleType: VehicleType, public location: Location) {}
+
+  addRating(stars: number): void {
+    this.ratings.push(stars);
+  }
+
+  rating(): number | null {
+    return this.ratings.length ? this.ratings.reduce((a, b) => a + b, 0) / this.ratings.length : null;
+  }
+}
+
+class Ride {
+  status = RideStatus.Assigned;
+  fare: number | null = null;
+  rated = false;
+
+  constructor(
+    readonly id: string,
+    readonly rider: Rider,
+    readonly driver: Driver,
+    readonly pickup: Location,
+    readonly drop: Location,
+    readonly vehicleType: VehicleType,
+  ) {}
+
+  start(): void {
+    this.transition(RideStatus.Assigned, RideStatus.Started);
+  }
+
+  complete(fare: number): void {
+    this.transition(RideStatus.Started, RideStatus.Completed);
+    this.fare = fare;
+  }
+
+  cancel(): void {
+    this.transition(RideStatus.Assigned, RideStatus.Cancelled);
+  }
+
+  private transition(from: RideStatus, to: RideStatus): void {
+    if (this.status !== from) throw new Error(`Cannot move ride ${this.id} from ${this.status} to ${to}`);
+    this.status = to;
+  }
+}
+
+interface MatchingStrategy {
+  match(drivers: Driver[], pickup: Location, type: VehicleType): Driver | null;
+}
+
+class NearestDriverStrategy implements MatchingStrategy {
+  constructor(private maxRadiusKm = 5) {}
+
+  match(drivers: Driver[], pickup: Location, type: VehicleType): Driver | null {
+    let best: Driver | null = null;
+    let bestDistance = Infinity;
+    for (const d of drivers) {
+      if (!d.available || d.vehicleType !== type) continue;
+      const dist = distanceKm(d.location, pickup);
+      if (dist <= this.maxRadiusKm && dist < bestDistance) {
+        best = d;
+        bestDistance = dist;
+      }
+    }
+    return best;
+  }
+}
+
+interface FareStrategy {
+  fare(ride: Ride): number;
+}
+
+class DistanceFareStrategy implements FareStrategy {
+  constructor(
+    private rates: Record<VehicleType, { base: number; perKm: number }>,
+    private surge: (pickup: Location) => number = () => 1,
+  ) {}
+
+  fare(ride: Ride): number {
+    const { base, perKm } = this.rates[ride.vehicleType];
+    const raw = (base + perKm * distanceKm(ride.pickup, ride.drop)) * this.surge(ride.pickup);
+    return Math.round(raw);
+  }
+}
+
+class RideService {
+  private riders = new Map<string, Rider>();
+  private drivers = new Map<string, Driver>();
+  private rides = new Map<string, Ride>();
+  private seq = 1;
+
+  constructor(private matching: MatchingStrategy, private pricing: FareStrategy) {}
+
+  registerRider(rider: Rider): void {
+    this.riders.set(rider.id, rider);
+  }
+
+  registerDriver(driver: Driver): void {
+    this.drivers.set(driver.id, driver);
+  }
+
+  updateDriverLocation(driverId: string, location: Location): void {
+    this.get(this.drivers, driverId, 'driver').location = location;
+  }
+
+  requestRide(riderId: string, pickup: Location, drop: Location, type: VehicleType): Ride {
+    const rider = this.get(this.riders, riderId, 'rider');
+    if (rider.activeRideId) throw new Error('Rider already has an active ride');
+    // Match and reserve in one synchronous step so a driver can't be double-assigned.
+    const driver = this.matching.match([...this.drivers.values()], pickup, type);
+    if (!driver) throw new Error(`No ${type} available nearby`);
+    driver.available = false;
+    const ride = new Ride(`R${this.seq++}`, rider, driver, pickup, drop, type);
+    rider.activeRideId = ride.id;
+    this.rides.set(ride.id, ride);
+    return ride;
+  }
+
+  startRide(rideId: string): void {
+    this.get(this.rides, rideId, 'ride').start();
+  }
+
+  completeRide(rideId: string): number {
+    const ride = this.get(this.rides, rideId, 'ride');
+    if (ride.status !== RideStatus.Started) throw new Error(`Cannot complete a ride that is ${ride.status}`);
+    ride.complete(this.pricing.fare(ride));
+    ride.driver.location = ride.drop;
+    this.release(ride);
+    return ride.fare!;
+  }
+
+  cancelRide(rideId: string): void {
+    const ride = this.get(this.rides, rideId, 'ride');
+    ride.cancel();
+    this.release(ride);
+  }
+
+  rateDriver(rideId: string, stars: number): void {
+    const ride = this.get(this.rides, rideId, 'ride');
+    if (ride.status !== RideStatus.Completed) throw new Error('Only completed rides can be rated');
+    if (ride.rated) throw new Error('Ride already rated');
+    if (!Number.isInteger(stars) || stars < 1 || stars > 5) throw new Error('Rating must be 1 to 5');
+    ride.driver.addRating(stars);
+    ride.rated = true;
+  }
+
+  private release(ride: Ride): void {
+    ride.driver.available = true;
+    ride.rider.activeRideId = null;
+  }
+
+  private get<T>(map: Map<string, T>, id: string, what: string): T {
+    const v = map.get(id);
+    if (!v) throw new Error(`Unknown ${what} ${id}`);
+    return v;
+  }
+}
+```
+
+## Edge cases
+
+- No driver of that type within the radius → clear failure (the app would offer another type or retry).
+- Rider requests a second ride while one is active → rejected.
+- Start a cancelled ride, cancel a started ride, complete an unstarted ride → rejected by the state machine.
+- Rating twice, rating a cancelled ride, rating 6 stars → rejected.
+- After completion the driver is available again at the drop location.
+
+## Extensions
+
+- **Driver accept/decline** — `Assigned` becomes `Offered`; on decline or timeout, match the next driver (exclude decliners).
+- **Cancellation fee** after the driver has been assigned for N minutes — a `CancellationPolicy` strategy.
+- **Shared rides / pooling** — a ride with multiple riders and an ordered list of stops; matching considers detour cost.
+- **Payments** — `PaymentMethod` interface charged on completion; retries and receipts.
+- **Notifications** — Observer on ride status changes (push to rider and driver).
+- **Spatial index** — replace the linear scan with a grid/geohash index for nearby drivers (see [Proximity Service](/prep/system-design/proximity-service)).
+
+## Interview follow-ups
+
+- *"Two ride requests match the same driver at the same time."* — Matching and marking unavailable must be one atomic step: synchronous here; per-driver lock or conditional update (`WHERE available = true`) across threads/servers.
+- *"Change matching to highest-rated within 3 km."* — A new `MatchingStrategy`; nothing else changes.
+- *"Where does surge come from?"* — A demand/supply ratio per area computed elsewhere, injected into the fare strategy.
+- *"Why does Ride own its transitions?"* — Invariants live with the data; the service can't create illegal states.
