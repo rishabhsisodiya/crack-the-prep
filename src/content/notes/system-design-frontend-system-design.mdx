@@ -1,0 +1,111 @@
+---
+title: "Frontend System Design — Framework"
+track: "system-design"
+kind: "notes"
+order: 53
+slug: "frontend-system-design"
+updated: 2026-10-14
+description: "How frontend system design rounds differ from backend ones, and a repeatable framework (RADIO) — requirements, component architecture, client data model, API contract, and the optimizations interviewers probe: rendering strategy, performance, accessibility, offline, security."
+---
+
+import Callout from '../../components/Callout.astro';
+import Mermaid from '../../components/Mermaid.astro';
+
+Part of the [system design](/prep/system-design) series. Frontend problems: [News Feed UI](/prep/system-design/frontend-news-feed) · [Autocomplete Widget](/prep/system-design/frontend-autocomplete) · [Chat App UI](/prep/system-design/frontend-chat-app) · [Offline-First App](/prep/system-design/frontend-offline-first) · [E-commerce Product & Checkout](/prep/system-design/frontend-ecommerce).
+
+## 1. How it differs from backend system design
+
+In a frontend round, the server is a black box behind an API you get to design. The interviewer wants to see you reason about **what happens in the browser**: component boundaries, where state lives, how data is fetched and cached, how it performs on a mid-range phone on 4G, and whether a keyboard or screen-reader user can use it.
+
+| Backend round | Frontend round |
+|---|---|
+| Databases, sharding, queues | Component tree, state ownership, client cache |
+| Throughput, p99 latency | Core Web Vitals, bundle size, perceived speed |
+| Replication, failover | Offline, retries, optimistic UI, flaky networks |
+| API between services | API between client and server (shape, pagination, real-time) |
+
+It's distinct from **machine coding** (build a working widget in 60–90 minutes — see the [Machine Coding](/prep/machine-coding) track). System design is a whiteboard discussion of architecture and trade-offs, usually with little or no code.
+
+## 2. The framework — RADIO
+
+Spend roughly: Requirements ~10%, Architecture ~15%, Data model ~10%, Interface ~15%, Optimizations ~50%. Most of the signal is in the last step.
+
+**R — Requirements.** Functional (what the user can do) and non-functional (devices, network, scale of data on screen, SEO, accessibility, i18n, offline). Ask: mobile and desktop? Logged in? How many items? Real-time? Which browsers?
+
+**A — Architecture.** Draw the main components and their responsibilities: view components, a client store/cache, a data-fetching layer, and the server. Say which parts are server-rendered.
+
+<Mermaid caption="A typical client architecture — views read from a client store; a data layer talks to the server" code={`flowchart LR
+  subgraph Browser
+    V[View components] --> CTRL[Controllers / hooks<br/>user intent]
+    CTRL --> STORE[(Client store / cache<br/>normalized entities)]
+    STORE --> V
+    CTRL --> DL[Data layer<br/>fetch, retry, dedupe]
+    DL --> STORE
+    SW[Service worker<br/>offline cache] -.-> DL
+  end
+  DL -->|HTTP / WebSocket| API[Server API]
+`} />
+
+**D — Data model.** The client-side entities and where each piece of state lives:
+- **Server state** (posts, users) — cached copies of server data; needs invalidation, pagination, staleness rules. Libraries like TanStack Query, SWR, Apollo/Relay handle this.
+- **Client/UI state** (open modal, input text, selected tab) — local to components when possible.
+- **URL state** (filters, page, search query) — anything that should survive refresh or be shareable.
+- **Normalize** server entities by id (`users[id]`, `posts[id]`) so one user's updated avatar shows everywhere without refetching.
+
+**I — Interface (API).** Design the client–server contract: endpoints or GraphQL queries, request/response shape, **cursor-based pagination**, error format, and real-time channel (polling, SSE, WebSocket). Also the **component API** for reusable widgets (props, events, slots).
+
+**O — Optimizations and deep dives.** Pick the ones that matter for this product — don't list all of them.
+
+## 3. The optimization menu
+
+**Rendering strategy**
+
+| Strategy | Good for | Trade-off |
+|---|---|---|
+| CSR (client-side rendering) | Logged-in apps, dashboards | Slow first paint, poor SEO without extra work |
+| SSR (per request) | Personalized pages needing SEO and fast first paint | Server cost, TTFB |
+| SSG / ISR (build-time, revalidated) | Marketing, docs, product pages | Staleness, rebuild strategy |
+| Streaming SSR + server components | Large pages with slow data parts | Framework complexity |
+| Islands / partial hydration | Mostly static pages with a few interactive parts | Less fitting for highly interactive apps |
+
+**Performance** — measured as Core Web Vitals: **LCP** (largest content visible, target ≤ 2.5 s), **INP** (responsiveness to input, ≤ 200 ms; replaced FID in 2024), **CLS** (layout shift, ≤ 0.1).
+- Code splitting by route and by interaction (load the editor when the user clicks Edit); tree shaking; avoid shipping large libraries for small features.
+- Images: right size per device (`srcset`), modern formats (AVIF/WebP), lazy-load below the fold, explicit width/height to prevent layout shift, `fetchpriority="high"` on the LCP image.
+- Long lists: **virtualization** (render only visible rows).
+- Keep the main thread free: debounce/throttle handlers, break up long tasks, move heavy work to Web Workers.
+- Network: HTTP caching, CDN, preconnect/preload critical assets, prefetch likely next routes.
+
+**Perceived performance** — skeletons, optimistic updates, instant feedback on taps, keeping previous data visible while refetching.
+
+**Accessibility** — semantic HTML first, keyboard operability, visible focus, ARIA patterns for custom widgets (combobox, dialog, tabs), live regions for dynamic updates, color contrast, respecting `prefers-reduced-motion`.
+
+**Network resilience** — retries with backoff for idempotent requests, request deduplication, cancellation of stale requests (`AbortController`), offline detection and queues.
+
+**Security** — XSS (escape by default, sanitize user HTML, Content Security Policy), CSRF (SameSite cookies, tokens), tokens in httpOnly cookies rather than `localStorage`, clickjacking (`frame-ancestors`).
+
+**i18n** — text externalized, plural rules, RTL layouts, locale-aware dates/numbers.
+
+<Callout type="tip">
+Strong candidates tie every optimization to a requirement: "the feed is the landing page and must be fast on mid-range Android, so: SSR the first page, virtualize the list, lazy-load images with fixed aspect ratios." A generic list of every optimization reads as memorized.
+</Callout>
+
+## 4. Common problems by theme
+
+| Theme | Problems |
+|---|---|
+| Lists and feeds | News feed, Pinterest grid, infinite scroll, data table with 100k rows |
+| Input-driven | Autocomplete, rich text editor, form builder |
+| Real-time | Chat, collaborative editor, live comments, stock ticker |
+| Media | Image carousel, photo gallery, video player |
+| Commerce | Product page, checkout, cart |
+| App-level | Offline-first app, design system/component library, analytics dashboard |
+
+## Interview follow-ups
+
+- *"Where should this piece of state live?"* — Server cache vs local UI state vs URL; lift only as high as needed.
+- *"SSR or CSR?"* — Depends on SEO, first-paint requirements and personalization; justify with the requirement.
+- *"How do you know it's fast?"* — Field data (RUM) for Core Web Vitals, plus lab tools (Lighthouse, WebPageTest) for debugging; budgets enforced in CI.
+- *"How would a screen-reader user use this?"* — Semantic elements, ARIA pattern for the widget, focus management, live regions.
+- *"The API is slow."* — Skeletons, caching, prefetch, optimistic updates, pagination; don't block render on non-critical data.
+
+Further reading: web.dev articles on Core Web Vitals (LCP, INP, CLS) · WAI-ARIA Authoring Practices Guide (patterns for custom widgets) · patterns.dev (rendering and performance patterns) · GreatFrontEnd's system design guide (the RADIO framework).

@@ -1,0 +1,118 @@
+---
+title: "System Design — Search Engine (Full-Text Search)"
+track: "system-design"
+kind: "notes"
+order: 43
+slug: "search-engine"
+updated: 2026-10-14
+description: "Designing full-text search — the inverted index, document vs term partitioning, scatter-gather queries, BM25 and multi-stage ranking, near-real-time indexing, and how Elasticsearch-style systems work."
+---
+
+import Callout from '../../components/Callout.astro';
+import Mermaid from '../../components/Mermaid.astro';
+
+Part of the [system design](/prep/system-design) series. See the [framework](/prep/system-design) and [building blocks](/prep/system-design/building-blocks) first if you haven't. Companion problems: [Web Crawler](/prep/system-design/web-crawler) (how documents arrive) and [Search Autocomplete](/prep/system-design/search-autocomplete) (prefix suggestions, a different structure).
+
+## 1. Requirements
+
+The question comes in two flavours — clarify which:
+- **Product search** inside an app (search tweets, products, tickets, docs): millions to billions of documents, structured filters, freshness in seconds.
+- **Web search**: hundreds of billions of pages, crawling, link-based ranking. Usually scoped down to "the indexing and query path" in interviews.
+
+**Functional**
+- Keyword search with ranking; phrase queries (`"distributed cache"`); filters (category, date, price) and sorting.
+- New/updated documents searchable within a few seconds; deletes take effect quickly.
+- Pagination; highlighted snippets; typo tolerance is a nice-to-have.
+
+**Non-functional**
+- p99 query latency ~100–200 ms; tens of thousands of queries/s.
+- Index billions of documents; horizontal scale for both data and query load.
+- Search is a **derived view** — the primary DB remains the source of truth, and the index can always be rebuilt from it.
+
+## 2. Key design decision — the inverted index
+
+A forward index maps document → words. Search needs the reverse: **term → list of documents containing it** (a postings list), each entry with term frequency and positions.
+
+```text
+"cache"   -> [doc3 (tf=4, pos 7,19,40,52), doc9 (tf=1, pos 3), doc12 ...]
+"redis"   -> [doc3 (tf=2, ...), doc12 ...]
+```
+
+- **Analysis pipeline** at index and query time: tokenize → lowercase → remove stop words (optional) → stem/lemmatize ("caching" → "cach") → synonyms. Index and query must use the same analyzer, or matches silently fail.
+- Postings lists are **sorted by doc id and compressed** (delta encoding + variable-byte or bit-packing), so AND queries become fast merges of sorted lists, with skip pointers to jump ahead.
+- Positions enable phrase queries: "distributed" at position p and "cache" at p+1 in the same doc.
+- Filters and sorts use **columnar doc values** (per-field arrays), not the inverted index.
+
+## 3. High-level architecture
+
+<Mermaid caption="Write path builds index segments; query path fans out to shards and merges" code={`flowchart LR
+  SRC[(Primary DB)] -->|CDC events| KQ[(Kafka)]
+  KQ --> IDX[Indexer workers<br/>analyze, build docs]
+  IDX --> SH1[Shard 1<br/>primary + replicas]
+  IDX --> SH2[Shard 2<br/>primary + replicas]
+  IDX --> SH3[Shard N<br/>primary + replicas]
+  U[User query] --> QC[Query coordinator]
+  QC -->|scatter| SH1
+  QC -->|scatter| SH2
+  QC -->|scatter| SH3
+  QC --> RR[Re-ranker<br/>ML model on top results]
+  RR --> U
+`} />
+
+**Indexing path.** Changes flow from the primary DB via change data capture into Kafka, so the index never misses an update and can be replayed. Indexers analyze documents and write them to the owning shard.
+
+**Segments.** Each shard is a set of immutable **segments** (the Lucene model). New documents go to an in-memory buffer that's flushed to a new small segment every second or so (**refresh** → near-real-time visibility). Background **merges** combine small segments into larger ones. Deletes are tombstones until a merge drops them. Immutability makes caching and concurrency simple.
+
+## 4. Deep dive — partitioning and the query path
+
+| | Document partitioning | Term partitioning |
+|---|---|---|
+| How | Each shard holds a full inverted index for a subset of documents | Each shard holds the complete postings for a subset of terms |
+| Query | Fan out to all shards, each returns its local top-K, coordinator merges | Only shards owning the query terms are hit, but multi-term queries need cross-shard intersections |
+| Writes | One document → one shard | One document → many shards |
+| Used by | Elasticsearch, OpenSearch, Solr, most product search | Rare in practice; hot terms create hot shards |
+
+Use **document partitioning**. The query path is **scatter-gather**:
+
+1. Coordinator sends the query to one replica of every shard.
+2. Each shard scores locally and returns its top K (doc ids + scores).
+3. Coordinator merges into a global top K, then fetches the stored fields/snippets for just those K documents (a second, small round trip).
+
+<Callout type="warn">
+Scatter-gather latency is the **slowest** shard. With 100 shards, one slow replica ruins p99. Mitigations: hedged requests (send to a second replica if the first hasn't answered by the p95 time), adaptive replica selection, and not over-sharding — too many tiny shards add coordination overhead for no gain.
+</Callout>
+
+**Deep pagination** (page 500) forces every shard to return 500×K results. Cap the page depth, or use cursor-based "search after the last sort value".
+
+## 5. Ranking
+
+- **Stage 1 — lexical scoring on each shard: BM25.** Combines term frequency (with saturation), inverse document frequency (rare terms matter more), and document length normalization. It's the default in Lucene/Elasticsearch.
+- **Stage 2 — business signals**: freshness, popularity, ratings, personalization, applied as boosts.
+- **Stage 3 — learning-to-rank re-ranker** on the top few hundred candidates: a heavier ML model (gradient-boosted trees, or a cross-encoder) that would be too expensive to run on every match.
+- **Semantic/hybrid search**: also retrieve by vector similarity (embeddings in an ANN index) and fuse with BM25 results, e.g. via reciprocal rank fusion. Common for natural-language queries; see the [AI Engineering](/prep/ai-engineering) track on RAG.
+
+## 6. What real systems do today
+
+- **Elasticsearch / OpenSearch** are built on Apache Lucene: document-partitioned shards, replicas, segment-based near-real-time indexing with a default 1-second refresh, BM25 scoring by default, and native vector (kNN) search for hybrid retrieval.
+- **Twitter/X's Earlybird** was a custom real-time inverted index optimized for very fresh tweets with in-memory segments.
+- Web-scale engines add crawling, link analysis (PageRank-style signals), spam detection and huge ML ranking stacks — say you're focusing on indexing + query serving.
+
+## 7. Scaling & failure
+
+- **More data** → more shards (choose shard count up front or use index aliases and reindex into a larger index — resharding a live index is expensive).
+- **More queries** → more replicas; replicas serve reads.
+- **Shard primary dies** → a replica is promoted; indexing to that shard pauses briefly. Queries continue from other replicas.
+- **Indexing falls behind** → Kafka buffers; results are stale but correct. Expose lag as a metric.
+- **Whole cluster lost or mapping change** → rebuild from the source DB by replaying CDC or a bulk export. This is why the index is never the source of truth.
+- **Hot queries** → cache results per normalized query for a short TTL; shard-level caches cache filter bitsets.
+
+## Interview follow-ups
+
+- *"Explain the inverted index."* — term → sorted, compressed postings with frequencies and positions; queries merge postings lists.
+- *"Document or term partitioning?"* — Document: simpler writes, balanced load, scatter-gather reads.
+- *"How do new docs become searchable in a second?"* — In-memory buffer refreshed into a new immutable segment; background merges.
+- *"How do you keep the index consistent with the DB?"* — CDC into Kafka, idempotent upserts keyed by doc id with a version, replayable rebuilds.
+- *"Why is p99 bad with many shards?"* — Tail latency of fan-out; hedging, fewer bigger shards, replica selection.
+- *"Typo tolerance?"* — Fuzzy matching via edit distance (Levenshtein automata in Lucene), or n-gram fields.
+
+Further reading: Manning, Raghavan & Schütze, *Introduction to Information Retrieval* (inverted indexes, BM25) · Elasticsearch documentation on shards, refresh and segment merging · Twitter engineering on Earlybird real-time search.

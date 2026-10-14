@@ -1,0 +1,130 @@
+---
+title: "System Design — Food Delivery (Swiggy / Zomato / DoorDash)"
+track: "system-design"
+kind: "notes"
+order: 42
+slug: "food-delivery"
+updated: 2026-10-14
+description: "Designing a food delivery platform — restaurant discovery, the order state machine across three parties, rider assignment that accounts for food prep time, live tracking, and ETA prediction."
+---
+
+import Callout from '../../components/Callout.astro';
+import Mermaid from '../../components/Mermaid.astro';
+
+Part of the [system design](/prep/system-design) series. See the [framework](/prep/system-design) and [building blocks](/prep/system-design/building-blocks) first if you haven't. It builds on [Proximity Service](/prep/system-design/proximity-service), [Ride-Sharing Dispatch](/prep/system-design/ride-sharing-dispatch) and [Payment System](/prep/system-design/payment-system).
+
+## 1. Requirements
+
+**Functional**
+- Customer: browse restaurants that deliver to my location, view menus, place and pay for an order, track it live.
+- Restaurant: receive orders, accept/reject, mark "preparing" and "ready", toggle items out of stock, go offline.
+- Rider: go online, receive delivery offers, accept, navigate to pickup and drop, mark picked-up/delivered.
+- Show an ETA at browse time and keep updating it after ordering.
+
+**Non-functional**
+- Three parties on three apps, all with flaky mobile networks — every state change must be durable and retry-safe.
+- Peak is sharp: lunch and dinner (often 3–5× the daily average), plus rain spikes.
+- Discovery must be fast and personalized; ordering must be consistent (never charge without creating an order, never lose an accepted order).
+- Scale assumption: ~2M orders/day, ~10× that in browse sessions, ~300k riders online at peak sending location every few seconds.
+
+## 2. High-level architecture
+
+<Mermaid caption="Separate services for discovery, orders, dispatch and tracking, connected by order events" code={`flowchart TD
+  CU[Customer app] --> GW[API gateway]
+  RE[Restaurant app] --> GW
+  RI[Rider app] --> GW
+  GW --> DISC[Discovery service]
+  DISC --> SI[(Search index<br/>geo + menu)]
+  GW --> ORD[Order service]
+  ORD --> ODB[(Orders DB)]
+  ORD --> PAY[Payment service]
+  ORD --> BUS[(Event bus: Kafka)]
+  BUS --> DSP[Dispatch service]
+  RI -->|location pings| LOC[Location service]
+  LOC --> LR[(Rider locations<br/>Redis geo index)]
+  DSP --> LR
+  DSP --> ETA[ETA service]
+  BUS --> NOTIF[Notification service]
+  BUS --> TRK[Tracking service<br/>WebSocket to customer]
+`} />
+
+## 3. Discovery — "restaurants that deliver to me"
+
+- Each restaurant has a **serviceable area** (a radius or polygon) and an estimated delivery time that changes with rider supply and kitchen load.
+- Index restaurants with a geospatial index (geohash/H3 cells — see [Proximity Service](/prep/system-design/proximity-service)). For a customer location, look up the cell and its neighbours, then filter by serviceability, open hours and "currently accepting orders".
+- Rank with personalization and ETA. Cache the listing per `(cell, time-slot)` for a minute — it's the highest-traffic page and doesn't need per-request freshness.
+- Menus live in a document store and are cached aggressively; **item availability** (out of stock) is a small, frequently updated overlay, not a menu rewrite.
+
+## 4. Key design decision — the order state machine
+
+The order is the shared truth between three parties. Model it as an explicit state machine owned by the Order service; every transition is a conditional write and emits an event.
+
+<Mermaid caption="Order lifecycle — each arrow is one conditional state transition plus an event" code={`stateDiagram-v2
+  [*] --> CREATED
+  CREATED --> PAID: payment confirmed
+  CREATED --> CANCELLED: payment failed or timeout
+  PAID --> ACCEPTED: restaurant accepts
+  PAID --> CANCELLED: restaurant rejects, refund
+  ACCEPTED --> PREPARING
+  PREPARING --> READY
+  READY --> PICKED_UP: rider confirms
+  PICKED_UP --> DELIVERED
+  DELIVERED --> [*]
+  CANCELLED --> [*]
+`} />
+
+- **Transitions are guarded**: `UPDATE orders SET state='ACCEPTED' WHERE id=:id AND state='PAID'`. A duplicate "accept" tap from a flaky restaurant tablet becomes a no-op instead of a second transition.
+- **Every client call carries an idempotency key** — especially place-order. The customer app retries on timeout; the server must return the same order, not create two.
+- **Payment and order creation**: create the order in `CREATED`, call the payment provider with the order id as the idempotency key, move to `PAID` on the provider's webhook. If the webhook never comes, a reconciliation job polls the provider. This is the outbox/saga pattern from the [payment system](/prep/system-design/payment-system).
+- **Timeouts are transitions too**: restaurant doesn't accept within N minutes → auto-cancel and refund.
+
+## 5. Deep dive — rider assignment
+
+This is not ride-hailing. A ride is "send the closest driver now". A food order has **prep time**:
+
+- If you assign a rider at payment time and the food takes 20 minutes, the rider waits idle at the restaurant — wasted supply at peak.
+- If you assign too late, the food goes cold.
+
+So dispatch aims for **rider arrival ≈ food ready time**:
+
+1. Predict `food_ready_at` (restaurant's historical prep time for this item mix, current kitchen load).
+2. Predict travel time for candidate riders to the restaurant.
+3. Start matching when `food_ready_at − travel_time` approaches; offer to the best candidate by a cost function (distance, idle time, fairness, rider rating, acceptance probability).
+4. **Batch**: in dense areas, one rider carries two orders from the same or nearby restaurants going in similar directions. Batching is an optimization problem solved in short windows (every few seconds) rather than per order.
+
+Offers time out (e.g. 20–30 seconds) and cascade to the next candidate. Use a per-rider lock/lease so one rider isn't offered two conflicting orders at once.
+
+<Callout type="tip">
+"Assign when food will be ready, not when the order is placed" plus "batch orders in short matching windows" is what separates a food-delivery answer from a copy of the Uber answer. Interviewers at Swiggy/Zomato/DoorDash specifically look for it.
+</Callout>
+
+## 6. Live tracking and ETA
+
+- Riders send location every ~4–5 seconds to the Location service, which updates a Redis geo index (`GEOADD`) and publishes to the tracking stream.
+- The customer's app subscribes over a WebSocket (or polls every few seconds as a fallback). Only send updates for the customer's own order — fan-out is 1:1, not broadcast.
+- ETA = remaining prep time + rider-to-restaurant + restaurant-to-customer + handoff buffers. Each piece is an ML model trained on history; show a range or round up, because a late order hurts more than an early one.
+
+## 7. What real systems do today
+
+- **DoorDash** has written about its dispatch system ("DeepRed") optimizing assignment and batching with ML-predicted prep and travel times, solved as an optimization problem at short intervals.
+- **Swiggy** has described its assignment as batch matching in short windows with predicted food-ready times and first-mile/last-mile time models.
+- Uber Eats uses Uber's H3 hexagonal grid for geospatial indexing, the same system as rides.
+
+## 8. Scaling & failure
+
+- **Dinner peak** → autoscale stateless services ahead of the known curve; the hot stores are Redis (rider locations) and the orders DB, sharded by city or order id.
+- **Restaurant tablet offline** → orders are pushed with acknowledgement; if no ack within a minute, call the restaurant (an IVR fallback) and stop listing it after repeated misses.
+- **Rider app loses connectivity** mid-delivery → last known location shown with "updating"; state transitions are queued on the device and replayed with idempotency keys.
+- **Dispatch service down** → orders are still accepted and paid (events wait on Kafka); assignment resumes from the backlog. Degrade by switching to greedy nearest-rider matching if the optimizer is the part that fails.
+- **Payment webhook lost** → reconciliation job, never a silent stuck order.
+
+## Interview follow-ups
+
+- *"Why not assign the nearest rider immediately?"* — Prep time; the rider would idle at the restaurant. Time the assignment to food-ready.
+- *"Customer double-taps Place Order."* — Idempotency key returns the same order.
+- *"Restaurant accepts twice / rider marks picked-up twice."* — Guarded state transitions make repeats no-ops.
+- *"How do you store and query 300k moving riders?"* — Redis geo / H3 cells in memory, updated every few seconds; durable history goes to a stream for analytics, not to the primary DB on every ping.
+- *"How do you compute ETA?"* — Sum of predicted segments, each modelled from history and live signals.
+- *"It's raining and orders double."* — Surge pricing/fees, widen batching, reduce serviceable radius per restaurant, show longer ETAs honestly.
+
+Further reading: DoorDash engineering blog posts on dispatch ("DeepRed") and ETA prediction · Swiggy Bytes posts on order assignment and delivery time prediction · Uber engineering, "H3: Uber's Hexagonal Hierarchical Spatial Index".

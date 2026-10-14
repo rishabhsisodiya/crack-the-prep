@@ -1,0 +1,99 @@
+---
+title: "System Design — Webhook Delivery Service"
+track: "system-design"
+kind: "notes"
+order: 48
+slug: "webhook-delivery"
+updated: 2026-10-14
+description: "Designing reliable outbound webhooks (Stripe/GitHub-style) — the outbox, at-least-once delivery with retries and backoff, per-endpoint isolation so one slow customer can't stall others, HMAC signatures, ordering, and SSRF protection."
+---
+
+import Callout from '../../components/Callout.astro';
+import Mermaid from '../../components/Mermaid.astro';
+
+Part of the [system design](/prep/system-design) series. See the [framework](/prep/system-design) and [building blocks](/prep/system-design/building-blocks) first if you haven't. Related: [Notification System](/prep/system-design/notification-system), [Distributed Message Queue](/prep/system-design/distributed-message-queue), [Job Scheduler](/prep/system-design/job-scheduler).
+
+## 1. Requirements
+
+**Functional**
+- Customers register endpoint URLs and subscribe to event types (`payment.succeeded`, `order.shipped`).
+- When an event happens, POST a JSON payload to every subscribed endpoint.
+- Retry failed deliveries for up to ~3 days with backoff; disable endpoints that keep failing and notify the owner.
+- Delivery logs and a "resend" button in the dashboard.
+
+**Non-functional**
+- **No lost events** — at-least-once delivery. Duplicates are acceptable and documented; receivers dedupe by event id.
+- Customer endpoints are **unreliable and untrusted**: slow, down, returning 500s, or malicious.
+- One bad endpoint must not delay deliveries to everyone else.
+- Scale: ~10k events/s, fanning out to ~3 endpoints each on average; ~1M registered endpoints.
+
+## 2. High-level architecture
+
+<Mermaid caption="Events leave the product DB via an outbox, fan out per endpoint, and are delivered by isolated workers" code={`flowchart LR
+  APP[Product services] -->|same transaction| OB[(Outbox table)]
+  OB --> REL[Outbox relay / CDC]
+  REL --> EV[(Kafka: events)]
+  EV --> FAN[Fan-out service<br/>lookup subscriptions]
+  FAN --> DQ[(Delivery queue<br/>sharded by endpoint)]
+  DQ --> W[Delivery workers<br/>egress proxy, timeouts]
+  W -->|signed HTTPS POST| CE[Customer endpoints]
+  W -->|failure| RQ[(Retry schedule<br/>by next_attempt_at)]
+  RQ --> DQ
+  W --> LOG[(Delivery attempts log)]
+`} />
+
+1. **Capture reliably.** The product writes its business change and an outbox row in one transaction; a relay publishes to Kafka. Without this, "commit the order, then publish" loses events when the process dies in between.
+2. **Fan out.** For each event, look up subscriptions (cached) and create one delivery task per endpoint.
+3. **Deliver.** Workers POST with short timeouts (e.g. connect 2 s, total 10 s). A 2xx is success; anything else, or a timeout, schedules a retry.
+
+## 3. Key design decision — isolating endpoints from each other
+
+The classic failure: a shared queue, and one customer's endpoint starts taking 30 s to time out. Workers pile up waiting on it, and every other customer's webhooks are delayed — the noisy-neighbour problem.
+
+Fixes, usually combined:
+- **Per-endpoint queues or partitions.** Shard delivery tasks by `endpoint_id` and give each endpoint a concurrency cap (e.g. at most 10 in-flight requests). A slow endpoint only backs up its own queue.
+- **Short timeouts.** Receivers are told to acknowledge quickly (return 2xx, then process asynchronously).
+- **Circuit breaker per endpoint.** After N consecutive failures, stop sending for a cool-down and probe occasionally, instead of burning worker time on a dead host.
+- **Separate retry traffic** from first attempts so a backlog of retries doesn't starve fresh events.
+
+<Callout type="tip">
+"How do you stop one slow customer from delaying everyone?" is the question this design exists to answer. Lead with per-endpoint partitioning plus concurrency caps and circuit breakers.
+</Callout>
+
+## 4. Retries, ordering, duplicates
+
+- **Backoff with jitter**: e.g. 1 min, 5 min, 30 min, 2 h, 6 h, … up to ~3 days. Store `next_attempt_at` and let a scheduler re-enqueue due retries (see [Job Scheduler](/prep/system-design/job-scheduler)).
+- **Don't retry 4xx forever** — a 410 Gone or a 400 means fix your endpoint; treat 408/429/5xx/timeouts as retryable. Respect `Retry-After`.
+- **Disable and notify** after sustained failure; let the customer replay missed events from the dashboard or an events API.
+- **Duplicates are inevitable** (a worker can deliver, then crash before recording success). Send a stable **event id** and tell receivers to dedupe on it.
+- **Ordering is not guaranteed** across retries — event 2 may arrive before a retried event 1. Either document it (Stripe does) and include timestamps/object versions so receivers can ignore stale updates, or offer strict per-endpoint ordering by delivering one at a time per endpoint (slower, and one failing event blocks the rest).
+
+## 5. Security
+
+- **Signatures.** Sign each payload with an HMAC (SHA-256) using a per-endpoint secret, over `timestamp + "." + body`, and send it in a header. Receivers verify with a constant-time compare and reject old timestamps (e.g. older than 5 minutes) to prevent replays. Support two active secrets during rotation.
+- **SSRF protection.** Customers choose the URL, so an attacker could register `http://169.254.169.254/` (cloud metadata) or an internal service. Resolve DNS and block private/link-local ranges *at connect time* (not just at registration — DNS can change), send through an egress proxy with no route to internal networks, and require HTTPS.
+- **Payload hygiene**: don't put secrets in payloads; some providers send "thin" events (just ids) and let the receiver fetch details via the API with its own credentials.
+
+## 6. What real systems do today
+
+- **Stripe** signs webhooks with a `Stripe-Signature` header (timestamp + HMAC-SHA256), retries in live mode for up to three days with exponential backoff, documents that events can arrive out of order and more than once, and tells receivers to return 2xx quickly.
+- **GitHub** signs deliveries with `X-Hub-Signature-256` and lets you view and redeliver recent deliveries.
+- **Standard Webhooks** (standardwebhooks.com) is a cross-company spec for headers, signing and retries; **Svix** is an open-source/hosted webhook sending service built around it.
+
+## 7. Scaling & failure
+
+- **Kafka or the delivery queue down** → the outbox keeps accumulating in the product DB; the relay catches up later. Nothing is lost.
+- **Massive endpoint outage** (a big customer is down for hours) → their queue grows; cap stored retries per endpoint and rely on replay instead of infinite storage.
+- **Worker fleet saturated** → scale on queue depth; per-endpoint caps keep the fleet from being monopolized.
+- **Delivery logs grow fast** → store attempts in a time-partitioned store with retention (e.g. 30 days), not the primary DB.
+
+## Interview follow-ups
+
+- *"Event is committed but the publish fails."* — Transactional outbox; publish from the DB log.
+- *"Receiver gets the same event twice."* — Expected under at-least-once; dedupe by event id.
+- *"One customer's endpoint is timing out."* — Per-endpoint partitions, concurrency caps, circuit breaker, short timeouts.
+- *"How does the receiver know it's really you?"* — HMAC signature with timestamp; reject stale timestamps.
+- *"What stops a customer from registering an internal URL?"* — SSRF defences at connect time via an isolated egress proxy.
+- *"Do you guarantee order?"* — Not by default; include versions/timestamps; strict ordering is opt-in with throughput cost.
+
+Further reading: Stripe documentation, "Webhooks" (signatures, retries, best practices) · GitHub documentation, "Validating webhook deliveries" · The Standard Webhooks specification · OWASP Server-Side Request Forgery Prevention Cheat Sheet.

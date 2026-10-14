@@ -1,0 +1,96 @@
+---
+title: "Frontend System Design — E-commerce Product Page & Checkout"
+track: "system-design"
+kind: "notes"
+order: 58
+slug: "frontend-ecommerce"
+updated: 2026-10-14
+description: "Designing the storefront client (Amazon / Flipkart) — rendering strategy for SEO and speed, product page performance and Core Web Vitals, variant selection, cart state across devices, a resilient multi-step checkout, payments, and analytics."
+---
+
+import Callout from '../../components/Callout.astro';
+import Mermaid from '../../components/Mermaid.astro';
+
+Part of the [system design](/prep/system-design) series. Uses the [frontend framework](/prep/system-design/frontend-system-design). Backend relatives: [Payment System](/prep/system-design/payment-system), [Flash Sale](/prep/system-design/flash-sale), and the no-oversell checkout in the [framework page](/prep/system-design).
+
+## 1. Requirements
+
+**Functional**
+- Product listing/search page with filters; product detail page (PDP) with images, variants (size/color), price, stock, delivery estimate, reviews.
+- Add to cart; cart page; multi-step checkout (address, delivery, payment, review); order confirmation.
+
+**Non-functional**
+- **SEO** for listing and product pages — organic search is a major traffic source.
+- **Speed directly affects conversion**; most traffic is mobile, often on mid-range devices.
+- Price and stock must be correct at purchase time even if pages are cached.
+- Checkout must be resilient: no double orders, no lost carts, accessible forms.
+
+## 2. Key design decision — rendering per page type
+
+| Page | Strategy | Why |
+|---|---|---|
+| Home, category, PDP | SSG/ISR or SSR at the edge with CDN caching; streaming for slow sections | SEO + fast LCP; content is the same for most users |
+| Price, stock, delivery estimate | Fetched client-side or streamed per request | Changes often; must not be stale in cached HTML |
+| Personalized blocks (recommendations, "recently viewed") | Client-side after main content, or streamed | Can't be cached per user; not critical for LCP |
+| Cart, checkout, account | SSR/CSR without shared caching | Per-user, no SEO value |
+
+<Mermaid caption="The cached product shell is served from the CDN; dynamic and personalized parts load separately" code={`flowchart LR
+  U[Shopper] --> CDN[CDN edge]
+  CDN -->|cached HTML: title, images, description| PDP[Product page shell]
+  PDP -->|client or streamed| PR[Price and stock API]
+  PDP -->|after LCP| REC[Recommendations API]
+  PDP -->|lazy, below fold| REV[Reviews API]
+  PDP --> CART[Cart service]
+`} />
+
+The insight: **cache what's shared, fetch what's volatile, defer what's personal.** Keep the cached shell from showing stale price as truth — render a price placeholder of fixed size, or render the cached price and revalidate quickly.
+
+## 3. Product page performance
+
+- **LCP is the main product image**: serve it in the HTML (not injected by JS), responsive `srcset` with AVIF/WebP, `fetchpriority="high"`, preconnect to the image CDN. Lazy-load gallery thumbnails and everything below the fold.
+- **CLS**: fixed aspect-ratio boxes for images, reserved space for price, badges, and late-loading banners.
+- **INP**: variant selection must respond instantly — update UI state first, fetch variant-specific stock/price after. Keep third-party scripts (analytics, chat widgets, A/B testing) off the critical path: load them deferred, or in a web worker (e.g. Partytown-style).
+- **JavaScript budget**: ship only what the PDP needs; reviews and Q&A widgets load on scroll/interaction.
+- **Prefetch** the PDP when hovering/seeing product cards on listing pages.
+
+**Variants**: the URL reflects the selected variant (`?color=blue&size=M`) so it's shareable and indexable; unavailable combinations are disabled with a reason; image gallery switches to the variant's images.
+
+**Structured data**: `Product` schema.org JSON-LD (price, availability, rating) for rich search results; canonical URLs for variants and filtered listing pages to avoid duplicate content.
+
+## 4. Cart state
+
+- Guest cart: stored server-side with an anonymous cart id in a cookie (or locally), **merged into the user's cart on login**.
+- Logged-in cart lives on the server, so it syncs across devices; the client caches it and updates optimistically (quantity change shows immediately, reconciles with the server's response, which may adjust for stock or price changes).
+- Show changes honestly: "Price changed since you added this", "Only 2 left — quantity updated".
+- Mini-cart count in the header is a small, cached query invalidated on cart mutations.
+
+## 5. Deep dive — a resilient checkout
+
+- **Steps as routes** (or one page with sections) so back/forward and refresh work; persist progress server-side in a checkout session.
+- **Forms**: correct `autocomplete` attributes (`shipping street-address`, `cc-number`), input types (`tel`, `email`), inline validation on blur, clear error messages tied to fields (`aria-describedby`), and focus moved to the first error on submit.
+- **Address**: autocomplete via a places API, PIN code → city/state lookup, serviceability check before payment.
+- **Payment**: use the provider's hosted fields/SDK or redirect, so card data never touches your servers (reduces PCI scope). Support UPI intent/QR, wallets, and saved methods.
+- **Place order exactly once**: disable the button while submitting, but rely on an **idempotency key** generated when the review step loads — retries and double clicks return the same order.
+- **Payment redirect/3-D Secure flows**: the browser may come back late or never. The order status is decided by the server via the provider's webhook; the confirmation page **polls order status** rather than trusting the redirect.
+- **Price re-validation** at the review step: totals are computed server-side; the client only displays them.
+
+<Callout type="warn">
+Never compute final prices, discounts or tax on the client and send them to the server. The client sends the cart id and selected options; the server computes the total. A tampered request must not be able to change the price.
+</Callout>
+
+## 6. Analytics, experiments and failure
+
+- Funnel events (view → add to cart → checkout steps → purchase) sent via `navigator.sendBeacon` so they survive navigation; batched; never blocking the UI.
+- A/B tests decided server-side or at the edge to avoid flicker from client-side swaps.
+- Failure handling: recommendations or reviews fail → hide the section; price/stock API fails → disable "Add to cart" with a retry rather than showing a possibly wrong price; payment fails → keep the cart and let the user retry with another method.
+
+## Interview follow-ups
+
+- *"SSR or CSR for the product page?"* — Cached SSR/ISR for SEO and LCP; volatile and personalized parts fetched separately.
+- *"How do you avoid showing a stale price from cached HTML?"* — Fetch or stream price/stock per request; server recomputes at checkout anyway.
+- *"User double-clicks Place Order on slow 3G."* — Idempotency key per checkout attempt; button state is a UX aid, not the guarantee.
+- *"Payment redirect never returns."* — Server learns via webhook; confirmation page polls order status; user can see the order in their account.
+- *"Guest adds items then logs in."* — Merge the guest cart into the account cart, resolving duplicates.
+- *"Third-party scripts slow the page."* — Defer, load after interaction, move to a worker, set a performance budget.
+
+Further reading: web.dev articles on optimizing LCP and on third-party script impact · MDN guide to the `autocomplete` attribute · Google Search Central documentation on Product structured data · Stripe/Razorpay documentation on idempotent requests and payment webhooks.

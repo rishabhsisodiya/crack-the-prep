@@ -1,0 +1,115 @@
+---
+title: "System Design — Ticket Booking (BookMyShow / Ticketmaster)"
+track: "system-design"
+kind: "notes"
+order: 39
+slug: "ticket-booking"
+updated: 2026-10-14
+description: "Designing a movie/event ticket booking system — seat-level inventory, temporary seat holds with a TTL, surviving an on-sale spike with a virtual waiting room, and why this differs from hotel booking."
+---
+
+import Callout from '../../components/Callout.astro';
+import Mermaid from '../../components/Mermaid.astro';
+
+Part of the [system design](/prep/system-design) series. See the [framework](/prep/system-design) and [building blocks](/prep/system-design/building-blocks) first if you haven't. Read [Hotel Reservation](/prep/system-design/hotel-reservation) alongside this one — the comparison is a common follow-up.
+
+## 1. Requirements
+
+**Functional**
+- Browse movies/events by city, venue and date; see showtimes.
+- View a live **seat map** for a show and pick specific seats.
+- **Hold** the selected seats while the user pays (typically 5–10 minutes), then confirm or release them.
+- Cancel a booking (refund rules are a business policy, out of scope).
+
+**Non-functional**
+- **A seat is sold at most once.** Same invariant as hotels, but the unit is a *specific seat*, not a count.
+- **Spiky, extreme contention** — a big release or a concert on-sale puts hundreds of thousands of users on the same few thousand seats within minutes.
+- Browsing can be eventually consistent; holding and confirming must be strongly consistent.
+- Fair-ish ordering during on-sales; the system must stay up even when demand exceeds capacity by orders of magnitude.
+
+**Estimates.** A national platform: ~50k shows/day, ~200 seats/show average → ~10M seat-nights/day of inventory. Normal booking rate is modest (hundreds/s). The design driver is the on-sale peak: 1M users arriving in 10 minutes for one 50k-seat stadium.
+
+## 2. High-level architecture
+
+<Mermaid caption="Catalog and seat-map reads are cached; holds and confirms hit the seat inventory store" code={`flowchart TD
+  U[User] --> WR[Virtual waiting room]
+  WR -->|admitted token| GW[API gateway]
+  GW --> CAT[Catalog service<br/>movies, venues, shows]
+  CAT --> CC[(Catalog cache / CDN)]
+  GW --> SM[Seat map service]
+  SM --> SC[(Seat status cache<br/>Redis bitmap per show)]
+  GW --> BK[Booking service]
+  BK -->|conditional hold| INV[(Seat inventory DB<br/>source of truth)]
+  BK --> PAY[Payment service]
+  PAY -->|webhook: success or fail| BK
+  INV -->|status change events| SC
+  SWP[Hold expiry sweeper] --> INV
+`} />
+
+- **Catalog** (movies, venues, showtimes) is read-heavy and nearly static — serve from CDN/cache.
+- **Seat map** is a per-show read of seat statuses. Serve it from a cache updated by inventory change events; it's allowed to be a second or two stale because the hold step re-checks.
+- **Booking service** owns the only writes: hold, confirm, release. All seat state changes go through it.
+
+## 3. Seat inventory model — the key design decision
+
+Unlike hotels (sell a room *type*, count is enough), cinemas and stadiums sell **specific seats** — the user picks F12. So inventory is one row per seat per show:
+
+`show_seats(show_id, seat_id, status, hold_id, hold_expires_at, booking_id, version)` with `status ∈ {AVAILABLE, HELD, BOOKED}`.
+
+A 200-seat screen is 200 rows per show — small. A stadium is ~50k rows for one event, still fine for one partition.
+
+**Holding seats atomically.** The user selects 4 seats; either all 4 become held or none do:
+
+```sql
+UPDATE show_seats
+SET status = 'HELD', hold_id = :h, hold_expires_at = now() + interval '8 minutes'
+WHERE show_id = :s AND seat_id IN (:seats)
+  AND (status = 'AVAILABLE' OR (status = 'HELD' AND hold_expires_at < now()));
+-- rows affected must equal number of seats requested; otherwise ROLLBACK
+```
+
+The `hold_expires_at < now()` clause lets an expired hold be taken over immediately, so correctness doesn't depend on the sweeper running on time. The sweeper only tidies up statuses for the seat map.
+
+**Confirming** after payment: `UPDATE ... SET status='BOOKED', booking_id=:b WHERE hold_id=:h AND status='HELD' AND hold_expires_at > now()`. If this matches zero rows, the hold expired while the user was paying — **refund automatically**, don't book.
+
+<Callout type="tip">
+Name the payment race explicitly: payment succeeds at minute 8:01 but the hold expired at 8:00 and someone else grabbed the seat. The fix is (a) a confirm that is conditional on the hold still being valid, (b) automatic refund when it isn't, and (c) a small grace period — extend the hold once when the user is redirected to the payment page, so the race is rare rather than common.
+</Callout>
+
+## 4. Deep dive — surviving the on-sale spike
+
+A Taylor-Swift-scale on-sale is the real interview question. The database isn't the first thing to fail; everything in front of it is.
+
+1. **Virtual waiting room.** Before the sale opens, users land in a queue page served from the CDN. At open, they're assigned a random position (randomizing at open is fairer than first-come, which rewards bots and people with fast connections). The waiting room admits users at a fixed rate the backend can sustain and hands each a **signed, short-lived admission token**; the API gateway rejects booking calls without one.
+2. **Shard the hot event in memory.** For one hot show, keep seat state in Redis (a bitmap or hash per show/section) and perform holds with a Lua script — check all requested seats are free and mark them held in one atomic step. Persist to the DB asynchronously via a log; the DB stays the system of record for confirmed bookings.
+3. **Split by section.** A stadium's sections are independent; partition hold traffic by `(show_id, section)` so one hot section doesn't serialize the whole venue.
+4. **Seat map polling, not per-seat push.** Pushing every seat change to 1M clients is a fan-out storm. Clients poll a cached seat map every few seconds, or get a coarse "section availability" view, and only fetch a section's seats when they zoom in.
+5. **Best-available instead of pick-a-seat** under extreme load: the server allocates seats from a pre-computed ordering, which removes the "two users fight over F12" conflict entirely.
+
+<Callout type="warn">
+Bots are a first-class requirement for big on-sales, not an afterthought: per-account purchase limits, verified-fan presale codes, CAPTCHA at queue entry, and token binding (admission token tied to the session) are standard. Mention them; interviewers at ticketing companies will ask.
+</Callout>
+
+## 5. What real systems do today
+
+- **Ticketmaster** runs a queue/waiting-room system for big on-sales and the "Verified Fan" presale, which pre-registers fans and distributes access codes to reduce bot demand. The 2022 Eras Tour presale is the standard example of demand (reportedly billions of system requests) overwhelming even a queued system.
+- **Queue-it** and **Cloudflare Waiting Room** are off-the-shelf virtual waiting rooms used by ticketing and retail sites; both work by admitting users at a configured rate and holding the rest on a cheap static page.
+- Cinema chains and aggregators (BookMyShow-style) commonly hold seats for a fixed window (around 5–10 minutes) during payment, with the hold timer visible to the user.
+
+## 6. Scaling & failure
+
+- **Seat inventory DB primary dies** → stop accepting holds (fail closed). Browsing continues from cache. Never accept a hold you can't write durably.
+- **Payment gateway slow** → holds expire while users wait. Extend holds on redirect to payment, and reconcile with the gateway's webhooks; a payment that succeeds after expiry triggers an automatic refund.
+- **Redis (hot-event seat state) dies** → rebuild from the DB plus the hold log, admit nobody from the waiting room until it's back. This is why holds are logged before acknowledgement.
+- **Abandoned holds** inflate "sold out" — keep TTLs short and let expired holds be taken over directly in the hold `WHERE` clause.
+
+## Interview follow-ups
+
+- *"How is this different from hotel booking?"* — Hotels sell interchangeable units (a count per room type per night); cinemas sell specific seats, so inventory is per-seat rows and the conflict is on individual seats, not a counter.
+- *"User selects 4 seats, one is taken — what happens?"* — The multi-seat hold is atomic; rows-affected ≠ 4 rolls back and the user re-picks. No partial holds.
+- *"Payment succeeds after the hold expired."* — Conditional confirm fails, refund automatically, apologize; reduce frequency with a hold extension on payment redirect.
+- *"1M users hit a 50k-seat on-sale at 10:00."* — Waiting room with randomized positions, rate-based admission tokens, in-memory hold processing per section, best-available allocation, bot controls.
+- *"Why not just put a distributed lock around each seat?"* — Locks plus expiries still race; the atomic conditional update (or Lua script) on the seat state is the real guarantee.
+- *"How do you show a live seat map to a million viewers?"* — Cached snapshot with short polling and section-level aggregation, not per-seat WebSocket pushes.
+
+Further reading: Ticketmaster's public posts on Verified Fan and the 2022 Eras Tour presale · Cloudflare Waiting Room documentation · Queue-it's documentation on virtual waiting rooms.

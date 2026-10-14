@@ -1,0 +1,121 @@
+---
+title: "Frontend System Design — Offline-First App"
+track: "system-design"
+kind: "notes"
+order: 57
+slug: "frontend-offline-first"
+updated: 2026-10-14
+description: "Designing an offline-first web app / PWA (notes, todos, field-sales or delivery apps) — service worker caching strategies, IndexedDB as the local source of truth, a mutation queue with sync, conflict resolution, storage limits and update flows."
+---
+
+import Callout from '../../components/Callout.astro';
+import Mermaid from '../../components/Mermaid.astro';
+
+Part of the [system design](/prep/system-design) series. Uses the [frontend framework](/prep/system-design/frontend-system-design). Conflict resolution connects to [Collaborative Document Editing](/prep/system-design/collaborative-editing).
+
+## 1. Requirements
+
+Example: a notes/tasks app, or a field app used by delivery agents or sales reps in areas with poor connectivity.
+
+**Functional**
+- App opens and works with no network: view, create, edit, delete.
+- Changes sync automatically when back online; changes from other devices appear.
+- User can see what's not yet synced.
+
+**Non-functional**
+- **Never lose a user's change**, including across app restarts and crashes.
+- Fast: reads come from the device, not the network.
+- Handle conflicts when the same item was edited on two devices offline.
+- Works within browser storage limits; app updates don't break stored data.
+
+## 2. Key design decision — local data is the source of truth for the UI
+
+Online-first apps fetch, then render, and fail offline. **Offline-first** apps render from a local database, write to it first, and sync with the server in the background. The network becomes an optimization, not a dependency.
+
+<Mermaid caption="UI reads and writes locally; a sync engine moves changes in both directions" code={`flowchart LR
+  UI[UI components] -->|read, write| LDB[(IndexedDB<br/>entities + mutation queue)]
+  LDB -->|live queries| UI
+  SYNC[Sync engine] --> LDB
+  SYNC -->|push queued mutations| API[Server API]
+  API -->|pull changes since cursor| SYNC
+  SW[Service worker<br/>app shell + asset cache] -.->|serves HTML, JS, CSS offline| UI
+`} />
+
+Two separate caches, often confused:
+- **Service worker cache** (Cache Storage) — the **app shell** and static assets, so the app *loads* offline.
+- **IndexedDB** — the **user's data** and the pending mutation queue, so the app *works* offline.
+
+## 3. Service worker caching strategies
+
+| Strategy | How | Use for |
+|---|---|---|
+| Cache first | Serve from cache, fall back to network | Versioned static assets (hashed JS/CSS, fonts, icons) |
+| Network first | Try network, fall back to cache on failure | HTML / app shell when freshness matters |
+| Stale-while-revalidate | Serve cache immediately, update cache in background | Avatars, non-critical API reads |
+| Network only | Never cache | Auth, payments, anything sensitive |
+
+**Updates**: a new service worker installs in the background and waits; show "New version available — Reload" rather than forcing `skipWaiting`, which can mix old pages with new assets. Version local DB schemas and migrate on startup.
+
+## 4. Deep dive — the mutation queue and sync
+
+**Writes**: apply the change to the local entity *and* append a mutation record in one IndexedDB transaction:
+
+```ts
+type Mutation = {
+  id: string;              // client-generated, used as idempotency key on the server
+  entity: 'task';
+  entityId: string;        // client-generated UUID, so new items have ids offline
+  op: 'create' | 'update' | 'delete';
+  patch: Record<string, unknown>;
+  baseVersion: number;     // server version this edit was based on
+  createdAt: number;
+};
+```
+
+**Push**: when online, send queued mutations **in order**, batching where possible; the server applies them idempotently by mutation id and returns new versions; remove each from the queue after acknowledgement. Retry with backoff on failure; stop and surface errors for permanent rejections (validation, permission).
+
+**Pull**: request changes since the last sync cursor (`GET /changes?since=...`), apply them locally, and advance the cursor. Deletes come through as tombstones.
+
+**Triggers**: on app start, on the `online` event, periodically while open, and via **Background Sync** where supported (it's Chromium-only, so always keep the in-app triggers).
+
+<Callout type="warn">
+Use **client-generated UUIDs** for new records. If the server assigns ids, an item created offline has no id, and edits to it (or references from other offline items) can't be expressed until sync — a common source of bugs.
+</Callout>
+
+## 5. Deep dive — conflicts
+
+The same task was edited on the laptop and the phone while both were offline.
+
+| Approach | How | Fits |
+|---|---|---|
+| Last-write-wins (per record) | Higher timestamp/version wins | Low-stakes data; simplest; loses one edit |
+| Field-level merge | Merge non-overlapping field changes; LWW per field | Forms, tasks (title edited here, due date there) |
+| Server rejects, user resolves | Server detects `baseVersion` mismatch, client shows both versions | High-stakes data (orders, records) |
+| CRDTs (Yjs, Automerge) | Data types that merge automatically and deterministically | Rich text, collaborative lists |
+
+Detect conflicts with versions, not timestamps alone — device clocks are wrong. For most apps, **field-level merge with LWW per field** plus a visible "edited on another device" notice is the pragmatic answer.
+
+## 6. Storage and edge cases
+
+- **Quotas**: browsers allow sizable storage but can evict it under pressure. Call `navigator.storage.persist()` to request persistent storage, show usage via `navigator.storage.estimate()`, and keep large media optional/evictable.
+- **iOS Safari** may clear script-writable storage for sites not used for a while unless installed to the home screen — tell users to install the PWA for critical offline use.
+- **Auth expiry offline**: keep working locally; queue mutations; re-authenticate before pushing.
+- **Sync status UI**: per-item "pending" marker, global "All changes saved" / "3 changes waiting to sync" / "Offline".
+- **Large initial sync**: paginate the first pull; let the user work on what's already downloaded.
+- **Logout on a shared device**: clear IndexedDB and caches.
+
+## 7. What real tools exist
+
+- **Workbox** (Google) — service worker routing and caching strategies.
+- **Dexie** (IndexedDB wrapper with live queries), **RxDB**, **PouchDB/CouchDB** (built-in replication).
+- Sync engines and local-first stacks such as **Replicache**, **ElectricSQL**, **PowerSync**, and CRDT libraries **Yjs** and **Automerge**.
+
+## Interview follow-ups
+
+- *"Service worker cache or IndexedDB?"* — Service worker cache for the app shell and assets; IndexedDB for user data and the mutation queue.
+- *"User edits offline then closes the browser."* — The change and its mutation were written to IndexedDB in one transaction; sync resumes next launch.
+- *"Two devices edit the same item offline."* — Detect via base version; field-level merge or user resolution; CRDTs for rich text.
+- *"How does the server avoid applying a mutation twice?"* — Idempotency by mutation id.
+- *"How do you ship an update without breaking offline users?"* — Waiting service worker with a reload prompt; versioned DB migrations.
+
+Further reading: web.dev "Offline Cookbook" and the Workbox documentation · MDN documentation on IndexedDB, Storage API (`persist`, `estimate`) and Background Sync · Kleppmann et al., "Local-first software" (Ink & Switch, 2019).

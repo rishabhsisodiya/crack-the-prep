@@ -1,0 +1,121 @@
+---
+title: "Frontend System Design — Autocomplete Widget"
+track: "system-design"
+kind: "notes"
+order: 55
+slug: "frontend-autocomplete"
+updated: 2026-10-14
+description: "Designing a reusable autocomplete/typeahead component — component API, debouncing, cancelling stale requests and race conditions, client-side caching, keyboard navigation and the ARIA combobox pattern, and performance with large result sets."
+---
+
+import Callout from '../../components/Callout.astro';
+import Mermaid from '../../components/Mermaid.astro';
+
+Part of the [system design](/prep/system-design) series. Uses the [frontend framework](/prep/system-design/frontend-system-design). The backend is [Search Autocomplete](/prep/system-design/search-autocomplete); a working implementation is in [Machine Coding — Autocomplete](/prep/machine-coding/autocomplete).
+
+## 1. Requirements
+
+Clarify which kind first: **search suggestions** (Google-style, free text plus suggestions) or a **select-from-options combobox** (pick a city/user/tag).
+
+**Functional**
+- Show suggestions as the user types; select by mouse, touch or keyboard.
+- Highlight the matched part; show recent searches when the input is empty.
+- Results may come from a server, a local list, or both.
+
+**Non-functional**
+- Feels instant (suggestions within ~100–200 ms of a pause in typing) without flooding the server.
+- Correct under slow and out-of-order network responses.
+- Fully keyboard and screen-reader accessible.
+- Reusable across the product: configurable data source, rendering and behaviour.
+
+## 2. Component API
+
+```ts
+type AutocompleteProps<T> = {
+  fetchSuggestions: (query: string, signal: AbortSignal) => Promise<T[]>; // or a static list
+  renderItem?: (item: T, state: { active: boolean; query: string }) => ReactNode;
+  getItemKey: (item: T) => string;
+  getItemLabel: (item: T) => string;
+  onSelect: (item: T) => void;
+  minQueryLength?: number;   // default 1
+  debounceMs?: number;       // default ~200
+  maxResults?: number;       // default 10
+  placeholder?: string;
+  emptyState?: ReactNode;    // "No results"
+};
+```
+
+Keep the network out of the component's internals by accepting `fetchSuggestions` — the same widget then works for users, cities, or local data, and is easy to test. For a design system, offer a **headless** version (state + keyboard logic as a hook) plus a default styled one.
+
+## 3. Architecture and data flow
+
+<Mermaid caption="Keystrokes are debounced, served from cache when possible, and stale responses are discarded" code={`flowchart LR
+  IN[Input onChange] --> DB[Debounce ~200ms]
+  DB --> C{In cache?}
+  C -->|yes| R[Render results]
+  C -->|no| AB[Abort previous request]
+  AB --> F[fetchSuggestions with AbortSignal]
+  F --> CHK{Response for latest query?}
+  CHK -->|yes| W[Write cache] --> R
+  CHK -->|no| X[Discard]
+`} />
+
+State: `query`, `results`, `status` (`idle | loading | success | error`), `activeIndex`, `isOpen`.
+
+## 4. Deep dive — network correctness and efficiency
+
+1. **Debounce** input (≈150–300 ms) so typing "kubernetes" sends one or two requests, not ten. (Throttling is an alternative if you want results *during* fast typing.)
+2. **Race conditions**: request for "kub" can return after the request for "kube". Either **abort** the previous request with `AbortController` when a new one starts, or tag each request with the query and ignore responses that don't match the current input. Do both — abort saves bandwidth, the check guarantees correctness.
+3. **Cache** results per normalized query (lowercased, trimmed) in an in-memory LRU with a TTL. Backspacing from "kubern" to "kube" is instant. You can also filter cached results for a longer prefix locally while the real request is in flight.
+4. **Minimum length** and **empty input** handling: don't query for "" — show recent searches from `localStorage` instead.
+5. **Errors**: show a quiet inline error; keep the last good results if appropriate; don't open an alert per keystroke.
+
+```ts
+let controller: AbortController | null = null;
+async function search(query: string) {
+  controller?.abort();
+  controller = new AbortController();
+  try {
+    const items = await fetchSuggestions(query, controller.signal);
+    if (query === latestQuery) setResults(items);
+  } catch (e) {
+    if ((e as Error).name !== 'AbortError') setStatus('error');
+  }
+}
+```
+
+## 5. Deep dive — keyboard and accessibility
+
+Use the **WAI-ARIA combobox pattern**:
+- Input has `role="combobox"`, `aria-expanded`, `aria-controls` pointing at the listbox, and `aria-activedescendant` set to the active option's id. Focus stays in the input the whole time.
+- The popup is `role="listbox"` with `role="option"` children and `aria-selected` on the active one.
+- Keys: ↓/↑ move the active option (wrap or stop at ends), Enter selects, Escape closes (a second Escape clears), Tab moves on without hijacking, Home/End optionally.
+- Announce result counts politely ("8 suggestions available") via a live region.
+- Clicking an option must not blur-close the list before the click lands — handle `mousedown` with `preventDefault` or delay the close.
+
+<Callout type="tip">
+`aria-activedescendant` (focus stays in the input, the active option is referenced) is the detail that shows you've built one properly. Moving real DOM focus into the list breaks typing.
+</Callout>
+
+## 6. Rendering and performance
+
+- **Highlight** matched substrings by splitting the label on the query and wrapping matches in `mark` — never by injecting HTML (XSS).
+- Cap results (10 is typical). If the list can be large (a select over 10k options), **virtualize** it.
+- Position the popup with a positioning utility that flips above the input near the viewport bottom; on mobile, consider a full-screen search view.
+- Don't re-render the whole list on each keystroke when only `activeIndex` changes — memoize options.
+
+## 7. Edge cases
+
+- Input loses focus while a request is in flight → close and ignore the result.
+- IME composition (Chinese/Japanese input) → don't search until `compositionend`.
+- Pasting a long string → debounce still applies; trim and cap length.
+- Selecting an item fills the input — don't trigger a new search for that exact label.
+
+## Interview follow-ups
+
+- *"User types fast, responses arrive out of order."* — Abort previous requests and check the response matches the latest query.
+- *"How do you reduce server load?"* — Debounce, min length, client cache with TTL, server-side caching of popular prefixes.
+- *"How does a screen-reader user use it?"* — Combobox pattern with `aria-activedescendant`, listbox/option roles, live-region counts.
+- *"How would you make this reusable across the company?"* — Headless hook for logic, injectable data source and renderers, styled default.
+
+Further reading: WAI-ARIA Authoring Practices Guide, Combobox pattern · MDN documentation on `AbortController` · web.dev guidance on input responsiveness (INP).

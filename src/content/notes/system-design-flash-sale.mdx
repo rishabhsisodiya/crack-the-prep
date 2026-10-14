@@ -1,0 +1,112 @@
+---
+title: "System Design — Flash Sale"
+track: "system-design"
+kind: "notes"
+order: 44
+slug: "flash-sale"
+updated: 2026-10-14
+description: "Designing a flash sale (Big Billion Days, 11.11, limited drops) — shielding the backend from 100x traffic, in-memory inventory with atomic decrements, async order creation, no oversell, and graceful load shedding."
+---
+
+import Callout from '../../components/Callout.astro';
+import Mermaid from '../../components/Mermaid.astro';
+
+Part of the [system design](/prep/system-design) series. See the [framework](/prep/system-design) and [building blocks](/prep/system-design/building-blocks) first if you haven't. The no-oversell basics are in worked problem 3 of the [framework page](/prep/system-design); this page is what changes when the traffic is 100× normal for ten minutes. Related: [Ticket Booking](/prep/system-design/ticket-booking), [Rate Limiter](/prep/system-design/rate-limiter).
+
+## 1. Requirements
+
+**Functional**
+- At a fixed start time, a limited stock (e.g. 10,000 phones at a discount) goes on sale.
+- Users click Buy; the first N successful buyers get the item; everyone else sees "sold out".
+- Per-user purchase limit (1 per account). Unpaid reservations expire and return to stock.
+
+**Non-functional**
+- **Never oversell.** Selling 10,001 discounted phones is a real financial loss.
+- Traffic: 1–10M users hitting the same product page and Buy button within seconds — 100–1000× a normal day, all on one SKU.
+- The rest of the store must keep working during the sale.
+- Fairness and bot resistance matter; tiny latency differences decide who wins.
+
+## 2. The core insight
+
+10M requests are competing for 10k units. **99.9% of requests will fail no matter what you do.** The design goal is to make those failures **cheap and early**, so only roughly as many requests as there is stock ever reach the expensive, consistent parts of the system (orders DB, payments).
+
+Think of it as a funnel with a filter at every layer.
+
+<Mermaid caption="Each layer rejects most of the remaining traffic before the next, more expensive layer" code={`flowchart TD
+  U[10M users] --> CDN[CDN: static product page,<br/>countdown, sale assets]
+  CDN --> GW[Gateway: rate limit per user/IP,<br/>bot checks, sale token]
+  GW --> SOLD{Local sold-out flag?}
+  SOLD -->|yes| R1[Return sold out]
+  SOLD -->|no| INV[Inventory service<br/>Redis atomic decrement]
+  INV -->|stock left| MQ[(Order queue)]
+  INV -->|no stock| R2[Return sold out]
+  MQ --> ORD[Order workers]
+  ORD --> DB[(Orders DB)]
+  ORD --> PAY[Payment]
+`} />
+
+## 3. Layer by layer
+
+1. **Static everything.** The product page, countdown and images come from the CDN. The countdown uses server time fetched once, not the user's clock. The Buy button only enables at start time — and the server rejects anything earlier regardless.
+2. **Hide the buy endpoint until start.** The real purchase URL or a signed sale token is released at T0, so scripts can't hammer it early.
+3. **Gateway filters**: per-user and per-IP rate limits, CAPTCHA or proof-of-work for suspicious clients, one in-flight request per user. Optionally a [virtual waiting room](/prep/system-design/ticket-booking) for very large drops.
+4. **Local sold-out flag** in every app server's memory, flipped by a broadcast once stock hits zero. After sell-out, every request is rejected in microseconds without touching Redis.
+5. **Inventory in Redis, decremented atomically.** This is the only place stock is decided during the sale.
+6. **Async order creation.** Winners get an order queued; workers create the order and payment intent at a rate the DB can take. The user sees "You got it — complete payment" and polls for the order.
+
+## 4. Deep dive — atomic inventory without oversell
+
+Do the check-and-decrement plus the per-user limit as **one atomic Lua script** in Redis:
+
+```lua
+-- KEYS[1] = stock key, KEYS[2] = buyers set; ARGV[1] = user id
+if redis.call('SISMEMBER', KEYS[2], ARGV[1]) == 1 then return -1 end -- already bought
+local stock = tonumber(redis.call('GET', KEYS[1]))
+if stock <= 0 then return 0 end                                       -- sold out
+redis.call('DECR', KEYS[1])
+redis.call('SADD', KEYS[2], ARGV[1])
+return 1                                                              -- reserved
+```
+
+Redis executes a script atomically, so there's no read-then-write race. One Redis key can handle on the order of 100k simple operations/s — enough for one SKU.
+
+**Bigger stock or more throughput?** Split stock into **buckets**: 10,000 units as 10 keys of 1,000 on different Redis shards; route each user to a bucket by hash, and fall over to another bucket when one empties. This removes the single-hot-key ceiling.
+
+**Reconciling with the database.** Redis is the gate, the DB is the record:
+- The order worker inserts the order with a unique constraint on `(sale_id, user_id)` — a duplicate message can't create two orders.
+- The DB inventory row is decremented with a conditional update (`WHERE stock > 0`) as a final safety net. If Redis and the DB ever disagree, the DB wins and the user is refunded/notified.
+- Preload Redis stock from the DB before the sale starts, not lazily on the first request.
+
+<Callout type="warn">
+Unpaid reservations: a winner who never pays is holding a unit. Give a short payment window (e.g. 10–15 minutes); on expiry, `INCR` the stock back and remove the user from the buyers set. Re-opened stock is why "sold out" can flip back to "available" — set user expectations accordingly.
+</Callout>
+
+## 5. Protecting the rest of the platform
+
+- **Isolate**: run sale traffic on dedicated instances/pools (bulkheads) so a meltdown doesn't take out search and checkout for normal products.
+- **Load shedding**: when queues exceed thresholds, reject early with a friendly "high demand, try again" instead of letting latency climb for everyone.
+- **Pre-scale and load test**: sales are scheduled — scale out ahead of time and rehearse with production-like load.
+- **Degrade non-essentials**: turn off recommendations, reviews and personalization on the sale page during peak.
+
+## 6. What real systems do today
+
+- **Alibaba's Singles' Day (11.11)** is the canonical example: years of public talks describe pre-scaling, full-link stress tests, traffic shaping and dedicated inventory handling for spikes in the hundreds of thousands of orders per second.
+- Indian e-commerce sales (Flipkart's Big Billion Days, Amazon Great Indian Festival) use waiting rooms/queues, CDN-heavy pages and capacity planning months ahead.
+- Redis Lua scripts (or Redis Functions) for check-and-decrement are the most common inventory gate in published flash-sale designs.
+
+## 7. Scaling & failure
+
+- **Redis primary fails mid-sale** → replicas are asynchronous, so a failover can lose the last few decrements and oversell. Options: `WAIT` for replica acks on each decrement (slower), keep a small safety buffer (sell 9,950 via Redis, release the rest after reconciliation), and always keep the DB conditional update as the last guard.
+- **Order queue backs up** → fine; users are told they won and the order is processing. Monitor lag.
+- **Payment provider throttles** → payment window timers pause/extend; don't expire winners because of your provider's outage.
+- **Bots win everything** → per-account limits, account age/verification requirements for the sale, CAPTCHA, device fingerprinting.
+
+## Interview follow-ups
+
+- *"Why not just use the DB with `UPDATE ... WHERE stock > 0`?"* — Correct, but one hot row can't absorb millions of requests; use it as the final guard, not the front door.
+- *"Why Lua instead of DECR then check?"* — DECR-then-check can drive stock negative and needs compensating INCRs; the per-user limit also needs to be atomic with the decrement.
+- *"How do you avoid one hot Redis key?"* — Stock buckets across shards plus the local sold-out flag.
+- *"User clicks Buy 20 times."* — One in-flight request per user at the gateway, buyers set in the Lua script, unique constraint in the DB.
+- *"How is this different from normal checkout?"* — Normal checkout optimizes for success; flash sale optimizes for cheap, early failure.
+
+Further reading: Alibaba Cloud engineering posts on Double 11 architecture and stress testing · Redis documentation on scripting with Lua and on `WAIT` · Martin Kleppmann, *Designing Data-Intensive Applications*, chapter on replication lag.

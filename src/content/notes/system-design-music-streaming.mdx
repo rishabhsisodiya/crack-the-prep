@@ -1,0 +1,77 @@
+---
+title: "System Design — Music Streaming (Spotify)"
+track: "system-design"
+kind: "notes"
+order: 51
+slug: "music-streaming"
+updated: 2026-10-14
+description: "Designing Spotify — what it shares with video streaming, and what's different: small audio files with instant playback, offline downloads with DRM, play counts for royalties, playlists, and recommendations."
+---
+
+import Callout from '../../components/Callout.astro';
+import Mermaid from '../../components/Mermaid.astro';
+
+Part of the [system design](/prep/system-design) series. This is a **delta page** on top of [Video Streaming (YouTube)](/prep/system-design/video-streaming-youtube): upload/transcode pipelines, CDN delivery and adaptive bitrate all carry over. This page covers what's specific to music.
+
+## 1. Requirements
+
+**Functional**
+- Search and browse a catalog of ~100M tracks; play instantly; skip, seek, queue.
+- Playlists (user-created, collaborative, editorial), library, follows.
+- Offline downloads for premium users.
+- Personalized recommendations and generated playlists.
+- Accurate play counts — they drive **royalty payments** to rights holders.
+
+**Non-functional**
+- **Time to first sound** matters most: well under a second. Users skip constantly, so the next track must start immediately.
+- ~600M+ users, tens of millions concurrent streams; huge long tail (most tracks rarely played, a few played billions of times).
+- Play events must be durable and auditable (money depends on them).
+
+## 2. What's the same as video
+
+- Ingest from labels/distributors → transcode into several bitrates/codecs (e.g. Ogg Vorbis/AAC at ~96–320 kbps) → object storage → CDN.
+- Catalog metadata in a database, search via an inverted index (see [Search Engine](/prep/system-design/search-engine)).
+- Signed, expiring URLs for media.
+
+## 3. What's different
+
+<Mermaid caption="Playback fetches small encrypted files from the CDN; play events flow to a durable pipeline for royalties" code={`flowchart LR
+  APP[Client app<br/>local cache + prefetch] --> PB[Playback service<br/>license, signed URL]
+  APP --> CDN[CDN: encrypted audio files]
+  CDN --> OBJ[(Object storage)]
+  APP -->|play events| EV[(Event pipeline: Kafka)]
+  EV --> ROY[Royalty and reporting<br/>batch, exact counts]
+  EV --> REC[Recommendation features]
+  APP --> PL[Playlist service]
+  PL --> PDB[(Playlists DB<br/>Cassandra-style)]
+`} />
+
+**1. Files are small, so fetch the whole thing.** A 3-minute song at 160 kbps is ~3.5 MB. Instead of segmenting like video, clients fetch in a few large range requests, start playing after the first chunk, and **prefetch the next track in the queue** while the current one plays. Skip latency then disappears. Clients also keep an on-disk cache of recently and frequently played tracks.
+
+**2. Long-tail distribution.** Popular tracks are always hot in CDN edges; long-tail tracks miss the CDN and come from origin. Tiered caching (edge → regional → origin) keeps long-tail misses cheap.
+
+**3. Offline and DRM.** Downloaded tracks are stored encrypted on the device; keys are tied to the account and device, and the app must check in periodically (e.g. every 30 days) to keep offline content valid. Device download limits enforce licensing terms.
+
+**4. Play counts for royalties.** A "stream" is usually counted only after a minimum listen (commonly 30 seconds). Clients send play events, buffered locally when offline and uploaded later with original timestamps. The pipeline must be **exactly-once in effect**: event ids for dedup, raw events stored durably, and batch jobs producing the authoritative counts. Fraud detection (bot farms streaming tracks) runs on these events before payouts. See [Distributed Counter](/prep/system-design/distributed-counter) for the fast, approximate public counts.
+
+**5. Playlists.** Some playlists are followed by millions (editorial ones) — read-heavy, cache aggressively. Collaborative playlists need concurrent edits: store ordered items with fractional/positional keys, or as an append-only change log, so two people adding tracks don't overwrite each other.
+
+**6. Recommendations.** Built offline from listening history: collaborative filtering (users who play X also play Y), audio/content embeddings for new tracks without history, and NLP on playlist titles. Generated playlists (Discover Weekly-style) are computed in batch and served as ordinary playlists.
+
+<Callout type="tip">
+The two music-specific points interviewers want: **prefetch the next track** (instant skip) and **play events are financial records** (durable, deduplicated, auditable, fraud-checked). Everything else, say "same as video" and move on.
+</Callout>
+
+## 4. What real systems do today
+
+- **Spotify** has written extensively about its event delivery system (moving to Google Cloud Pub/Sub and Dataflow), its use of **Cassandra** for user data like playlists, and recommendation approaches combining collaborative filtering with audio and text signals.
+- Spotify's public guidance is that a stream counts toward royalties after 30 seconds of playback.
+
+## Interview follow-ups
+
+- *"How do you make skipping instant?"* — Prefetch the next queued track; local cache; small files fetched whole.
+- *"How do you count plays for royalties?"* — Minimum-listen threshold, durable deduplicated event pipeline, batch authoritative counts, fraud filtering.
+- *"User is offline for a week."* — Encrypted local files with an offline license; play events queued on device and uploaded later.
+- *"A playlist with 30M followers."* — Read-mostly, cache and CDN its contents; edits are rare and invalidate the cache.
+
+Further reading: Spotify Engineering blog posts on event delivery, Cassandra usage and personalization · Spotify for Artists documentation on how streams are counted.

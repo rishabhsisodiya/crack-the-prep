@@ -1,0 +1,112 @@
+---
+title: "Frontend System Design — News Feed UI"
+track: "system-design"
+kind: "notes"
+order: 54
+slug: "frontend-news-feed"
+updated: 2026-10-14
+description: "Designing the client side of a news feed (Facebook / X / LinkedIn) — component architecture, cursor pagination, infinite scroll with virtualization, normalized client cache, optimistic likes and comments, new-post banners, and media performance."
+---
+
+import Callout from '../../components/Callout.astro';
+import Mermaid from '../../components/Mermaid.astro';
+
+Part of the [system design](/prep/system-design) series. Uses the [frontend framework](/prep/system-design/frontend-system-design). The server side is [News Feed](/prep/system-design/news-feed); the infinite-scroll mechanics are built in [Machine Coding — Infinite Scroll](/prep/machine-coding/infinite-scroll).
+
+## 1. Requirements
+
+**Functional**
+- Scroll an endless feed of posts (text, images, video, link previews).
+- Like, comment, share; create a post at the top.
+- See new posts that arrive while browsing ("12 new posts" pill).
+
+**Non-functional**
+- Fast first load on mid-range mobile — the feed is the landing page.
+- Smooth scrolling after hundreds of posts (memory and DOM size stay bounded).
+- Works on flaky networks; actions feel instant.
+- Accessible: keyboard and screen-reader navigation through posts.
+
+## 2. Architecture
+
+<Mermaid caption="Feed components read normalized entities from a client cache; the data layer handles pagination and mutations" code={`flowchart TD
+  APP[FeedPage] --> COMPOSER[PostComposer]
+  APP --> NEWPILL[NewPostsPill]
+  APP --> LIST[VirtualizedFeedList]
+  LIST --> POST[PostCard]
+  POST --> MEDIA[MediaGrid / VideoPlayer]
+  POST --> ACT[ActionBar: like, comment, share]
+  POST --> CMT[CommentPreview]
+  LIST --> SENT[Sentinel: load more]
+  STORE[(Normalized cache<br/>posts, users, comments by id)] --> LIST
+  DL[Data layer: fetchFeed, mutations] --> STORE
+  DL --> API[Feed API]
+`} />
+
+- **Server-render the first page** (SSR/streaming) so the first posts are in the HTML; hydrate, then fetch further pages on the client.
+- `PostCard` is memoized and receives only a post id; it reads from the store, so updating one post re-renders one card.
+
+## 3. Data model and API
+
+**Normalized client store**:
+```ts
+type Store = {
+  posts: Record<PostId, { id: PostId; authorId: UserId; text: string; media: Media[];
+                          likeCount: number; likedByMe: boolean; createdAt: string }>;
+  users: Record<UserId, { id: UserId; name: string; avatarUrl: string }>;
+  feed: { ids: PostId[]; nextCursor: string | null; status: 'idle' | 'loading' | 'error' };
+};
+```
+
+**API** — cursor pagination, not offset:
+```text
+GET /feed?cursor=<opaque>&limit=10
+-> { posts: [...], users: {...}, nextCursor: "abc..." }
+```
+
+<Callout type="warn">
+Offset pagination (`?page=3`) breaks on a live feed: when new posts are inserted at the top, page 3 shifts and the user sees duplicates or misses posts. An opaque cursor ("after this post") is stable. Also dedupe by post id on the client when merging pages — ranking feeds can still return a post twice.
+</Callout>
+
+## 4. Deep dive — infinite scroll that stays fast
+
+1. **Trigger loading** with an `IntersectionObserver` on a sentinel element a screen or two before the end (`rootMargin: '800px'`), not a scroll listener. Guard against duplicate requests while one is in flight.
+2. **Virtualize**: after 500 posts, the DOM would hold thousands of nodes and images. Render only posts in and near the viewport; replace the rest with spacer height. Feed items have **variable heights** (images, text length), so measure rendered heights and cache them by post id; estimate unmeasured ones.
+3. **Reserve space for media** using the aspect ratio from the API (`width`/`height`), so images loading later don't shift layout (CLS) or break virtualization measurements.
+4. **Preserve scroll position** when navigating to a post and back: keep the feed in the cache and restore the scroll offset and the virtualizer state.
+5. **Bound memory**: drop far-away pages' heavy data (video players, decoded images) while keeping lightweight post records.
+
+**Media**: responsive `srcset`, lazy-load below the fold (`loading="lazy"`), eager-load and prioritize the first image (likely LCP), autoplay videos muted only when mostly visible, pause when scrolled away, and one active video at a time.
+
+## 5. Interactions — optimistic updates
+
+- **Like**: flip `likedByMe` and adjust `likeCount` immediately, send the request, and **roll back** with a toast if it fails. Debounce rapid like/unlike toggles into the final state.
+- **Comment**: append with a temporary client id and a "sending" style; replace with the server id on success; show retry on failure.
+- **New post**: insert at the top of the feed optimistically.
+
+## 6. New posts while browsing
+
+Don't push new posts into the list while the user is reading — content jumping under the thumb is a bad experience. Poll (or receive via SSE/WebSocket) a "new items since cursor" count and show a **"12 new posts" pill**; clicking it scrolls to top and prepends them. Poll less (or pause) when the tab is hidden (`visibilitychange`).
+
+## 7. Accessibility
+
+- Feed as a list of `article` elements with headings; the ARIA `feed` pattern supports keyboard navigation between articles (Page Down/Page Up).
+- Announce loading of more posts via a polite live region; don't steal focus.
+- All actions are real buttons with labels ("Like post by Asha"); images need alt text (user-provided or "Photo").
+- Provide an alternative to pure infinite scroll for keyboard users who need to reach the footer — a "Load more" button or a footer that doesn't hide behind endless loading.
+
+## 8. Failure and edge cases
+
+- Page fetch fails → inline retry row at the bottom; keep what's loaded.
+- Offline → show cached feed with an offline banner; queue likes for retry.
+- Deleted post comes back in a later page → server marks it; client removes by id.
+- Very long posts → "See more" truncation; very tall images → crop with max height.
+
+## Interview follow-ups
+
+- *"Why cursor instead of page numbers?"* — Stable under inserts; no duplicates/misses on live data.
+- *"How do you keep scrolling smooth after 1,000 posts?"* — Virtualization with measured variable heights, fixed media aspect ratios, memoized cards.
+- *"User likes a post and the request fails."* — Optimistic update with rollback and a toast.
+- *"Where's the LCP and how do you make it fast?"* — First post's image or text; SSR it, prioritize that image, inline critical CSS.
+- *"How do you show new posts?"* — Count-based pill, user-triggered insertion; never shift content under the reader.
+
+Further reading: web.dev, "Virtualize large lists" and "Optimize Cumulative Layout Shift" · WAI-ARIA Authoring Practices, Feed pattern · TanStack Virtual documentation (dynamic item measurement).

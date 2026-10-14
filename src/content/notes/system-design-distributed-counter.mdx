@@ -1,0 +1,104 @@
+---
+title: "System Design — Distributed Counter (Likes, Views)"
+track: "system-design"
+kind: "notes"
+order: 46
+slug: "distributed-counter"
+updated: 2026-10-14
+description: "Designing likes/views counters at scale — why a single row breaks on hot items, sharded counters, write coalescing, exact likes vs approximate views, unique counting with HyperLogLog, and keeping the 'did I like this' state correct."
+---
+
+import Callout from '../../components/Callout.astro';
+import Mermaid from '../../components/Mermaid.astro';
+
+Part of the [system design](/prep/system-design) series. See the [framework](/prep/system-design) and [building blocks](/prep/system-design/building-blocks) first if you haven't. Related: [Top-K / Trending](/prep/system-design/top-k-trending), [Ad Click Aggregation](/prep/system-design/ad-click-aggregation).
+
+## 1. Requirements
+
+**Functional**
+- Like/unlike a post; show the like count and whether *I* liked it.
+- Count views of a video/post; show the view count.
+- Optionally: unique viewers, counts per day for creator analytics.
+
+**Non-functional**
+- Billions of posts; a viral post can take **100k+ likes/s** and millions of views/s.
+- Counts can be **slightly stale** (seconds) and views can be approximate; likes must be **exactly correct eventually** (one like per user, unlike works).
+- Reads vastly outnumber writes — every feed render shows counts.
+
+## 2. Separate the two problems
+
+| | Likes | Views |
+|---|---|---|
+| Identity | Who liked matters (one per user, unlike, "liked by your friend") | Mostly anonymous; duplicates filtered by heuristics |
+| Correctness | Exact per user; the count may lag | Approximate is fine; monetized views need fraud filtering |
+| Storage | A `likes(post_id, user_id)` relation **plus** a count | Just counts (plus raw events for analytics) |
+
+<Callout type="tip">
+The count is a **derived value**. The source of truth for likes is the set of `(post_id, user_id)` rows; the counter is a cache of its size. Saying this up front makes every later decision (rebuilds, reconciliation, unlikes) obvious.
+</Callout>
+
+## 3. Why the naive counter fails
+
+`UPDATE posts SET like_count = like_count + 1 WHERE id = :p` — every like on a viral post takes a row lock on the same row. A single row tops out at maybe a few thousand updates/s on a relational DB, and the lock queue grows unbounded. It also mixes a hot write path into the post row that every feed reads.
+
+## 4. Key design decision — sharded counters and write coalescing
+
+**Sharded counter.** Split one logical counter into N sub-counters: `count:{post}:{0..N-1}`. Each increment goes to a random shard; a read sums all N. Contention drops by N. Make N dynamic: 1 shard for normal posts, more for posts detected as hot.
+
+**Write coalescing (batching).** Don't write every increment to the database:
+
+<Mermaid caption="Likes are recorded durably as events; counts are aggregated in memory and flushed in batches" code={`flowchart LR
+  U[Like / unlike] --> API[Like service]
+  API -->|insert or delete edge, idempotent| LDB[(Likes table<br/>post_id, user_id)]
+  API --> K[(Kafka: like events<br/>keyed by post_id)]
+  K --> AGG[Aggregator<br/>sum deltas per post per second]
+  AGG -->|one increment per post per flush| CDB[(Counts store)]
+  CDB --> C[(Redis count cache)]
+  C --> FEED[Feed / post reads]
+`} />
+
+1. The like service writes the **edge** first: `INSERT INTO likes (post_id, user_id) ON CONFLICT DO NOTHING`. If a row was inserted, emit `+1`; on unlike, if a row was deleted, emit `−1`. This makes double-taps and retries harmless.
+2. Events are partitioned by `post_id`, so one aggregator owns each post and sums deltas in memory.
+3. Every second or so the aggregator writes **one** increment per post (`+4,812`) to the counts store and updates the cache.
+
+100k likes/s on one post become one write per second.
+
+**Views** skip step 1 entirely: view events go straight into the stream (often sampled or pre-aggregated on the edge) and the same aggregator pattern produces the count. Validation (bot filtering, minimum watch time) runs in the stream before counting.
+
+## 5. Deep dive — reading "did I like this?" and the count
+
+- **The count**: read from Redis; fall back to the counts store. Show rounded numbers for big counts ("1.2M") — this also hides the few seconds of staleness.
+- **"Did I like it?"** — per (viewer, post) lookups for every post in a feed. Query the likes table by `(user_id, post_id)` with an index ordered that way, or keep a per-user recent-likes set in cache. For the just-liked case, the client updates its UI optimistically so the user sees their own action instantly (read-your-writes from the client side).
+- **Unique viewers**: storing every viewer id per video is expensive. **HyperLogLog** estimates cardinality with ~0.8% error in 12 KB per counter (Redis `PFADD`/`PFCOUNT`), and HLLs merge — daily HLLs can be combined into weekly ones.
+
+<Callout type="warn">
+Don't double-count on retries. The like service may crash after writing the edge but before emitting the event, or emit twice. Use the transactional outbox pattern (write the edge and an outbox row in one transaction, relay to Kafka) and give events an id so the aggregator can drop duplicates. For views, approximate counting already tolerates small duplication.
+</Callout>
+
+## 6. Reconciliation
+
+Counters drift (lost events, bugs). Run a periodic job that recounts `SELECT COUNT(*) FROM likes WHERE post_id = ?` for recently active posts and corrects the stored count. Because the likes table is the source of truth, a full rebuild is always possible.
+
+## 7. What real systems do today
+
+- **Google Cloud Firestore** documents the distributed-counter pattern directly: a document supports roughly one sustained write per second, so high-rate counters are split across shard sub-documents and summed on read.
+- **Redis** `INCRBY` on in-memory counters plus periodic persistence, and `PFADD`/`PFCOUNT` (HyperLogLog) for unique counts, are standard building blocks.
+- **YouTube** has long been known for view counts that lag or pause while views are validated for spam/bots before being counted publicly — an example of the separate validation stage.
+- **Cassandra** offers a native counter column type, with the documented caveat that counter updates are not idempotent, so retries can over-count.
+
+## 8. Scaling & failure
+
+- **Viral post** → automatic promotion to more counter shards and more aggressive coalescing; cache the count with a short TTL so reads don't stampede.
+- **Aggregator crash** → in-memory deltas since the last checkpoint are recomputed from Kafka offsets; commit offsets only after the flush.
+- **Counts store down** → keep serving from cache (stale); Kafka buffers deltas.
+- **Hot key in Redis** for the count read → replicate the key to several keys or cache in the app servers for a second.
+
+## Interview follow-ups
+
+- *"Why not `UPDATE ... SET count = count + 1`?"* — Row lock contention on hot rows; one row can't take 100k writes/s.
+- *"How do you prevent someone liking twice?"* — Primary key on `(post_id, user_id)`; emit a delta only when the edge actually changed.
+- *"Exact or approximate?"* — Likes exact (eventually), views approximate and validated; unique viewers via HyperLogLog.
+- *"How stale can the count be?"* — The flush interval, a second or two; the user's own action is reflected immediately on their device.
+- *"Counter drifted from reality."* — Reconcile from the source-of-truth table.
+
+Further reading: Google Cloud Firestore documentation, "Distributed counters" · Redis documentation on HyperLogLog · Apache Cassandra documentation on counter columns · Flajolet et al., "HyperLogLog: the analysis of a near-optimal cardinality estimation algorithm" (2007).

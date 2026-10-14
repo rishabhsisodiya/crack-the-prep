@@ -14,12 +14,12 @@ worked examples in one place.
 | **React** | Rendering, hooks, state, performance, the patterns interviewers probe |
 | **Node.js** | Runtime model, modules, Express, middleware, auth, backend fundamentals |
 | **Machine Coding** | Polyfills, utilities, async helpers and UI components, built step by step |
-| **System Design** | A framework, the building blocks, worked problems with diagrams |
+| **System Design** | A framework, the building blocks, 40+ worked HLD problems with diagrams, and frontend system design |
 | **DSA** | Theory, two dozen patterns, an interview core list, practice problems with an editor, tests and worked solutions |
 | **Behavioral** | The STAR method and a bank of leadership and teamwork prompts |
 | **AI Engineering** | Python for AI, LLMs, prompts, RAG, agents, memory, voice, MCP, evals, guardrails |
 
-Around 135 notes and question sets. JavaScript, React and Node.js each have a dedicated
+Around 170 notes and question sets. JavaScript, React and Node.js each have a dedicated
 questions drill page. Everything is searchable from any page.
 
 ## Running it locally

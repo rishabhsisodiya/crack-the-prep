@@ -1,0 +1,99 @@
+---
+title: "System Design — Distributed Logging"
+track: "system-design"
+kind: "notes"
+order: 49
+slug: "distributed-logging"
+updated: 2026-10-14
+description: "Designing centralized logging (ELK / Loki / Datadog-style) — agents and a buffered ingest pipeline, structured logs, full-text indexing vs label-only indexing, hot/warm/cold tiers, retention, and staying up when the app is on fire."
+---
+
+import Callout from '../../components/Callout.astro';
+import Mermaid from '../../components/Mermaid.astro';
+
+Part of the [system design](/prep/system-design) series. See the [framework](/prep/system-design) and [building blocks](/prep/system-design/building-blocks) first if you haven't. Sibling problem: [Metrics Monitoring & Alerting](/prep/system-design/metrics-monitoring-alerting) — metrics are numbers over time; logs are events with text. Indexing is covered in [Search Engine](/prep/system-design/search-engine).
+
+## 1. Requirements
+
+**Functional**
+- Collect logs from thousands of services/hosts/containers into one place.
+- Search by time range, service, level, request/trace id, and free text; tail logs live.
+- Alerts on log patterns (error spikes); dashboards from log-derived counts.
+- Retention: e.g. 7 days searchable fast, 30–90 days slower, 1+ year archived for compliance.
+
+**Non-functional**
+- Ingest: ~1M log lines/s at peak (~1 KB each → ~1 GB/s, ~80 TB/day raw before compression).
+- **Logging must never take down the app** — if the pipeline is slow, apps drop or buffer logs; they don't block.
+- Search over recent data in seconds; older data can take longer.
+- Cost is a first-class requirement — logging bills are often among the largest infrastructure costs.
+
+## 2. High-level architecture
+
+<Mermaid caption="Agents ship to a buffer; indexers consume at their own pace; data ages through storage tiers" code={`flowchart LR
+  APP[App containers<br/>write JSON to stdout] --> AG[Node agent<br/>Fluent Bit / Vector / OTel Collector]
+  AG -->|batched, compressed| K[(Kafka buffer)]
+  K --> PR[Processors<br/>parse, redact PII, enrich, sample]
+  PR --> HOT[(Hot store<br/>indexed, SSD, last 7 days)]
+  PR --> ARC[(Object storage<br/>compressed, long-term)]
+  HOT -->|age out| WARM[(Warm / cold tier)]
+  Q[Query UI / API] --> HOT
+  Q --> WARM
+  Q -.->|rehydrate on demand| ARC
+  PR --> AL[Alerting rules]
+`} />
+
+- **Apps log structured JSON to stdout**; a per-node agent tails the files, adds metadata (service, pod, host, region) and ships in compressed batches. Apps never talk to the log backend directly.
+- **Kafka buffer** decouples producers from indexers. During an incident, log volume spikes 10× exactly when you need logs most — the buffer absorbs it instead of dropping data or crushing the indexers.
+- **Processors** parse, drop noise, **redact PII/secrets**, and sample high-volume debug logs.
+
+## 3. Key design decision — what to index
+
+| | Full-text indexing (Elasticsearch/OpenSearch, Splunk) | Label-only indexing (Grafana Loki) | Columnar (ClickHouse-style) |
+|---|---|---|---|
+| Index | Every token in every line | Only a few labels (service, env, level); content stored as compressed chunks | Columns per field; sparse primary index, fast scans |
+| Query | Fast arbitrary text search | Pick streams by labels, then brute-force grep the chunks | Fast filters and aggregations on structured fields |
+| Cost | Index often comparable in size to the data; expensive at scale | Very cheap storage; slower for needle-in-haystack across everything | Cheap storage, excellent compression |
+
+The trade-off to state: **full-text indexes make search fast but can roughly double storage and dominate ingest CPU.** At high volume, many teams index only structured fields (service, level, trace_id, status) and scan the message text, or use label-only/columnar stores.
+
+<Callout type="tip">
+Mention **structured logging with a trace id**. If every log line carries `trace_id` and `request_id`, the most common debugging query ("show me everything for this failed request across 12 services") becomes an exact-match lookup instead of a text search — and links logs to traces (OpenTelemetry).
+</Callout>
+
+## 4. Deep dive — storage tiers and retention
+
+- **Partition by time** (daily or hourly indices/chunks) and by tenant/service. Time partitioning makes retention trivial: drop whole partitions instead of deleting rows.
+- **Hot** (recent days): SSD, replicated, fully indexed, fast queries.
+- **Warm/cold**: fewer replicas, cheaper disks, or searchable snapshots backed by object storage.
+- **Archive**: compressed files in S3/GCS (Parquet or compressed JSON), queryable on demand by rehydrating or with a query engine that reads object storage directly.
+- **Compression** is huge for logs (repetitive text): 10× or more is common with zstd and columnar layouts.
+
+**Volume control** (logs grow faster than budgets):
+- Sample DEBUG/INFO in high-throughput paths; never sample ERROR.
+- Per-service ingest quotas, with rate-limit-and-count when exceeded (count dropped lines so you know).
+- Convert repetitive logs to metrics ("request served" lines → a counter).
+
+## 5. What real systems do today
+
+- **ELK/Elastic Stack** (Elasticsearch + Logstash/Beats + Kibana) and its fork **OpenSearch** are the classic full-text approach, with index lifecycle management for hot/warm/cold/frozen tiers.
+- **Grafana Loki** indexes only labels and stores log chunks in object storage — designed explicitly to be cheaper than full-text indexing.
+- **ClickHouse** is widely used as a log backend for structured logs (columnar compression, fast aggregations).
+- **OpenTelemetry** standardizes collecting logs, metrics and traces, with the OTel Collector as agent/gateway; **Fluent Bit** and **Vector** are common lightweight agents.
+
+## 6. Scaling & failure
+
+- **Backend slow/down** → agents buffer to local disk with a cap, then drop oldest with a counter; Kafka holds hours of data. Apps are never blocked.
+- **Incident log storm** → Kafka absorbs it; indexers lag but catch up; per-service quotas protect everyone else from one service in a crash loop.
+- **Hot index shard overloaded** (one noisy service) → route big tenants/services to their own indices or partitions.
+- **Sensitive data leaked into logs** → redaction in processors, restricted access per service, and the ability to purge a time range.
+- **Clock skew** → agents attach both the event's timestamp and ingest time; query on event time.
+
+## Interview follow-ups
+
+- *"Why put Kafka between agents and Elasticsearch?"* — Absorbs incident spikes, decouples ingest from indexing, allows replay and multiple consumers (archive, alerting).
+- *"Logs cost too much."* — Index fewer fields, sample, tier storage, compress, convert logs to metrics, enforce quotas.
+- *"Find all logs for one request across services."* — Structured logs with trace_id propagated via OpenTelemetry context; exact-match field query.
+- *"Full-text index vs Loki?"* — Fast arbitrary search vs cheap storage and slower scans; choose by query patterns and budget.
+- *"What if logging is down during an outage?"* — Local buffering with caps, never blocking the app; Kafka retention for catch-up.
+
+Further reading: Elastic documentation on index lifecycle management and data tiers · Grafana Loki documentation on its architecture and label design · OpenTelemetry documentation on logs and the Collector · ClickHouse blog posts on using ClickHouse for observability.

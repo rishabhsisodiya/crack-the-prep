@@ -1,0 +1,114 @@
+---
+title: "System Design — Distributed Job Scheduler"
+track: "system-design"
+kind: "notes"
+order: 41
+slug: "job-scheduler"
+updated: 2026-10-14
+description: "Designing a distributed job scheduler (cron at scale) — time-bucketed job storage, claiming due jobs without double execution, at-least-once with idempotent jobs, retries, and what happens when a worker dies mid-run."
+---
+
+import Callout from '../../components/Callout.astro';
+import Mermaid from '../../components/Mermaid.astro';
+
+Part of the [system design](/prep/system-design) series. See the [framework](/prep/system-design) and [building blocks](/prep/system-design/building-blocks) first if you haven't. It reuses ideas from [Distributed Message Queue](/prep/system-design/distributed-message-queue) and [Unique ID Generator](/prep/system-design/unique-id-generator).
+
+## 1. Requirements
+
+**Functional**
+- Submit a job: run once at a time (`run_at`), after a delay, or on a cron schedule (`0 2 * * *`).
+- Jobs carry a payload and a handler type (send email, generate report, charge a subscription, call a webhook).
+- Retry failed runs with backoff; cap retries; move to a dead-letter state.
+- Query job status and run history; pause, resume, cancel.
+
+**Non-functional**
+- Scale: ~100M scheduled jobs stored, ~10k due per second at peak (midnight and top-of-hour spikes are real).
+- **Timeliness**: a job should start within a few seconds of its scheduled time.
+- **No lost jobs**, and no *concurrent* double execution. Exactly-once execution is not achievable in general; aim for **at-least-once + idempotent handlers**.
+- Highly available: no single scheduler node whose death stops all jobs.
+
+## 2. High-level architecture
+
+<Mermaid caption="Scheduler claims due jobs and enqueues them; workers execute and report back" code={`flowchart LR
+  C[Clients / services] --> API[Job API]
+  API --> DB[(Jobs DB<br/>partitioned by job id)]
+  SCH[Scheduler nodes<br/>own a set of partitions] -->|poll due jobs, claim| DB
+  SCH --> Q[(Execution queue<br/>Kafka / SQS)]
+  Q --> W[Worker pool<br/>per job type]
+  W -->|heartbeat, result| DB
+  W --> EXT[Downstream systems]
+  REAP[Reaper] -->|reclaim expired leases| DB
+`} />
+
+Three roles, separately scalable:
+- **Job API + store** — durable definition of what should run when.
+- **Scheduler** — finds jobs that are due and hands them off. It does no real work, so it stays fast.
+- **Workers** — execute jobs, heartbeat, and record results.
+
+## 3. Data model
+
+- `jobs(job_id, owner, type, payload, schedule, next_run_at, status, retry_count, max_retries, version)`
+- `job_runs(run_id, job_id, scheduled_for, started_at, finished_at, status, worker_id, lease_expires_at, error)`
+
+The hot query is "jobs with `next_run_at <= now()` that aren't claimed". Index on `(partition, next_run_at)`. A recurring job is one `jobs` row; each firing creates a `job_runs` row and advances `next_run_at` to the next cron time.
+
+## 4. Deep dive — claiming due jobs without double execution
+
+Many scheduler nodes poll at once. Two must never both dispatch the same run.
+
+1. **Partition ownership.** Split jobs into N partitions (e.g. 1024 by `hash(job_id)`). Each scheduler node owns a subset, assigned via a coordination service (ZooKeeper/etcd lease, or a Kafka-style consumer group). Within a partition only one node polls, so there's no contention.
+2. **Atomic claim inside the partition** as a second guard (ownership can briefly overlap during a rebalance):
+
+```sql
+UPDATE jobs
+SET status = 'DISPATCHED', version = version + 1
+WHERE job_id = :id AND status = 'SCHEDULED' AND version = :v;
+-- 0 rows => another node got it, skip
+```
+
+With Postgres, `SELECT ... FOR UPDATE SKIP LOCKED LIMIT 100` lets many pollers pull disjoint batches from the same table without blocking each other — a standard pattern for job queues on Postgres.
+
+3. **Leases for execution.** A worker picking a run sets `lease_expires_at = now() + 30s` and heartbeats to extend it. If the worker dies, the lease expires and a **reaper** puts the run back to `SCHEDULED` with `retry_count + 1`.
+
+<Callout type="warn">
+A lease can expire while the original worker is still alive (long GC pause, network partition), so the job *can* run twice. That's why the contract is at-least-once and handlers must be idempotent — use the `run_id` as an idempotency key on side effects (e.g. "charge subscription for period X" keyed by `job_id + scheduled_for`). For extra protection, pass a **fencing token** (the run's version) to downstream systems so they reject writes from a stale run.
+</Callout>
+
+**Timeliness with large volumes.** Polling the whole table every second doesn't scale. Two common refinements:
+- **Time buckets**: keep a "due soon" set per partition (e.g. jobs due in the next minute) in Redis sorted sets scored by `run_at`; `ZRANGEBYSCORE 0 now` is cheap. A loader moves jobs from the DB into the near-term buckets ahead of time.
+- **Hierarchical timing wheel** in each scheduler's memory for the next few minutes, reloaded from the DB on startup — what Kafka uses internally for delayed operations.
+
+**Thundering herd at midnight.** Millions of `0 0 * * *` jobs fire at once. Add per-tenant jitter for jobs that don't need exact timing, rate-limit dispatch per job type, and scale workers ahead of known peaks.
+
+## 5. Retries, failures, dead letters
+
+- Exponential backoff with jitter: `next_run_at = now() + min(cap, base × 2^attempt) + random`.
+- Classify errors: retryable (timeouts, 503) vs permanent (validation failure). Don't retry permanent errors.
+- After `max_retries`, mark `FAILED` and emit to a dead-letter queue with alerting.
+- **Missed runs** after an outage: a policy per job — run once to catch up, run every missed occurrence, or skip. Kubernetes CronJob calls this `startingDeadlineSeconds`; Quartz calls it misfire instructions.
+- **Overlapping runs** of a recurring job (the 2:00 run is still going at 3:00): a per-job concurrency policy — allow, skip, or replace.
+
+## 6. What real systems do today
+
+- **Kubernetes CronJob** — cron schedules with `concurrencyPolicy` (Allow/Forbid/Replace) and `startingDeadlineSeconds`; explicitly documents that a job may occasionally run twice or not at all, so jobs should be idempotent.
+- **Temporal** (and Uber's Cadence, which it came from) — durable workflows with timers and schedules; state is persisted so a workflow resumes after worker failure.
+- **Airflow** — DAG scheduling for data pipelines; a scheduler loop reads DAG definitions and queues task instances to executors.
+- Postgres-backed queues (e.g. using `SKIP LOCKED`) are a common, simple choice when volumes are moderate and you already run Postgres.
+
+## 7. Scaling & failure
+
+- **Scheduler node dies** → its partition leases expire; the coordinator reassigns partitions to other nodes within seconds. Jobs are delayed, not lost.
+- **Queue backs up** (workers slow) → scheduler keeps dispatching; monitor queue lag and autoscale workers by lag, per job type, so slow report jobs don't starve email jobs.
+- **Jobs DB down** → nothing new can be claimed. In-flight work finishes; results buffer and retry. This is the dependency to make highly available (replicated, automatic failover).
+- **Clock skew** across nodes → use the DB's clock (`now()` in SQL) for due checks, not each node's local clock.
+
+## Interview follow-ups
+
+- *"Can you guarantee exactly-once?"* — Not end to end; at-least-once delivery plus idempotent handlers (idempotency key per run) gives effectively-once side effects.
+- *"Two scheduler nodes pick the same job — how is that prevented?"* — Partition ownership via leases, plus an atomic conditional claim (`version` / `SKIP LOCKED`) as a second guard.
+- *"Worker crashes halfway."* — Lease expires, reaper reschedules; the handler's idempotency key prevents double side effects.
+- *"How do you start jobs within a second of their time with 100M jobs stored?"* — Index on `next_run_at`, preload near-term jobs into time buckets or a timing wheel; don't scan the table.
+- *"Midnight spike?"* — Jitter, per-type rate limits, pre-scaled workers.
+- *"The scheduler was down for 10 minutes — what about missed runs?"* — Configurable catch-up policy per job.
+
+Further reading: Kubernetes documentation, "CronJob" · Temporal documentation on Schedules and durable timers · Varghese & Lauck, "Hashed and Hierarchical Timing Wheels" (1987) · PostgreSQL documentation on `SELECT ... FOR UPDATE SKIP LOCKED`.

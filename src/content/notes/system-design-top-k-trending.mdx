@@ -1,0 +1,108 @@
+---
+title: "System Design — Top-K / Trending (Heavy Hitters)"
+track: "system-design"
+kind: "notes"
+order: 40
+slug: "top-k-trending"
+updated: 2026-10-14
+description: "Designing a top-K / trending system — exact vs approximate counting, count-min sketch plus a heap, sliding windows, and the fast-path/slow-path split used for trending hashtags, most-viewed videos and top products."
+---
+
+import Callout from '../../components/Callout.astro';
+import Mermaid from '../../components/Mermaid.astro';
+
+Part of the [system design](/prep/system-design) series. See the [framework](/prep/system-design) and [building blocks](/prep/system-design/building-blocks) first if you haven't. Close relatives: [Ad Click Aggregation](/prep/system-design/ad-click-aggregation) (same streaming pipeline) and [Gaming Leaderboard](/prep/system-design/gaming-leaderboard) (exact top-K on a small key space).
+
+## 1. Requirements
+
+**Functional**
+- Return the top K items (K ≈ 10–100) by event count — "most viewed videos", "trending hashtags", "top-selling products".
+- Over several time windows: last 5 minutes, last hour, last day.
+- Optionally per dimension (per country, per category).
+
+**Non-functional**
+- Ingest is huge: ~1M events/s at peak, over a key space of hundreds of millions of distinct items.
+- Reads are cheap and frequent; results can be **seconds to a minute stale**.
+- Approximate counts are acceptable for "trending"; exact counts may be required for anything tied to money (billing, payouts).
+
+## 2. Why the naive answer fails
+
+`HashMap<item, count>` per window, then sort. Problems:
+
+- **Memory**: 300M distinct keys × (key + counter) is tens of GB per window, per dimension.
+- **One machine can't take 1M events/s**, and once you shard by item, top-K needs a merge across shards.
+- **Sorting** the whole map for every query is wasteful when you only want 10 items.
+
+The two ideas that fix it: keep only the **candidates** for top-K (a heap of size K), and count **approximately** in fixed memory.
+
+## 3. Key design decision — count-min sketch + heap
+
+A **count-min sketch** is a `d × w` grid of counters with `d` independent hash functions. To add item `x`: for each row `i`, increment `cell[i][hash_i(x) % w]`. To estimate `x`'s count: take the **minimum** across its `d` cells. Collisions only ever add, so the estimate **never undercounts** and overcounts by a bounded amount (error ≈ total events × e / w with probability 1 − e^−d).
+
+Memory is fixed — e.g. 4 rows × 1M columns × 4 bytes = 16 MB regardless of how many distinct items exist.
+
+Combine it with a **min-heap of size K**: on each event, update the sketch, read the estimate, and if it beats the heap's minimum, insert/update the item in the heap. Top-K is just the heap.
+
+| Approach | Memory | Accuracy | Use when |
+|---|---|---|---|
+| Exact hash map + heap | O(distinct items) | Exact | Small key space (a leaderboard, top merchants) |
+| Count-min sketch + heap | Fixed | Overcounts, bounded | Huge key space, trending |
+| Space-Saving / Misra-Gries | O(K / ε) counters | Guaranteed for true heavy hitters | Streaming heavy hitters with tight memory |
+
+<Callout type="tip">
+Interviewers like hearing "count-min sketch can't list the top items on its own — it only answers 'how many for this key'. The heap is what remembers candidates." That's the detail that shows you actually understand the structure.
+</Callout>
+
+## 4. High-level architecture — fast path and slow path
+
+<Mermaid caption="Fast path gives approximate top-K in seconds; slow path recomputes exact counts for the record" code={`flowchart LR
+  P[Producers: view, click, post events] --> K[(Kafka topic<br/>partitioned by item id)]
+  K --> F1[Stream workers<br/>sketch + heap per window]
+  F1 --> AGG[Top-K merger<br/>merge per-partition heaps]
+  AGG --> R[(Redis: topk per window, dimension)]
+  R --> API[Top-K API]
+  K --> S3[(Raw event store<br/>S3 / data lake)]
+  S3 --> B[Batch job hourly<br/>exact counts]
+  B --> DB[(Exact top-K tables)]
+  DB --> API
+`} />
+
+- **Partition by item id**, so all events for an item reach one worker. Each worker keeps a sketch + heap per window.
+- **Merge**: each partition emits its local top-K' (pick K' a bit larger than K, e.g. 2–3×) every few seconds; a merger combines them. Because an item lives in exactly one partition, merging local top-Ks gives the correct global top-K.
+- **Windows**: use tumbling 1-minute buckets and compute "last hour" as the merge of the last 60 buckets. True sliding windows are expensive; bucketed windows are what production systems use.
+- **Slow path**: raw events land in a data lake; an hourly/daily batch job computes exact counts for reporting or payouts. This is the Lambda-architecture pattern — fast-and-approximate plus slow-and-exact.
+
+## 5. Deep dive — "trending" isn't "most popular"
+
+"Top hashtags today" would always be #news and #love. **Trending** means *unusually* high relative to the item's baseline:
+
+- score = current window count ÷ expected count (from the same hour last week, or an exponentially weighted moving average), with smoothing so a jump from 1 to 5 doesn't beat a jump from 10k to 50k.
+- Add a minimum-volume threshold and a decay so items fall off naturally.
+- Filter spam/bot traffic before counting — trending lists are a manipulation target.
+
+<Callout type="warn">
+Don't promise exact global top-K in real time over a huge key space. Say what you trade: approximate fast-path numbers for display, exact numbers from the batch path for anything that's billed or audited.
+</Callout>
+
+## 6. What real systems do today
+
+- **Redis** ships approximate structures in Redis Stack / Redis 8: `TOPK.*` (a HeavyKeeper-based top-K) and `CMS.*` (count-min sketch), so the "sketch + heap" can live server-side.
+- Stream processors (**Apache Flink**, Kafka Streams) are the usual home for windowed aggregation with event-time windows and watermarks for late events.
+- Twitter/X has described trends as detecting *spikes* relative to a baseline rather than raw volume, plus filtering and personalization by location.
+
+## 7. Scaling & failure
+
+- **Hot item** (one viral video) overloads its partition → pre-aggregate on the producer or in a first stage keyed by `(item, random salt)`, then sum in a second stage.
+- **Worker crash** → state is checkpointed (Flink checkpoints) and replayed from Kafka offsets; at worst the fast path is briefly stale.
+- **Late events** → event-time windows with a watermark; events later than the allowed lateness go only to the batch path.
+- **Top-K API read load** → results are tiny; cache in Redis/CDN with a TTL equal to the refresh interval.
+
+## Interview follow-ups
+
+- *"Why not just a hash map?"* — Memory grows with distinct keys and doesn't fit one machine at this ingest rate; sketch memory is fixed.
+- *"Count-min sketch overestimates — is that a problem?"* — Error is bounded by width; for trending it's fine. For billing use the exact batch path.
+- *"How do you merge top-K from many partitions correctly?"* — Partition by item so each item's full count is in one place; then merging local top-Ks is exact. If you partition randomly instead, you'd have to merge counts, not lists.
+- *"How do you do 'last 24 hours' cheaply?"* — Bucketed windows (e.g. 1-minute or 1-hour buckets) merged at query time.
+- *"Trending vs popular?"* — Ratio over a baseline with smoothing and a minimum volume.
+
+Further reading: Cormode & Muthukrishnan, "An Improved Data Stream Summary: The Count-Min Sketch and its Applications" (2005) · Metwally et al., "Efficient Computation of Frequent and Top-k Elements in Data Streams" (Space-Saving, 2005) · Redis documentation for Top-K and Count-min sketch.

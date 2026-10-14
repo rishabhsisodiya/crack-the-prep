@@ -87,7 +87,7 @@ export const TRACKS: Track[] = [
     slug: 'system-design',
     roadmap: 'fullstack',
     title: 'System Design',
-    blurb: 'A framework, the building blocks, and worked problems with diagrams.',
+    blurb: 'A framework, the building blocks, 40+ worked HLD problems with diagrams, and frontend system design.',
     badge: '▤',
   },
   {

@@ -1,0 +1,101 @@
+---
+title: "System Design — Nested Comments (Reddit)"
+track: "system-design"
+kind: "notes"
+order: 52
+slug: "nested-comments"
+updated: 2026-10-14
+description: "Designing threaded comments — storing trees (adjacency list vs materialized path vs closure table), loading a thread in one query, ranking with votes and 'best' sort, collapsing deep threads, and hot threads."
+---
+
+import Callout from '../../components/Callout.astro';
+import Mermaid from '../../components/Mermaid.astro';
+
+Part of the [system design](/prep/system-design) series. This is a **delta page**: the feed of posts is covered by [News Feed](/prep/system-design/news-feed) and vote counts by [Distributed Counter](/prep/system-design/distributed-counter). This page is about the comment tree itself.
+
+## 1. Requirements
+
+**Functional**
+- Comment on a post; reply to any comment, arbitrarily deep.
+- Upvote/downvote comments; sort a thread by best, top, new, controversial.
+- Load a thread showing the top ~200 comments, collapsing deep or low-score branches ("load more replies", "continue this thread").
+- Edit and delete (deleted comments with replies stay as "[deleted]" placeholders so the tree doesn't break).
+
+**Non-functional**
+- Viral posts get 50k+ comments and thousands of new comments/minute.
+- Reading a thread must be fast — one or two queries, not one per level.
+- Vote counts and ordering can lag by seconds.
+
+## 2. Key design decision — storing the tree
+
+| Model | Schema | Read a subtree | Insert | Notes |
+|---|---|---|---|---|
+| Adjacency list | `parent_id` on each comment | Recursive query (`WITH RECURSIVE`) or one query per level | O(1) | Simplest; fine with recursive CTEs or when loading the whole thread by `post_id` |
+| Materialized path | `path = '0001.0007.0003'` | `WHERE path LIKE '0001.0007.%'` — one indexed range scan | O(1) (path of parent + own id) | Great for reads and sort-by-tree; moving subtrees is hard (never needed for comments) |
+| Closure table | `(ancestor, descendant, depth)` rows | Join on ancestor | O(depth) rows per insert | Flexible, more storage |
+| Nested sets | `left`/`right` numbers | Range query | Rewrites many rows | Bad for write-heavy trees — avoid |
+
+**Practical answer**: store `post_id`, `parent_id`, `depth` and a materialized `path` on each comment. Every comment of a post is fetched with **one query by `post_id`** (indexed), and the tree is assembled in memory in the application — even 50k comments is a few MB, and you only render a slice. The path gives cheap subtree loads for "load more replies".
+
+```sql
+CREATE TABLE comments (
+  id         BIGINT PRIMARY KEY,
+  post_id    BIGINT NOT NULL,
+  parent_id  BIGINT,            -- NULL for top-level
+  path       TEXT NOT NULL,     -- zero-padded ids, e.g. '000123.000456'
+  depth      INT NOT NULL,
+  author_id  BIGINT NOT NULL,
+  body       TEXT,
+  score      INT NOT NULL DEFAULT 0,
+  created_at TIMESTAMPTZ NOT NULL,
+  deleted    BOOLEAN NOT NULL DEFAULT false
+);
+CREATE INDEX ON comments (post_id, path);
+```
+
+## 3. Ranking within the tree
+
+Siblings are sorted among themselves; children always stay under their parent.
+
+- **Top**: upvotes − downvotes. Simple but early comments win forever.
+- **New**: `created_at`.
+- **Best** (Reddit's default for years): the **lower bound of the Wilson score confidence interval** on the upvote ratio. A comment with 10 up / 0 down ranks above one with 100 up / 40 down, but a comment with 1 up / 0 down doesn't jump to the top on tiny evidence.
+- **Hot** for posts (not comments) mixes score with age so the front page turns over.
+
+<Callout type="tip">
+"Sort by average rating is wrong, sort by net score is wrong — use the Wilson lower bound" is a well-known, crisp answer. Mention it when the interviewer asks how to rank comments.
+</Callout>
+
+## 4. Serving a thread
+
+<Mermaid caption="Thread reads come from a per-post cached tree; writes go to the DB and update the cache" code={`flowchart LR
+  U[Reader] --> TS[Thread service]
+  TS --> TC[(Cache: precomputed thread<br/>top N per sort, per post)]
+  TC -. miss .-> DB[(Comments DB<br/>partitioned by post_id)]
+  W[Writer] --> CS[Comment service]
+  CS --> DB
+  CS --> EV[(Events)]
+  EV --> TB[Thread builder<br/>re-sort, refresh cache]
+  TB --> TC
+  V[Votes] --> VC[Vote counter<br/>batched]
+  VC --> DB
+`} />
+
+- **Partition comments by `post_id`** so one thread lives on one shard.
+- **Cache the rendered tree per post and sort order** (top ~200 comments with collapsed stubs), rebuilt asynchronously when new comments or vote batches arrive — debounced to at most every few seconds on hot posts.
+- **Pagination of a tree**: send the first K top-level comments with their best few replies down to depth ~5; the rest become "load more (n replies)" and "continue this thread" links that fetch a subtree by path.
+- **Votes** are counted with the batched-counter approach and update `score` periodically, not on every click.
+
+## 5. Hot threads
+
+A breaking-news post receiving thousands of comments per minute: writes all hit one partition (fine for a well-provisioned shard, a few thousand inserts/s), but re-sorting the whole tree on every comment is not. Debounce rebuilds, show "new comments" in a separate stream for live readers, and let readers see slightly stale ordering.
+
+## Interview follow-ups
+
+- *"How do you load a 3-level-deep thread efficiently?"* — Fetch all comments for the post (or a path range) in one indexed query; build the tree in memory.
+- *"Adjacency list vs materialized path?"* — Adjacency is simplest and enough if you always load by `post_id`; materialized path adds cheap subtree reads.
+- *"How do you delete a comment with replies?"* — Soft delete; keep the node as "[deleted]" so children stay attached.
+- *"How should comments be ranked?"* — Wilson score lower bound for "best"; time-decayed score for "hot".
+- *"Thread has 50k comments."* — Cached top slice, collapsed branches, lazy subtree loads.
+
+Further reading: Evan Miller, "How Not To Sort By Average Rating" (Wilson score lower bound) · PostgreSQL documentation on recursive queries (`WITH RECURSIVE`) and the `ltree` extension for materialized paths · Bill Karwin, *SQL Antipatterns*, chapter "Naive Trees".

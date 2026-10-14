@@ -1,0 +1,107 @@
+---
+title: "System Design — Live Streaming & Video Calls (Twitch / Zoom)"
+track: "system-design"
+kind: "notes"
+order: 45
+slug: "live-streaming"
+updated: 2026-10-14
+description: "Designing live video — one-to-many broadcast (RTMP ingest, real-time transcoding, HLS/LL-HLS over CDN) versus many-to-many calls (WebRTC, SFU vs MCU vs mesh, simulcast), latency tiers, live chat, and failure handling."
+---
+
+import Callout from '../../components/Callout.astro';
+import Mermaid from '../../components/Mermaid.astro';
+
+Part of the [system design](/prep/system-design) series. See the [framework](/prep/system-design) and [building blocks](/prep/system-design/building-blocks) first if you haven't. Read [Video Streaming (YouTube)](/prep/system-design/video-streaming-youtube) first — this page covers what changes when the video is live.
+
+## 1. Clarify which problem it is
+
+"Design live video" hides two different systems. Ask first.
+
+| | Live broadcast (Twitch, YouTube Live, IPL streaming) | Real-time calls (Zoom, Google Meet) |
+|---|---|---|
+| Shape | One (or few) to many — up to millions of viewers | Many to many — 2 to a few hundred participants |
+| Latency target | 2–30 s is acceptable; ~2–5 s for "low latency" | Under ~150–300 ms mouth-to-ear, or conversation breaks |
+| Transport | RTMP/SRT/WebRTC ingest → HLS/DASH over HTTP + CDN | WebRTC (UDP, SRTP) end to end via media servers |
+| Scales by | CDN caching identical segments | More media servers; each stream forwarded individually |
+
+## 2. Live broadcast
+
+**Requirements**: streamer goes live; viewers watch with adaptive quality; chat alongside; recording becomes a VOD afterwards. Scale: 100k concurrent channels, the top channel at 2M+ viewers.
+
+<Mermaid caption="Broadcast path — ingest once, transcode once, fan out via CDN" code={`flowchart LR
+  ST[Streamer: OBS] -->|RTMP / SRT / WHIP| ING[Ingest edge<br/>nearest PoP]
+  ING --> TR[Live transcoder<br/>1080p, 720p, 480p, 160p]
+  TR --> PK[Packager<br/>HLS / LL-HLS segments + playlists]
+  PK --> ORG[(Origin storage)]
+  ORG --> CDN[CDN edges]
+  CDN --> V1[Viewers]
+  PK --> REC[(Recording to object store<br/>for VOD)]
+`} />
+
+1. **Ingest**: the streamer's encoder pushes one high-quality stream (usually RTMP, increasingly SRT or WebRTC/WHIP) to the nearest ingest PoP. Authenticate with a per-channel stream key.
+2. **Transcode in real time** into an ABR ladder (several resolutions/bitrates). This is the expensive step: GPU or dedicated hardware encoders, and you must keep up with real time — a transcoder that falls behind adds latency forever. Small channels may get only the source quality to save cost.
+3. **Package** into short segments (2–6 s, or ~200 ms "parts" for Low-Latency HLS) and a playlist that is constantly appended.
+4. **Distribute via CDN**. Every viewer of a channel requests the *same* segment URLs, so the CDN collapses them: a million viewers might mean only a handful of requests per segment to origin (request coalescing). This is why HTTP delivery scales to millions while WebRTC fan-out does not.
+
+**Latency budget**: encode buffer + segment duration × number of segments the player buffers (typically 3) + CDN. 6-second segments × 3 ≈ 20 s. Low latency comes from shorter segments/parts, chunked transfer, and smaller player buffers — at the cost of more rebuffering on bad networks.
+
+<Callout type="tip">
+The fan-out insight is the core of the answer: **broadcast scales because every viewer watches the identical bytes, which a CDN caches**. Calls can't do this — each participant needs a different mix at sub-second latency, so they need media servers, not caches.
+</Callout>
+
+**Live chat** is a separate system: a pub/sub per channel (WebSocket gateways subscribed to a channel topic). For a 2M-viewer channel, don't deliver every message to everyone — sample or rate-limit the visible stream, batch messages every ~100–200 ms, and run moderation (bans, slow mode, filters) before fan-out. See [Chat System](/prep/system-design/chat-system).
+
+## 3. Video calls
+
+**Requirements**: join a room; send and receive audio/video; screen share; mute; up to ~100 video participants plus large view-only audiences; work across bad networks and firewalls.
+
+**WebRTC** handles the media: peers exchange session descriptions (SDP) through **your signaling server** (WebSocket), find a network path via **ICE** using **STUN** (discover public address) and **TURN** (relay when direct paths are blocked — a real cost line item), then send encrypted media (SRTP) over UDP.
+
+**Topology is the key design decision:**
+
+| Topology | How | Upload per client | Server cost | Good for |
+|---|---|---|---|---|
+| Mesh (P2P) | Everyone sends to everyone | N − 1 streams | None | 2–4 people |
+| MCU | Server decodes all, mixes one composite, re-encodes | 1 stream | Very high (transcoding) | Legacy devices, dial-in |
+| SFU | Server forwards packets without decoding | 1 stream (or 3 with simulcast) | Low (forwarding) | Almost everything today |
+
+<Mermaid caption="SFU with simulcast — each sender uploads 3 qualities, the SFU forwards the right one to each receiver" code={`flowchart LR
+  A[Alice] -->|high, mid, low| SFU[SFU media server]
+  B[Bob] -->|high, mid, low| SFU
+  SFU -->|Alice high: active speaker| C[Carol on fast wifi]
+  SFU -->|Alice low: thumbnail| D[Dan on 3G]
+  SFU -->|Bob mid| C
+  SFU -->|Bob low| D
+  SIG[Signaling service] -.-> A
+  SIG -.-> B
+`} />
+
+- **Simulcast / SVC**: senders encode several qualities; the SFU picks per receiver based on bandwidth estimates and layout (active speaker gets high, thumbnails get low). No server-side transcoding.
+- **Large meetings**: cascade SFUs across regions (participants connect to the nearest SFU; SFUs forward between each other). Only forward the video of visible tiles and the top few active speakers' audio.
+- **Webinars** with 10k viewers: speakers on the SFU; viewers either via a tree of SFUs or by converting to the broadcast path (HLS) and accepting more latency.
+- **Recording**: a bot participant joins the room and records/mixes server-side.
+
+## 4. What real systems do today
+
+- **Twitch** runs its own ingest PoPs globally and a large transcoding fleet; it has written about routing ingest to the best origin and its move toward lower-latency delivery.
+- **Low-Latency HLS** (Apple) and **LL-DASH/CMAF** chunked delivery are the standard ways to get broadcast latency down to a few seconds over CDNs.
+- **WHIP/WHEP** are the IETF standards for WebRTC-based ingest and playback, used for sub-second broadcast.
+- Popular open-source SFUs include **mediasoup**, **Janus**, **Jitsi Videobridge** and **LiveKit**; Zoom and Google Meet run proprietary SFU-style architectures with simulcast/SVC.
+
+## 5. Scaling & failure
+
+- **Ingest server dies** → the encoder reconnects to another ingest node (DNS/anycast); viewers see a short stall. Keep player buffers able to bridge a few seconds.
+- **Transcoder falls behind real time** → drop the top rendition first, then lower ones; alert on encoder lag.
+- **CDN edge overload on a mega-event** → multi-CDN with traffic steering; pre-warm edges for scheduled events (cricket finals).
+- **SFU dies mid-call** → clients detect via ICE/WebSocket timeout and rejoin through signaling to another SFU; room state lives outside the SFU (Redis) so rejoin is fast.
+- **Bad network on a call** → congestion control lowers bitrate; SFU switches the receiver to a lower simulcast layer; audio is always prioritized over video.
+
+## Interview follow-ups
+
+- *"Why not WebRTC for a 2M-viewer stream?"* — Each viewer needs its own connection and packet forwarding; no CDN caching. HTTP segments scale through caches.
+- *"How do you get broadcast latency from 20 s to 3 s?"* — LL-HLS/CMAF parts, chunked transfer, smaller player buffer, faster ingest; accept more rebuffering risk.
+- *"SFU vs MCU?"* — SFU forwards without decoding (cheap, flexible layouts); MCU mixes (expensive, one stream to clients).
+- *"Why do you need TURN?"* — Symmetric NATs and corporate firewalls block direct UDP; TURN relays media, costing bandwidth.
+- *"200-person meeting on a weak laptop?"* — Only render and receive visible tiles at low quality, active speakers at high, audio from the loudest few.
+
+Further reading: Apple developer documentation on Low-Latency HLS · IETF RFCs for WHIP (RFC 9725) and WebRTC overview (RFC 8825) · webrtcforthecurious.com (open book on WebRTC internals) · Twitch engineering blog posts on ingest and transcoding.

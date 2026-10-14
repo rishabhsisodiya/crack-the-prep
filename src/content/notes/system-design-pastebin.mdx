@@ -1,0 +1,73 @@
+---
+title: "System Design — Pastebin"
+track: "system-design"
+kind: "notes"
+order: 50
+slug: "pastebin"
+updated: 2026-10-14
+description: "Designing Pastebin — what it reuses from the URL shortener, and the three things that differ: content in blob storage, expiry, and abuse/privacy controls."
+---
+
+import Callout from '../../components/Callout.astro';
+import Mermaid from '../../components/Mermaid.astro';
+
+Part of the [system design](/prep/system-design) series. This is a **delta page**: Pastebin is the [URL Shortener](/prep/system-design/url-shortener) with a content payload attached. Read that first — key generation, the read-heavy caching strategy and the 301/302 discussion all carry over. This page covers only what's different.
+
+## 1. Requirements
+
+**Functional**
+- Create a paste (text, up to ~10 MB), get a short URL. Optional: syntax language, title, expiry (10 min / 1 day / never), visibility (public / unlisted / private), password, burn-after-read.
+- View raw or highlighted; owners can delete.
+
+**Non-functional**
+- Read-heavy (~10:1 or more); popular pastes go viral (hot keys).
+- Pastes are immutable once created — a huge simplification for caching.
+- Scale assumption: ~1M new pastes/day, average ~10 KB → ~10 GB/day, ~3.5 TB/year before compression.
+
+## 2. What's the same as the URL shortener
+
+- **Key generation**: random base62 IDs (7–8 chars) or a pre-generated key pool. Unlisted pastes rely on the key being unguessable, so use **random**, not sequential, ids here — sequential ids let anyone enumerate every paste.
+- **Read path**: CDN + cache in front of a key-value lookup; immutable content caches perfectly.
+- **Metadata store**: a simple key-value / document store keyed by paste id.
+
+## 3. What's different
+
+**1. Content goes in blob storage, not the database.**
+
+<Mermaid caption="Metadata in a KV store, content in object storage, served through the CDN" code={`flowchart LR
+  U[User] --> API[Paste API]
+  API --> META[(Metadata KV<br/>id, owner, expiry, visibility, blob key)]
+  API --> OBJ[(Object storage<br/>compressed paste body)]
+  V[Viewer] --> CDN[CDN]
+  CDN --> RD[Read service]
+  RD --> META
+  RD --> OBJ
+  EXP[Expiry cleaner] --> META
+  EXP --> OBJ
+`} />
+
+Metadata rows stay tiny and fast; bodies up to 10 MB live in S3-style storage (compressed — text compresses roughly 3–5×). Small pastes (under a few KB) can be inlined in the metadata row to save a round trip; that's an optimization, not the default.
+
+**2. Expiry.**
+- Store `expires_at`. The read path **checks it on every read** and returns 404 if expired — correctness doesn't depend on cleanup timing.
+- Cleanup is lazy plus a background sweeper that deletes expired metadata and blobs, or use built-in TTLs (DynamoDB TTL, S3 lifecycle rules by prefix such as `expires/2026-10-15/`).
+- CDN cache TTL must be ≤ the remaining paste lifetime, and deletes/burn-after-read need a CDN purge — or simply don't CDN-cache pastes that expire soon or are private.
+- **Burn after read**: an atomic "read and delete" (conditional delete on the metadata row); the first reader wins, and the response is marked uncacheable.
+
+**3. Privacy and abuse.**
+- Private pastes require auth and are never CDN-cached publicly; password-protected pastes store a password hash, and can optionally be client-side encrypted (the key lives in the URL fragment, which browsers never send to the server — the PrivateBin approach).
+- Pastebins are used to dump leaked credentials and malware configs: rate-limit creation, scan public pastes for secrets/malware asynchronously, and support takedown requests.
+
+<Callout type="tip">
+In an interview, say "this is the URL shortener plus three deltas" early. It shows you recognize the pattern, and frees time to go deep on the parts that are actually different.
+</Callout>
+
+## Interview follow-ups
+
+- *"Why not store the text in the database?"* — Large variable-size blobs bloat the DB and its cache; object storage is cheaper and CDN-friendly.
+- *"Sequential or random ids?"* — Random, because unlisted pastes rely on unguessable URLs.
+- *"How does expiry work if the cleaner is late?"* — The read path checks `expires_at`; cleanup is just garbage collection.
+- *"A paste goes viral."* — Immutable content: long CDN TTL, cache in front of metadata.
+- *"Burn after read with two simultaneous readers?"* — Atomic conditional delete; only one succeeds.
+
+Further reading: AWS documentation on S3 Lifecycle rules and DynamoDB TTL · PrivateBin documentation on client-side (zero-knowledge) encryption.

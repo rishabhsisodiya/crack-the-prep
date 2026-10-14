@@ -1,0 +1,108 @@
+---
+title: "Frontend System Design — Chat App UI"
+track: "system-design"
+kind: "notes"
+order: 56
+slug: "frontend-chat-app"
+updated: 2026-10-14
+description: "Designing a chat client (WhatsApp Web / Slack / Messenger) — WebSocket lifecycle and reconnection, optimistic sending with client ids, ordering and dedupe, gap sync after reconnect, reverse infinite scroll, unread state, multiple tabs, and offline."
+---
+
+import Callout from '../../components/Callout.astro';
+import Mermaid from '../../components/Mermaid.astro';
+
+Part of the [system design](/prep/system-design) series. Uses the [frontend framework](/prep/system-design/frontend-system-design). The server side is [Chat System](/prep/system-design/chat-system).
+
+## 1. Requirements
+
+**Functional**
+- Conversation list with last message, unread count, presence; open a conversation and read history.
+- Send text and attachments; see sent/delivered/read status; typing indicators.
+- Receive messages in real time in the open conversation and update the list for others.
+
+**Non-functional**
+- Messages appear instantly when sent and are **never silently lost**, even across disconnects.
+- Correct order, no duplicates.
+- Long histories scroll smoothly; works on flaky mobile networks; multiple tabs open at once.
+
+## 2. Architecture
+
+<Mermaid caption="One connection manager per app feeds a normalized message store; an outbox handles sending" code={`flowchart TD
+  UI[ConversationList / MessageThread / Composer] --> ST[(Client store<br/>conversations, messages by id)]
+  ST --> UI
+  UI -->|send| OB[Outbox<br/>pending messages, IndexedDB]
+  OB --> CM[Connection manager<br/>WebSocket, heartbeat, reconnect]
+  CM -->|events: message, ack, receipt, typing| ST
+  CM --> WS[Chat gateway]
+  SYNC[Sync service: fetch since cursor] --> ST
+  SYNC --> API[REST: history, gaps]
+`} />
+
+- **One WebSocket** per app (not per conversation), managed by a connection manager outside React components. Components subscribe to the store, not the socket.
+- **REST for history and catch-up**, WebSocket for live events.
+
+## 3. Data model
+
+```ts
+type Message = {
+  id: string | null;        // server id, null until acknowledged
+  clientId: string;         // generated on the device (UUID), stable across retries
+  conversationId: string;
+  senderId: string;
+  body: string;
+  seq: number | null;       // server-assigned per-conversation sequence
+  createdAt: string;
+  status: 'pending' | 'sent' | 'delivered' | 'read' | 'failed';
+};
+type Conversation = { id: string; lastSeq: number; lastReadSeq: number; unread: number; draft: string };
+```
+
+Messages are stored by `clientId` and sorted by `seq` (falling back to local time for pending ones at the bottom).
+
+## 4. Deep dive — sending, ordering and dedupe
+
+1. User hits Send → create a message with a new `clientId`, status `pending`, render it immediately at the bottom (optimistic), and write it to the **outbox** (persisted in IndexedDB so a refresh doesn't lose it).
+2. Send over the socket including `clientId`. The server stores it idempotently by `clientId` and replies with an **ack** containing the server `id` and `seq`.
+3. On ack → update the message in place (status `sent`, assign `seq`). On timeout → retry with the same `clientId`; the server dedupes. After repeated failure → `failed` with a "Retry" action.
+4. Incoming messages from others carry `seq`; merge into the store by id, so a message delivered twice (socket plus sync) appears once.
+
+<Callout type="tip">
+The client-generated id is the heart of a good answer: it makes optimistic rendering, retries and server-side dedupe all work together. Without it, a retry after a lost ack creates a duplicate message.
+</Callout>
+
+## 5. Deep dive — connection lifecycle and gap sync
+
+- **Heartbeats** (ping every ~25–30 s) detect dead connections that the browser hasn't noticed.
+- **Reconnect with exponential backoff and jitter**; reconnect immediately on `online` and `visibilitychange` events. Show a subtle "Connecting…" state, not an error.
+- **Gap sync after reconnect**: messages sent while disconnected never arrived over the socket. For each conversation (or globally), the client sends its last known `seq`/cursor; the server returns everything after it via REST. The per-conversation `seq` also lets the client detect gaps during normal operation (got seq 41 after 38 → fetch 39–40).
+- **Flush the outbox** after reconnect, in order.
+
+## 6. Message list UX
+
+- **Reverse infinite scroll**: load the latest page first, anchored to the bottom; load older pages when scrolling up, and **preserve the scroll anchor** so content doesn't jump (adjust `scrollTop` by the height added, or use a virtualizer that supports prepending).
+- **Virtualize** long histories; variable heights (attachments, long text) are measured and cached.
+- **Stick to bottom** only if the user is already near the bottom; otherwise show a "↓ 3 new messages" button.
+- **Unread state**: mark read when messages are actually visible (IntersectionObserver) and the tab is focused; send `lastReadSeq` in a debounced batch, not per message.
+- **Typing indicators**: send "typing" at most every few seconds while typing, expire after ~5 s without updates; never persist them.
+- **Attachments**: upload directly to object storage via a pre-signed URL with progress, then send the message referencing the uploaded file; show local preview while uploading.
+
+## 7. Multiple tabs and devices
+
+- Two tabs with two sockets doubles connections and notifications. Options: elect a **leader tab** that owns the socket and shares events via `BroadcastChannel`, or use a `SharedWorker` that holds one connection for all tabs.
+- Read state made in one tab or on the phone arrives as an event and clears badges everywhere.
+- Notifications only when no tab is focused on that conversation; use the Notification API / push with permission requested at a meaningful moment.
+
+## 8. Security and accessibility
+
+- Render message text as text; linkify safely; sanitize any rich formatting; never inject HTML from messages.
+- Message list as a log: `role="log"` with polite announcements for new messages in the open conversation; composer with a label; keyboard shortcuts for jumping between conversations.
+
+## Interview follow-ups
+
+- *"Ack is lost and the client retries — duplicate?"* — No: same `clientId`, server dedupes, client merges by id.
+- *"User was offline for 10 minutes."* — Reconnect with backoff, gap sync from last seq via REST, flush the outbox.
+- *"Loading older messages makes the view jump."* — Preserve the scroll anchor when prepending; virtualizer with prepend support.
+- *"Three tabs open."* — One connection via leader election + BroadcastChannel or a SharedWorker.
+- *"How do you order messages?"* — Server-assigned per-conversation sequence; pending local messages stay at the bottom until acked.
+
+Further reading: MDN documentation on WebSockets, `BroadcastChannel` and `SharedWorker` · WAI-ARIA `log` role · Slack engineering posts on real-time messaging and client architecture.
