@@ -2283,6 +2283,12 @@ element.innerHTML = comment;   // XSS — the script runs
 element.textContent = comment; // safe — shown as plain text
 ```
 
+**Follow-up: does using `textContent` make a user-provided link safe?**
+
+The label and destination need separate handling. Define which URL schemes the application accepts, resolve relative inputs against a trusted base URL, and validate the parsed protocol and, where required, origin before assigning `href`. Include control characters, backslashes, and protocol-relative inputs in your checks. Render the label as text rather than constructing HTML; URL validation is not HTML sanitization.
+
+Practice: [Sanitize href URL — free question and full solution](https://frontendatlas.com/javascript/coding/js-sanitize-href-url).
+
 ### How do you redirect to a new page, and get the current URL?
 
 ```js
