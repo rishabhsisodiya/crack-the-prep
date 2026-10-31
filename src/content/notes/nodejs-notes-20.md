@@ -50,7 +50,7 @@ auth: {
 
 user: "vaibhavmishra.dev@gmail.com",
 
-pass: "pass pass pass pass"
+pass: process.env.SMTP_PASSWORD
 ```
 },
 

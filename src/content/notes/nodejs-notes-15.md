@@ -108,6 +108,6 @@ Now we will need a mongodb URL as the local Url will not work.
 
 Go to mongoDB atlas and create a free cluster. Now get the URL
 
-mongodb+srv://Rishabh:**Rish@123**@blogs.8zdvtmj.mongodb.net/?retryWrites=true&w=majority&appName=blogs
+mongodb+srv://<username>:<password>@<cluster>.mongodb.net/?retryWrites=true&w=majority&appName=blogs
 
 1.  Go to your app, click on configuration on left side, Scroll down to Updates, monitoring and logging and add the env variable![](/notes-img/nodejs-notes/img-016.webp)
