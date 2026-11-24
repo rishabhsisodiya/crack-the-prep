@@ -20,6 +20,7 @@ export default defineConfig({
   redirects: {
     '/machine-coding/map-filter-reduce': `${BASE}/machine-coding/foreach-map-filter`,
     '/dsa/checklist': `${BASE}/dsa/solutions`,
+    '/scenarios/59-scenario-based-interview-questions': `${BASE}/scenarios/scenario-based-interview-questions`,
     '/system-design/scenario-cdc-outbox-monolith': `${BASE}/scenarios/scenario-cdc-outbox-monolith`,
     '/system-design/scenario-customer-360-ingestion': `${BASE}/scenarios/scenario-customer-360-ingestion`,
     '/system-design/scenario-effectively-once-payments': `${BASE}/scenarios/scenario-effectively-once-payments`,
