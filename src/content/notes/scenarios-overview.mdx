@@ -1,0 +1,65 @@
+---
+title: "Scenario-Based Interview Questions"
+track: "scenarios"
+kind: "notes"
+order: 59
+updated: 2026-11-24
+description: "Realistic, numbers-first system design and data engineering scenarios in full interview format: the problem as an interviewer states it, clarifying questions, a complete worked solution with a diagram, a spoken 7-step answer, and mock-interview mode with a scoring rubric."
+---
+
+import Callout from '../../components/Callout.astro';
+
+# Scenario-based interview questions
+
+System design interviews rarely start with "design a URL shortener". They start with a messy, realistic situation — a warehouse sync that keeps breaking, a payments pipeline that must not double-charge, a dashboard that goes stale every night. This section trains exactly that: **20 original practice scenarios**, each written the way an interviewer would state it, with real numbers, real constraints, and a complete worked solution.
+
+Every scenario page follows the same format:
+
+1. **The problem statement** — no solution leaked; read it the way you would in the room.
+2. **Clarifying questions** — what to ask, and why each question matters.
+3. **The solution in plain language first**, then the deep version: architecture diagram, data flow, partitioning, storage, deduplication and idempotency with worked code, retries and checkpointing, monitoring, security, 10x scaling and cost.
+4. **Trade-offs, stated honestly** — including where a design gives at-least-once delivery with exactly-once *effects*, never magic "exactly-once delivery".
+5. **10 follow-up questions with strong answers**, a **spoken 7-step answer** you can rehearse out loud, and **mock-interview mode**: 5 hard follow-ups, common mistakes, senior signals, and a scoring rubric out of 10.
+
+<Callout title="How to practise">
+  Set a timer for 45 minutes. Read only the problem statement, ask the clarifying questions out loud, and design on paper before opening the solution. Then compare against the worked solution, score yourself with the rubric at the bottom of the page, and redo the spoken answer once. One scenario done properly beats five skimmed.
+</Callout>
+
+## Level 1 — Mid-level
+
+Warm-ups that test whether the fundamentals are automatic: batching, freshness, fairness and correctness at modest scale.
+
+- [Nightly retail reporting for 500 stores](/prep/scenarios/scenario-retail-reporting) — daily sales files, late corrections, and dashboards that must be right by 7 AM.
+- [Finance reconciliation that must tie to the paisa](/prep/scenarios/scenario-finance-reconciliation) — two imperfect sources of truth, matched and explained line by line.
+- [The nightly batch that no longer fits its window](/prep/scenarios/scenario-nightly-batch-window) — a 6-hour job in a 4-hour window; parallelise without breaking dependencies.
+- [One tenant is drowning the shared platform](/prep/scenarios/scenario-multi-tenant-throttling) — noisy neighbours, quotas, and fairness that does not punish everyone else.
+
+## Level 2 — Senior
+
+The core set: streaming ingestion, sync under rate limits, hot partitions, CDC, search and data-lake hygiene.
+
+- [Distributed telemetry ingestion at 100K events/sec](/prep/scenarios/scenario-telemetry-ingestion) — device fleets, offline replay, duplicates, sub-30s alerting plus a warehouse.
+- [Syncing 2,000 stores through a rate-limited API](/prep/scenarios/scenario-rate-limited-api-sync) — a third-party API with strict quotas, expiring tokens and partial failures.
+- [Customer 360 from five disagreeing sources](/prep/scenarios/scenario-customer-360-ingestion) — identity resolution and golden records from CRM, billing, support and events.
+- [The hot partition: one key takes 20x traffic](/prep/scenarios/scenario-hot-partition-flash-events) — a celebrity-key spike that melts one shard while the rest idle.
+- [CDC out of a monolith that cannot change](/prep/scenarios/scenario-cdc-outbox-monolith) — the transactional outbox pattern, ordering, and consumers that fall behind.
+- [Log analytics over 2 TB a day](/prep/scenarios/scenario-log-analytics-pipeline) — hot/cold tiers, query latency budgets, and retention that finance will sign off.
+- [Search indexing that keeps up with writes](/prep/scenarios/scenario-search-indexing-pipeline) — near-real-time indexing, relevance safety nets, and reindexing without downtime.
+- [The small-files problem in the data lake](/prep/scenarios/scenario-small-files-lake) — millions of tiny files, compaction, and metadata that stops lying.
+- [Inventory sync when two systems both think they won](/prep/scenarios/scenario-inventory-sync-conflicts) — overselling, conflict resolution, and why last-write-wins loses money.
+
+## Level 3 — Lead / Architect
+
+Judgement rounds: money movement, disaster recovery, privacy law, and the guarantees you must state precisely.
+
+- [Effectively-once payments over an unreliable network](/prep/scenarios/scenario-effectively-once-payments) — idempotency keys, dedup windows, and exactly-once *effects*, honestly stated.
+- [An 8 TB backfill and CDC into a lakehouse](/prep/scenarios/scenario-lakehouse-etl) — snapshot plus change stream, schema evolution, and a cutover nobody notices.
+- [Real-time fraud scoring in under 100 ms](/prep/scenarios/scenario-realtime-fraud-detection) — feature freshness, model serving, and what happens when the model is down.
+- [Multi-region disaster recovery with RPO 0](/prep/scenarios/scenario-multi-region-dr) — synchronous replication costs, failover drills, and split-brain.
+- [Joining orders and payments streams that arrive out of order](/prep/scenarios/scenario-stream-join-fulfilment) — event-time joins, watermarks, and late data that still has to count.
+- [GDPR erasure across backups, lakes and streams](/prep/scenarios/scenario-gdpr-erasure) — deleting one person from systems designed to never delete.
+- [The metrics cardinality explosion](/prep/scenarios/scenario-metrics-cardinality) — a label that took down observability, and the governance that prevents the sequel.
+
+<Callout title="Original practice scenarios">
+  Every scenario in this section is an original practice question written for interview preparation. They are realistic composites of problems engineers meet in production — they are not questions taken from any specific company's interview loop.
+</Callout>

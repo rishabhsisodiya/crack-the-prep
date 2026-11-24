@@ -91,6 +91,13 @@ export const TRACKS: Track[] = [
     badge: '▤',
   },
   {
+    slug: 'scenarios',
+    roadmap: 'fullstack',
+    title: 'Scenario Questions',
+    blurb: 'Realistic, numbers-first system design and data engineering scenarios in full interview format — problem, clarifying questions, complete solution, diagram, spoken answer and a mock-interview rubric.',
+    badge: '◧',
+  },
+  {
     slug: 'lld',
     roadmap: 'fullstack',
     title: 'Low-Level Design',
