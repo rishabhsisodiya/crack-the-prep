@@ -1,0 +1,138 @@
+{
+  "meta": {
+    "title": "News Feed \u2014 Hybrid Fan-Out",
+    "output": ".archify/build/guide/news-feed.html",
+    "quality_profile": "showcase"
+  },
+  "components": [
+    {
+      "id": "author",
+      "type": "external",
+      "label": "User Posts",
+      "sublabel": "creates a post"
+    },
+    {
+      "id": "postsvc",
+      "type": "backend",
+      "label": "Post Service",
+      "sublabel": "write path"
+    },
+    {
+      "id": "postsdb",
+      "type": "database",
+      "label": "Posts DB",
+      "sublabel": "posts by author"
+    },
+    {
+      "id": "celeb",
+      "type": "backend",
+      "label": "Celebrity Check",
+      "sublabel": "author a celebrity?"
+    },
+    {
+      "id": "fanout",
+      "type": "backend",
+      "label": "Fan-Out Worker",
+      "sublabel": "push to followers"
+    },
+    {
+      "id": "feedcache",
+      "type": "database",
+      "label": "Redis",
+      "sublabel": "feed per follower \u00b7 ~800 cap"
+    },
+    {
+      "id": "reader",
+      "type": "external",
+      "label": "User Opens Feed",
+      "sublabel": "read path"
+    },
+    {
+      "id": "feedsvc",
+      "type": "backend",
+      "label": "Feed Service",
+      "sublabel": "merge + paginate"
+    }
+  ],
+  "connections": [
+    {
+      "id": "a-p",
+      "from": "author",
+      "to": "postsvc",
+      "label": "create post"
+    },
+    {
+      "id": "p-db",
+      "from": "postsvc",
+      "to": "postsdb",
+      "label": "store post"
+    },
+    {
+      "id": "p-c",
+      "from": "postsvc",
+      "to": "celeb"
+    },
+    {
+      "id": "c-f",
+      "from": "celeb",
+      "to": "fanout",
+      "label": "no: normal author"
+    },
+    {
+      "id": "f-r",
+      "from": "fanout",
+      "to": "feedcache",
+      "label": "append post id"
+    },
+    {
+      "id": "r-fs",
+      "from": "reader",
+      "to": "feedsvc",
+      "label": "open feed"
+    },
+    {
+      "id": "fs-r",
+      "from": "feedsvc",
+      "to": "feedcache",
+      "label": "read pushed feed"
+    },
+    {
+      "id": "fs-db",
+      "from": "feedsvc",
+      "to": "postsdb",
+      "label": "yes: merge celebrity posts",
+      "variant": "dashed"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Push for most",
+      "items": [
+        "Normal posts fan out on write into each follower's Redis feed",
+        "Reads become a cheap range read over a precomputed list"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Pull for celebrities",
+      "items": [
+        "A 50M-follower post would explode naive fan-out \u2014 so it is skipped",
+        "Feed service merges celebrity posts from the Posts DB at read time"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Trade-off",
+      "items": [
+        "Fan-out is async: posts appear within seconds, not instantly",
+        "Hybrid caps write cost while keeping the common read fast"
+      ]
+    }
+  ],
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "layout": {
+    "mode": "auto"
+  }
+}

@@ -1,0 +1,288 @@
+---
+title: "Scenario — Multi-Region Event Pipeline: RPO 0, RTO 15 Minutes"
+track: "system-design"
+kind: "notes"
+order: 68
+slug: "scenario-multi-region-dr"
+updated: 2026-11-24
+description: "A scenario-based interview problem: an event pipeline across two regions with RPO 0 and RTO 15 minutes — what RPO 0 really costs, cross-region replication lag, dedup across regions, MirrorMaker 2 offset translation, fencing against split-brain, and active-active vs active-passive."
+---
+
+import Callout from '../../components/Callout.astro';
+import ArchDiagram from '../../components/ArchDiagram.astro';
+
+Part of the [system design](/prep/system-design) series. This is a **scenario** page: you get the problem the way an interviewer would state it, then a full worked solution. **Level 3 — Lead / Architect.**
+
+> **Original practice scenario** — written for interview preparation; not a question from any specific company's interview.
+
+## 1. The problem statement
+
+Here is how the interviewer puts it. Read it the way you would in the room — nothing in this section is the solution.
+
+> "We run an event pipeline — orders, payments and account events — at about **60,000 events per second**, today in a single cloud region. The business has signed contracts that require the pipeline to survive the **complete loss of that region** — not a server, not a zone, the whole region — while it is mid-stream.
+>
+> The contract language says: **RPO 0** — we may not lose a single acknowledged event — and **RTO 15 minutes** — the pipeline must be fully processing again in the surviving region within 15 minutes of the failure. We will operate in **two regions**; a third region is not in the budget.
+>
+> There are also customers whose data contractually must remain within their home geography. Design the multi-region pipeline, the failover, and how you would prove — before a real failure does it for you — that the RPO and RTO numbers are real."
+
+**Functional requirements**
+
+- Ingest and process events at ~60K events/sec, with producers and consumers in two regions.
+- Survive total loss of one region mid-stream with no acknowledged event lost (RPO 0, as defined and interrogated below).
+- Resume full processing in the surviving region within 15 minutes of the failure (RTO 15 min).
+- Process each event's effect once, even if the event was in flight, replicated, or processed around the failover boundary.
+- Respect data-residency constraints: some customers' events may never leave their home geography.
+- Provide a rehearsed, executable failover procedure — not a wiki page nobody has run.
+
+**Non-functional requirements**
+
+- Failover must not create split-brain: the two regions must never both act as primary for the same stream at the same time.
+- Replication lag between regions must be continuously measured and alertable — an RPO claim you cannot measure is a hope.
+- The design's cost must be stated honestly against the alternative the business did not pick.
+- Failover must be testable in production-like conditions on a schedule (game days), without customer impact.
+- Degraded operation during failover is acceptable inside the RTO window; silent data loss or double effects are not, at any time.
+
+## 2. Clarifying questions to ask first
+
+Ask these before drawing anything. Each one changes the design.
+
+| Question | Why it matters |
+|---|---|
+| RPO 0 for *acknowledged* events only — or must an event be durable in two regions before we may acknowledge it? | This is the whole design. Synchronous cross-region durability before ack is true RPO 0 and costs latency on every event plus availability coupling (if the link dies, do we stop acking?). "Ack locally, replicate fast" is RPO ≈ replication lag, whatever the contract calls it. |
+| When the inter-region link fails but both regions are alive, which side keeps accepting writes? | That answer defines your split-brain exposure and your fencing design. "Both" is how the same event gets two different effects. |
+| Is RTO measured from failure, from detection, or from the human decision to fail over? | Detection can take minutes; a human decision loop can take longer than the whole RTO. If RTO is 15 minutes from failure, detection and the decision must be automated or pre-authorised. |
+| Which events are residency-pinned, and may their *metadata* (IDs, dedup keys) cross regions even if payloads cannot? | Pinned streams may be excluded from replication entirely — which means their honest RPO/RTO story is different, and the contract needs to say so. |
+| Do consumers need to resume where they left off, or can they reprocess a window? | Resume-where-left-off requires offset translation across clusters (MirrorMaker 2's checkpointing). Reprocessing a bounded window is simpler and safe *if* processing is idempotent — which it must be anyway. |
+| Is the second region warm — consumers deployed, state replicated — or cold infrastructure we provision during the incident? | Cold provisioning cannot meet a 15-minute RTO once you add deployment, state catch-up and traffic shifting. RTO 15 implies warm standby at minimum. |
+| What does "fully processing" mean at RTO — 100% of normal throughput, or critical streams first? | A tiered recovery (payments and orders first, analytics later) is achievable inside 15 minutes; everything-at-once may not be. The contract's definition decides the runbook's order. |
+
+<Callout type="tip">
+The single highest-value clarification here is what RPO 0 actually means at the acknowledgement boundary. Push on it politely and precisely: "If I ack an event in region A one millisecond before the region dies, is that event in region B?" Whatever the interviewer answers, you have just defined the replication mode, the latency budget, and the availability trade-off — the three things this entire design turns on.
+</Callout>
+
+## 3. The solution, in plain language first
+
+The simple version: run one primary region that does the processing, keep the second region continuously fed with a replicated copy of every event and every consumer position, and make the standby warm enough to take over in minutes. Replication is asynchronous — because synchronous cross-region writes on every event would put a region-to-region round trip on the critical path of all 60K events/sec and would force you to stop accepting events whenever the link hiccups — so you are honest about what that means: acknowledged-but-not-yet-replicated events are the RPO exposure, and you shrink it (fast replication, lag measured in well under a second in steady state, synchronous replication reserved for the small class of events that truly need it) rather than pretend it is zero. Failover is a rehearsed sequence — detect, decide, fence the old primary so it can never process again, shift traffic, resume consumers at translated offsets — and deduplication on the event ID is what makes the messy boundary safe, because events near the failover *will* be processed twice and must have their effect once.
+
+Why a primary/standby shape instead of both regions fully active? Because with two regions and an RPO-0-flavoured contract, the thing you are really buying is one unambiguous writer per stream. Active-active is a legitimate design — section 13 prices it honestly — but it pays for its elegance with conflict handling, global ordering loss, and a split-brain surface that has to be engineered away stream by stream.
+
+## 4. Architecture
+
+<ArchDiagram src="scenario-multi-region-dr/architecture" caption="Multi-region event pipeline architecture: MirrorMaker 2 replicates topics and consumer offsets to a warm standby region, with global dedup and fencing for failover" />
+
+**Component by component**
+
+- **Producers (both regions).** Applications and services produce to their *local* region's ingestion endpoint under normal operation — region A's producers to A; region B hosts mainly standby capacity plus any residency-pinned local streams. Every event is stamped at creation with a globally unique `event_id`, its origin region, and a per-source sequence number. That stamp is what makes cross-region dedup and gap detection possible later.
+- **Global traffic manager.** DNS/anycast-level routing with health checks. In steady state it sends ingestion traffic to the primary; during failover it is the lever that shifts producers and consumers to the surviving region. Its health signals feed — but do not by themselves trigger — the failover decision.
+- **Ingestion (per region).** Stateless validate-and-produce services, identical in both regions. Region B's instance is deployed and running (warm), but *fenced* for primary-owned streams: it will not accept primary traffic until promotion, which is a deliberate act, not an accident of load balancing.
+- **Kafka — Region A (primary).** The source of truth in steady state: source topics, replication factor 3 across availability zones, `min.insync.replicas=2`. Producers get their ack from this cluster.
+- **MirrorMaker 2 (MM2).** Kafka's cross-cluster replication. It mirrors A's topics into B as replica topics and — the part that matters for RTO — continuously translates and checkpoints consumer-group offsets, so consumers in B know where their A counterparts had read up to. MM2 runs in both directions in the full design (B→A replication is configured and idle-ready) so that failing *back* later is also a procedure, not a project.
+- **Kafka — Region B (standby).** Holds the replica topics, kept within a fraction of a second of A in steady state, plus B's own residency-pinned local topics, which are never replicated out.
+- **Stream processing.** Runs active in A, deployed and warm in B with its state stores checkpointed and its inputs being the replica topics. On promotion it resumes consuming in B from MM2-translated offsets. It is idempotent by construction (section 9), because resume points across clusters are approximate by nature.
+- **Global dedup store.** The registry of processed `event_id`s. Regional copies with cross-region replication of the *keys* (small) even where payloads are residency-pinned and cannot move. This store is what stands between a failover-boundary replay and a double charge.
+- **Storage and warehouse.** Replicated object storage / warehouse loads fed from the active region's stream; residency-pinned data stays in its home region's storage, and reporting that spans regions is explicit about which data it may include.
+- **Monitoring and the runbook.** Replication lag (in seconds, per topic), offset-translation freshness, region health, and the failover runbook itself — automated steps with named human decision points, versioned like code, executed in game days.
+
+## 5. End-to-end data flow
+
+**Steady state**
+
+1. A producer sends an event to region A's ingestion endpoint; ingestion validates it and produces to A's Kafka, keyed by entity ID. The producer is acked when A durably stores it (RF3, min ISR 2 — *within* the region).
+2. MM2 replicates the event to B's replica topic, typically within a few hundred milliseconds. MM2 also checkpoints A's consumer offsets, translated into B's offset space, on a short interval.
+3. A's stream processors consume, check the dedup store, apply effects (writes, downstream events), and checkpoint state and offsets together.
+4. Residency-pinned streams follow the same flow entirely inside their home region and are excluded from MM2 replication by topic policy.
+
+**Failover (region A lost mid-stream)**
+
+5. Detection: health checks and producer/consumer error signals converge — target under 2 minutes. The on-call (or automation, pre-authorised for clear-cut region loss) declares the failover. The RTO clock the contract cares about started at the failure, not at the declaration — which is why detection and decision are engineered, not improvised.
+6. Fencing: before B is promoted, A is fenced — traffic manager withdraws A's endpoints, and B's consumers/processors start under a new *fencing epoch* (a monotonically increasing failover generation number recorded in a small, strongly consistent control store). Any A component that later resurfaces finds its epoch stale and must refuse to process. This step is what makes "A comes back as a zombie" a non-event.
+7. Promotion and traffic shift: B's ingestion is unfenced for the failed-over streams, the traffic manager shifts producers to B, and B's stream processors start consuming the replica topics from the MM2-translated offsets.
+8. Boundary processing: events replicated but not yet processed in A are processed now in B. Events processed in A but whose offsets had not yet checkpointed into B are processed *again* in B — and dedup on `event_id` makes that safe. Events acked in A but not yet replicated when A died are the RPO exposure: in steady state this window is the replication lag (sub-second, a few thousand events at most), and section 14 is honest about it rather than hiding it.
+9. Steady state in B: processing is fully resumed — the RTO target is met when critical streams are at full rate, with the runbook's tier order deciding what "full" means minute by minute. Reconciliation (counts per source-sequence range, A-side records vs B-side effects) runs as soon as any A data is recoverable, and is scheduled regardless as part of incident closure.
+
+## 6. Technology choices, and why
+
+| Decision | Choice | Why | Alternative considered |
+|---|---|---|---|
+| Replication | Kafka MirrorMaker 2, asynchronous | Built for exactly this: topic replication plus consumer offset translation and checkpoint topics; no producer code changes | Synchronous cross-region produce (dual-write from producers) — puts WAN latency and the second region's health on every ack, and dual-writes diverge exactly when a region is dying |
+| Topology | Active-passive (warm standby) | One writer per stream: no write conflicts, ordering preserved, failover is a promotion, not a merge | Active-active — priced honestly in section 13; rejected here on conflict-handling and split-brain cost for an RPO-0-flavoured contract |
+| The truly-RPO-0 subset | Synchronous replication for a small, named event class only (e.g. payment authorisations) | Buys real zero-loss where the contract value is highest, at a latency cost paid by a tiny fraction of traffic | Synchronous for everything — every event pays a cross-region round trip and ingestion availability becomes the *product* of both regions' availability |
+| Offset continuity | MM2 checkpoint/offset translation + idempotent consumers | Consumers resume near where they stopped instead of from the beginning or the end | Manual offset bookkeeping — the first thing to be wrong at 3 a.m. in a real failover |
+| Fencing | Epoch/generation token in a strongly consistent control store (e.g. etcd/ZooKeeper-class, or the cloud's consensus-backed config store) | A stale primary must be *unable* to act, not merely *asked not to* — tokens make the check mechanical at every write | DNS-only failover — DNS does not stop a partitioned-but-alive region A from continuing to process |
+| Traffic shifting | Global traffic manager with health-based routing | Producer/consumer redirection in minutes, independent of the regions themselves | Client-side failover lists — every client fleet must be updated and behaves differently; un-auditable in an incident |
+
+**Batch vs streaming.** The pipeline is streaming; replication and failover are streaming concerns. Batch enters in two places. First, *verification*: a scheduled batch reconciliation compares per-source sequence counts and effect counts between regions, so replication gaps are found by a job on a Tuesday, not by a customer during a failure. Second, *recovery support*: after a failover, batch backfill/replay from whichever copy of the raw archive survives is how any residual gap is closed and proven closed. Streaming meets the RTO; batch is how you demonstrate the RPO.
+
+## 7. Partitioning and parallelism
+
+- Within each region, topics are partitioned by entity key as usual — per-entity ordering is a *regional* property, and the design does not pretend otherwise: there is no global ordering across regions, and any consumer needing global order is asking for a single-writer design with the latency that implies.
+- MM2 replication preserves partitioning: A's partition *n* maps to B's replica partition *n*, which is what makes offset translation meaningful. Partition counts must match across the pair — so partition planning is a cross-region decision, made once, changed rarely and carefully.
+- Parallelism in B must be provisioned to match A *before* it is needed: consumer group sizes, processor parallelism and state-store capacity in the standby are part of the warm-standby cost. A standby that can only run at 30% of primary throughput has an RTO measured in "whenever it catches up", not 15 minutes.
+- Residency-pinned topics are partitioned and processed wholly in-region; they are excluded from replication by policy enforced at the MM2 configuration level (topic allowlists), not by developer convention.
+- During failover, parallelism is also the catch-up mechanism: B's consumers start behind by the replication-plus-checkpoint gap, and spare consumer capacity (headroom above steady state) is what burns that backlog down inside the RTO window.
+
+## 8. Storage strategy
+
+- **Kafka, both regions:** source topics in A with days of retention; replica topics in B with at least as much. Retention is failover insurance: it is what lets B's consumers resume from translated offsets rather than from a snapshot and a prayer, and what lets a *returning* region A be reconciled instead of discarded.
+- **Stream state:** checkpointed state stores in the active region; in B, processors warm-start from checkpoints plus the replica topics. State that cannot be rebuilt from the log plus checkpoints does not belong in the failover path.
+- **Dedup store:** the `event_id` registry is small per event (an ID, a timestamp, an outcome) but huge in aggregate at 60K/sec — retain it for the maximum credible replay/failover window (days), partitioned by source, with TTLs matched to the reconciliation schedule. Its cross-region replication carries keys and outcomes only, which is also what makes it usable for residency-pinned streams whose payloads cannot move.
+- **Archive and warehouse:** raw events archived to object storage in each region (with cross-region replication only where residency allows); the warehouse is loaded from the active region, and after a failover the load source switches with the same epoch discipline as everything else — two loaders writing the same tables is a split-brain too.
+- **Control data** (epochs, failover state, runbook status): tiny, and held in the most strongly consistent store in the design. Everything else can be eventually consistent; the answer to "who is primary?" cannot be.
+
+## 9. Deduplication and idempotency, with a worked example
+
+Failover guarantees duplicates. Not "may produce": *guarantees*. MM2's offset checkpoints are periodic, so B resumes from a point *at or before* where A's consumers actually stopped; everything between the last translated checkpoint and A's final processed event is processed twice — once in each region. Add producer retries during the traffic shift and consumer restarts in B, and the only sane posture is the usual one, applied across regions: delivery is **at-least-once**, and every effect is idempotent on a globally unique `event_id` assigned by the original producer, in the origin region, at creation — never reassigned by ingestion, replication or failover.
+
+Each event carries `{ event_id, origin_region, source_id, source_seq }`. Processing maintains a state per event — `SEEN → APPLIED` — in the dedup store, and effects are applied with conditional writes:
+
+```sql
+-- Global dedup claim: exactly one processor, in one region, wins this event.
+INSERT INTO processed_events (event_id, origin_region, source_id, source_seq, state, applied_by_region)
+VALUES ($1, $2, $3, $4, 'APPLIED', $5)
+ON CONFLICT (event_id) DO NOTHING
+RETURNING event_id;
+-- No row returned = this event's effect already exists (possibly applied in the
+-- other region before failover). Skip the effect; still advance your offset.
+```
+
+```python
+# Consumer, identical code in both regions. Epoch check first, dedup second.
+def on_event(event, epoch_store, dedup_db, sink):
+    if epoch_store.current_epoch() != MY_EPOCH:   # we have been fenced
+        raise FencedError("stale primary: refusing to process")
+    claimed = dedup_db.claim(event.event_id, region=MY_REGION)  # SQL above
+    if not claimed:
+        metrics.inc("duplicate_across_regions")
+        commit_offset(event.offset)               # safe to move on
+        return
+    apply_effect(event, sink)                     # idempotent downstream write,
+                                                  # keyed by event_id as well
+    commit_offset(event.offset)                   # only after the effect is durable
+```
+
+**Worked example.** Event `E` (a payment) is produced to A at 14:00:00.100 and acked. MM2 replicates it to B at 14:00:00.450. A's processor applies it at 14:00:00.600 and claims `E` in the dedup store; the claim replicates to B's copy of the store a moment later. MM2's last offset checkpoint, however, was taken at 14:00:00.300 — before `E` was consumed. A dies at 14:00:01. On promotion, B's consumer resumes from the translated checkpoint and meets `E` again. The epoch check passes (B is the legitimate new primary), the dedup claim fails — `E` is already `APPLIED` — and B skips the effect and advances. The payment happened once, the consumer made progress, and nobody had to know or care which region did the work. The mirror-image case matters just as much: if A had applied `E` but the *claim* had not replicated before A died, B would apply the effect a second time — which is why downstream writes are *also* idempotent on `event_id` (unique constraints in the sink), making the dedup store an optimisation and the sink constraint the guarantee. Defence in depth is not a slogan here; it is the design.
+
+## 10. Retry, failure handling, checkpointing and recovery
+
+- **The failover runbook** (each step timed against the 15-minute RTO; rehearsed, section 11): **(1) Detect** — multi-signal region-loss declaration, target ≤2 min; a single flaky health check never triggers it. **(2) Decide** — pre-authorised automation for unambiguous region loss; a named human for ambiguous cases, with the clock math stated in the runbook (a 10-minute debate is a failed RTO). **(3) Fence** — epoch increment, traffic withdrawal from A. **(4) Promote** — unfence B's ingestion and processors for the affected streams. **(5) Shift** — traffic manager moves producers/consumers to B. **(6) Resume** — consumers start at MM2-translated offsets; catch-up rate and lag age are watched until steady. **(7) Verify** — invariant checks and reconciliation queued; incident stays open until they pass.
+- **Checkpointing:** stream processors checkpoint state + offsets together in-region; MM2 checkpoints consumer offsets cross-region on a short interval. The gap between those two rhythms *is* the duplicate window, and it is sized deliberately (seconds), not discovered during an incident.
+- **Producer behaviour during the shift:** producers retry against the traffic manager with backoff and jitter, carrying the same `event_id`; events produced to a dying A and never acked are the producer's to resend to B — the ack contract (section 2) is what makes that the producer's job rather than the pipeline's loss.
+- **Failback is a separate, planned procedure** — never an automatic snap-back. A returning A is reconciled first (its unreplicated tail and dedup state compared against B), then either re-synced as standby or promoted in a scheduled window. Automatic failback is how one failure becomes two.
+- **Partial failures:** a single zone loss is absorbed inside the region (RF3 across zones) and must *not* trigger a regional failover — the runbook's detection step exists largely to keep "degraded" and "dead" from being confused, because a needless failover spends the RTO budget and creates a failback problem for nothing.
+- **Poison events and DLQs** behave as in any single-region design, per region, with DLQ contents replicated like everything else — an event that was poison in A is not retried from scratch in B.
+
+## 11. Monitoring and observability
+
+- **Replication lag, in seconds, per topic** — the single most important metric in the design. It is the live, honest value of "RPO right now". Alert well before it threatens anything: lag above a few seconds pages the platform team in peacetime, because lag discovered during a failover is loss discovered too late.
+- **Offset-translation freshness:** age of MM2's latest consumer-offset checkpoint per group. RTO math depends on it; if it is stale, consumers resume from ancient history and catch-up eats the window.
+- **Dedup and duplicate rates:** a spike in `duplicate_across_regions` outside a failover means replication or producer behaviour has changed — worth knowing on a normal day.
+- **Region health and fencing state:** current epoch, current primary per stream, last failover/failback — displayed on one dashboard an executive could read.
+- **Game days:** scheduled, production-like failover exercises — kill a region's pipeline in a controlled window (or in a full staging twin, plus periodic real drills off-peak), executing the actual runbook with the actual on-call. Measure detection, decision, promotion and catch-up times against the RTO budget and publish the results internally. A runbook that has never been run is a hypothesis; the game day is also where you learn that B's consumer capacity, DNS TTLs, or a client's hardcoded endpoint quietly break the 15 minutes.
+- **Synthetic probes:** continuous canary events injected per region and timed end-to-end, so "the pipeline works" is measured from outside, per region, at all times — including the standby's ability to process when promoted.
+
+## 12. Security
+
+- **Data residency is a security and legal control, enforced mechanically:** MM2 topic allowlists exclude pinned topics; storage replication policies mirror the same exclusions; the dedup store replicates keys and outcomes only, and even that is reviewed per jurisdiction — where metadata may not cross either, that stream's dedup is region-local and its failover story is documented as different.
+- **Cross-region traffic** is encrypted in transit (TLS on replication and control paths) and at rest in both regions; keys are region-scoped, so compromise of one region's key material does not decrypt the other's stored data.
+- **Failover is an attack surface:** promotion and fencing actions require strong, audited operator authentication — an attacker who can trigger a failover (or block one) owns your availability. Runbook automation credentials are scoped to exactly the failover actions.
+- **Access control survives failover:** IAM and consumer/producer credentials are pre-provisioned in B with the same policies as A. A standby that nobody can authenticate to at minute 3 of an incident is a cold standby wearing a warm standby's budget.
+- Audit logging is dual-region for control-plane actions (epoch changes, promotions), so the post-incident timeline is reconstructable even if one region's logs are lost with it.
+
+## 13. Scalability, the 10x question, and cost
+
+**At 10x (600K events/sec):** replication bandwidth becomes a first-class design constraint — every event crosses the inter-region link once (plus dedup and control traffic), so link capacity and its cost scale linearly with traffic, and compression and payload discipline stop being optimisations. Lag under load is the RPO risk: replication must be provisioned with headroom above peak produce rate, or lag — and therefore potential loss — grows exactly when traffic is most valuable. Partition counts, MM2 task counts and B's consumer capacity all scale together; the topology does not change.
+
+**Cost, honestly — active-passive vs active-active:**
+
+| | Active-passive (this design) | Active-active |
+|---|---|---|
+| Steady-state compute | Primary at full capacity; standby warm at near-full readiness (this is not cheap — warm means deployed, stateful and sized) | Both regions at full capacity, each carrying ~half the traffic |
+| Data cost | One cross-region replication stream | Replication in both directions, plus conflict-resolution traffic |
+| Engineering cost | Failover machinery: fencing, offset translation, runbook, game days | All of that, *plus* per-stream conflict semantics, global dedup on the hot path for everything, and no clean "primary" answer during partitions |
+| What you get | RTO minutes; RPO ≈ lag for most traffic, true 0 only for the synchronously replicated subset | No failover event for region loss (traffic just shifts); both regions earn their keep daily |
+| What you risk | The failover itself is the dangerous moment; standby capacity is idle spend until the day it saves you | Split-brain and write conflicts are everyday engineering, not incident-day engineering |
+
+The honest summary: active-passive with a *warm* standby costs roughly 1.6–1.9x the single-region bill once standby capacity, replication and game-day operations are counted — anyone quoting "just add a second region" at 1.1x is describing a cold standby that cannot meet this RTO. Active-active typically costs more in engineering and ongoing complexity than it saves in infrastructure at this scale, and it does not make RPO 0 easier — it makes the *definition* of a lost event harder. It wins when both regions have genuine local users and latency requirements, which this scenario's clarifying questions did not establish.
+
+## 14. Trade-offs, stated honestly
+
+| Choice | You gain | You pay |
+|---|---|---|
+| Asynchronous replication | No WAN latency on the ack path; ingestion survives link failures | RPO is "replication lag at the moment of failure", not zero, for async traffic — the contract language must be matched to this reality or changed |
+| Synchronous replication for a small subset | True RPO 0 where it matters most | That subset pays cross-region latency per event and stalls when the link or peer region degrades |
+| Active-passive, one writer per stream | No write conflicts, preserved ordering, a promotion instead of a merge | Standby spend; the failover moment concentrates all the risk the design has |
+| Warm standby | RTO 15 minutes is achievable | You pay near-primary cost for capacity that normally processes nothing |
+| Fencing by epoch | A resurrected region cannot act as primary | A control store and epoch checks on the processing path — one more thing that must itself be highly available |
+
+<Callout type="warn">
+Say this sentence in the interview: "This design does not deliver exactly-once delivery — no design over a network that retries can, and a failover makes retries certain. It delivers at-least-once delivery with idempotent processing and unique-constraint effects, which gives exactly-once *effects* in either region. And I will not claim RPO 0 for asynchronously replicated traffic: RPO 0 is bought, per event class, with synchronous replication and its latency — or it is not bought at all."
+</Callout>
+
+**Delivery semantics, precisely.** At-most-once would drop events at every retry boundary — indefensible for orders and payments. At-least-once plus cross-region dedup and idempotent sinks is the working combination: duplicates are guaranteed by the failover mechanics and rendered harmless by the processing design. "Exactly-once" in Kafka/Flink refers to exactly-once *state updates within one cluster's checkpoints and transactional sinks* — it does not span two clusters, a replication link and a region failure, and claiming it does in a DR design is the fastest way to lose a lead-level interviewer. The same precision applies to RPO: RPO is a property of the replication mode per event class at the moment of failure, measured by lag — not a property of the diagram.
+
+## 15. Interviewer follow-up Q&As
+
+1. **"Region A dies. Walk me through the first 15 minutes."** — Detection by converging health signals (≤2 min), pre-authorised declaration, epoch increment fencing A, B promoted and unfenced, traffic manager shifts producers, B's consumers resume at MM2-translated offsets, catch-up watched by lag age, critical streams first per the runbook's tier order, verification and reconciliation queued. Each step is timed, rehearsed and owned — that rehearsal is the difference between an RTO and a wish.
+2. **"So is your RPO actually 0? Yes or no."** — For the synchronously replicated class: yes, by construction — no ack until both regions hold the event. For the asynchronous majority: no — it is the replication lag at failure time, sub-second in steady state and continuously measured. If the contract truly requires zero for everything, the design changes to synchronous replication throughout and the business accepts the latency and the availability coupling. Hiding the distinction helps nobody.
+3. **"The regions are partitioned from each other, but both are alive. What happens?"** — A keeps serving as primary (it holds the current epoch); B does not promote on link loss alone — promotion requires the failover decision plus fencing, and B cannot fence A across a partition, so B waits or escalates to a human with the epoch store's state as evidence. The design chooses availability of the primary and safety against dual-primary over B's impatience: split-brain is worse than a replication pause.
+4. **"How do consumers resume in B without reprocessing everything or skipping data?"** — MM2 continuously translates A's consumer offsets into B's offset space via its checkpoint topics. B resumes from the latest translated offset — slightly behind A's true position, deliberately: the overlap is reprocessed and dedup absorbs it. Skipping is the unforgivable direction; reprocessing is merely a cost.
+5. **"The same event was processed in both regions before anyone noticed. What breaks?"** — Nothing, if the design held: the dedup claim lets one region win, and the sink's unique constraint on `event_id` makes the second application a no-op even if the claim raced. What breaks in lesser designs is the downstream effect — a double charge, a double shipment — which is why idempotency lives at the sink, not only in the stream layer.
+6. **"Why not active-active and skip failover entirely?"** — It is a real option and section 13 prices it. For this contract it trades a rehearsed, bounded failover problem for permanent conflict semantics on every stream, harder RPO definitions, and a split-brain surface that exists every day rather than on failure day. If both regions had local users demanding local latency, the answer could flip — the deciding input is the workload, not fashion.
+7. **"How do you test RTO 15 without gambling the business?"** — Game days on a schedule: full runbook execution against a staging twin for the dangerous steps, plus controlled real drills (promote a non-critical stream's primary to B in an off-peak window and back). Every drill produces timings per runbook step; a step that overruns in rehearsal is fixed in rehearsal. Synthetic canary events verify the standby can actually process, continuously, not just on drill day.
+8. **"A customer's data may not leave the EU. Your dedup store replicates globally. Problem?"** — It would be, which is why the dedup store replicates keys and outcomes only and is reviewed per jurisdiction; where even metadata is pinned, that stream's dedup stays in-region, it is excluded from cross-region failover, and its contract states a region-local DR story (zone-level resilience, backups) instead of pretending the global one applies.
+9. **"Region A comes back an hour later. What happens automatically?"** — Deliberately little. A rejoins fenced: its epoch is stale, its processors refuse to run, and it re-syncs as the new standby — MM2 replication direction and offset state are re-established — while reconciliation compares A's unreplicated tail against B's effects. Promotion back to A, if wanted at all, is a scheduled runbook execution, not a reflex.
+10. **"Where does this design fail even if everything works as built?"** — Correlated failure: both regions share a control plane, a bad global config push, or a poison event stream that replicates faithfully to both. Multi-region protects against losing a region; it does not protect against a bad change deployed everywhere at once — that needs progressive rollout and the batch reconciliation safety net, and a lead-level answer says so unprompted.
+
+## 16. Interview-ready spoken answer
+
+> "First, the requirements I'd pin down: 60K events a second, two regions, total region loss mid-stream, RPO 0 and RTO 15 minutes in the contract. The clarification that drives everything is what RPO 0 means at the ack boundary — must an event be durable in both regions before I acknowledge it? I'll design for the honest split: synchronous replication for the small class that truly needs zero loss, asynchronous for the rest, with the lag measured and stated, because pretending async replication is RPO 0 is how companies discover their contract was fiction.
+>
+> The architecture is active-passive with a warm standby. Region A is primary: producers write locally, Kafka stores with replication factor 3, and MirrorMaker 2 continuously replicates topics to region B — and, just as importantly, translates consumer offsets, so B knows where A's consumers had read to. B's ingestion, processors and dedup store are deployed, sized and warm.
+>
+> The failover flow is a rehearsed runbook, not an improvisation: detect with converging signals inside two minutes, make the pre-authorised decision, fence A by incrementing a failover epoch so a resurrected A can never process again, promote B, shift traffic at the global traffic manager, and resume B's consumers at the translated offsets — critical streams first, all inside the 15 minutes.
+>
+> On reliability and duplicates: failover guarantees reprocessing, because B resumes at or behind A's true position. So delivery is at-least-once and every effect is idempotent — a global event ID claimed in the dedup store, and unique constraints at the sinks as the final guarantee — giving exactly-once effects across regions, never a claim of exactly-once delivery.
+>
+> Scaling is mostly about the replication link and keeping lag near zero under peak load, since lag at the moment of failure *is* the RPO for async traffic. Standby capacity is provisioned to full rate in advance; you cannot provision your way to a 15-minute RTO during the incident.
+>
+> The trade-offs I'd state plainly: warm standby costs close to a second deployment; active-active would remove the failover moment but buys permanent conflict handling and a harder RPO story; and synchronous-everything buys true RPO 0 at the price of WAN latency on every event and availability coupled across regions. My recommendation is the hybrid, with the contract language matched to what each event class actually gets."
+
+## 17. Mock interview mode
+
+**Five hard follow-ups, with expected answers**
+
+1. **"Your replication lag is normally 300ms. During the peak hour before the failure it was 40 seconds. What was your real RPO, and whose fault is that?"** — Expected: the real RPO was 40 seconds of acknowledged events — that is the definition, and the design either provisioned replication with peak headroom or accepted the exposure knowingly. Lag alerting should have paged long before a failure made it permanent. The candidate who says "RPO 0, as designed" has failed the scenario's central test.
+2. **"Convince me split-brain cannot happen."** — Expected: "cannot" is earned mechanically, not rhetorically — single-writer per stream, promotion gated on an epoch increment in a strongly consistent control store, processors checking epoch before applying effects, and a partitioned B unable to fence A and therefore unable to promote automatically. Plus the honest tail: a human can always force a bad promotion, which is why the action is authenticated, audited and rehearsed.
+3. **"MM2's offset checkpoint is 30 seconds stale at failover. Quantify the damage."** — Expected: up to 30 seconds of consumption per group is replayed in B — at 60K/sec that is up to ~1.8M events reprocessed, all absorbed by dedup, with catch-up time governed by B's spare consumer capacity. The damage is minutes of catch-up inside the RTO budget, not correctness — and the checkpoint interval is a tunable traded against MM2 overhead.
+4. **"The business says active-active sounds better. Argue against yourself."** — Expected: a genuine steelman first (no failover event, both regions earning, local latency) — then the costs that decide it here: per-stream conflict semantics, global ordering gone, dedup on the hot path for all traffic, split-brain as a daily property, and RPO 0 becoming harder to define, not easier. The recommendation can change if the workload changes; the analysis should not.
+5. **"Your game day fails: B takes 31 minutes to reach full rate. What do you change?"** — Expected: decompose the 31 minutes by runbook step from the drill's timings — the usual culprits are DNS/TTL-bound traffic shifting, B's consumers under-provisioned, state stores cold, or the decision step waiting on a human. Fix the specific step (pre-warmed state, lower TTLs set in advance, pre-authorised automation), then re-run the drill. "Try harder next time" is not an answer; the drill existing at all is the senior signal.
+
+**Common candidate mistakes**
+
+- Writing "RPO 0" on the diagram while designing asynchronous replication, and never noticing the contradiction.
+- A failover plan with no fencing — DNS flips, old primary keeps processing, two primaries write.
+- Forgetting consumer position: replicating the data but not the offsets, so B either reprocesses a week or skips an hour.
+- Cold or undersized standby paired with a 15-minute RTO.
+- No game days: the runbook's first execution is the real incident.
+- Ignoring residency until the end, then discovering the replication design is illegal for a third of the traffic.
+
+**What a senior candidate mentions unprompted**
+
+- RPO as a per-class, measured property (lag), with synchronous replication scoped deliberately.
+- Fencing epochs and the zombie-primary case.
+- Offset translation (MirrorMaker 2 checkpoints) as the RTO-critical feature, not just topic copying.
+- Failback as a separate planned procedure; no automatic snap-back.
+- The cost table: warm standby honestly priced against active-active.
+- Correlated-failure limits: multi-region does not save you from a bad global deploy.
+
+**Scoring rubric (out of 10)**
+
+| Score | What it looks like |
+|---|---|
+| 9–10 | RPO interrogated and split by class, fencing + epoch design, offset translation and duplicate-boundary handling correct, runbook timed and game-day tested, active-active priced honestly, delivery semantics stated precisely |
+| 7–8 | Sound active-passive design with MM2 and dedup, but RPO language loose or failback/fencing underdeveloped |
+| 5–6 | "Replicate to a second region and fail over" with components named, but no offset story, no split-brain answer, no drill plan |
+| 3–4 | Cold standby with a 15-minute RTO claim, or active-active proposed with no conflict story |
+| 0–2 | Claims exactly-once delivery across regions, or RPO 0 via asynchronous replication with no lag discussion |
+
+Sources: [Apache Kafka documentation — MirrorMaker 2 cross-cluster replication and offset translation](https://kafka.apache.org/documentation/) · [KIP-382: MirrorMaker 2.0](https://cwiki.apache.org/confluence/display/KAFKA/KIP-382%3A+MirrorMaker+2.0) · [AWS Architecture Blog — disaster recovery strategies and RPO/RTO](https://aws.amazon.com/blogs/architecture/tag/disaster-recovery/)

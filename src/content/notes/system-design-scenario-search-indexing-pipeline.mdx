@@ -1,0 +1,284 @@
+---
+title: "Scenario — Keeping a Search Index Fresh in Near-Real-Time"
+track: "system-design"
+kind: "notes"
+order: 75
+slug: "scenario-search-indexing-pipeline"
+updated: 2026-11-24
+description: "A scenario-based interview problem: keep a 50M-product search index fresh — price and stock changes searchable in under a minute, bulk reindex without downtime via alias swap, partial failures, and the freshness vs completeness trade-off."
+---
+
+import Callout from '../../components/Callout.astro';
+import ArchDiagram from '../../components/ArchDiagram.astro';
+
+Part of the [system design](/prep/system-design) series. This is a **scenario** page: you get the problem the way an interviewer would state it, then a full worked solution. **Level 2 — Senior engineer.**
+
+> **Original practice scenario** — written for interview preparation; not a question from any specific company's interview.
+
+## 1. The problem statement
+
+Here is how the interviewer puts it. Read it the way you would in the room — nothing in this section is the solution.
+
+> "We run an e-commerce catalogue of about **50 million products**. The catalogue database is the source of truth — titles, descriptions, categories, prices, stock levels, seller information. Shoppers don't query that database directly; they search an index, and that index has to stay fresh.
+>
+> Here is the part people care about: when a **price drops or an item goes out of stock**, that change must be reflected in search results in **under a minute**. Nobody wants to click a result that says 'in stock, ₹999' and land on a page that says 'out of stock, ₹1,299'. Sellers update products constantly — bulk price files, stock feeds from warehouses, individual edits — so changes arrive all day, in bursts.
+>
+> Sometimes we need to **rebuild the whole index** — a new analyser, a new ranking field, a mapping change. Fifty million documents. That rebuild cannot take search down, and it cannot serve a half-built index either.
+>
+> And things fail in the middle. A batch of updates partially succeeds. A worker dies halfway through a file of 100,000 price changes. The system has to recover without losing changes and without applying the same change twice in a way that corrupts the result.
+>
+> Design the indexing pipeline."
+
+**Functional requirements**
+
+- Keep a search index of ~50M products in sync with the catalogue database.
+- Price and stock changes searchable in under 60 seconds, end to end.
+- Support bulk updates (seller files, warehouse stock feeds) as well as single-product edits.
+- Full reindex of all 50M documents with zero search downtime.
+- Recover from partial failures without losing a change or corrupting a document.
+
+**Non-functional requirements**
+
+- No silent loss: every committed catalogue change eventually reaches the index.
+- No stale-overwrite: an older change must never overwrite a newer one, even if it arrives later.
+- Search stays up during reindex, deploys and worker failures.
+- Freshness is measurable: at any moment you can say how far behind the index is.
+- Cost matters: you cannot reindex 50M documents for every price change.
+
+## 2. Clarifying questions to ask first
+
+Ask these before drawing anything. Each one changes the design.
+
+| Question | Why it matters |
+|---|---|
+| Is the catalogue database the only source of changes, or do sellers and warehouses write through other paths too? | Every write path must feed the pipeline. A feed that bypasses it is a permanent source of index drift. |
+| Does every product change carry a version or a monotonically increasing timestamp? | This is the foundation of the whole design. A version per product is how you drop duplicates and reject stale updates that arrive out of order. If it doesn't exist, adding one is step one. |
+| What does "searchable in under a minute" include — from database commit, or from the seller clicking save? | The honest SLA starts at source commit. It decides how much queueing and batching you can afford along the way. |
+| How many changes per second at peak — and how big are the bulk bursts? | Steady trickle vs. a 100K-row price file every hour are different systems. Bursts decide the buffer and the bulk-indexing batch size. |
+| Which fields actually change fast? Is it only price and stock, or titles and descriptions too? | If only price/stock are hot, you can consider a fast path for them. If everything changes, one uniform pipeline is simpler and safer. |
+| When a product is deleted or unpublished, how fast must it disappear from search? | Deletes are changes too, and the embarrassing failure mode — a deleted product still selling — usually comes from treating deletes as an afterthought. |
+| Is a few seconds of "new price, old stock" inconsistency inside one document acceptable? | It decides whether a document must be updated atomically as a whole, or whether partial field updates are tolerable. Search documents are normally updated whole. |
+
+<Callout type="tip">
+The single highest-value clarification here is the per-product version. Almost every hard part of this problem — duplicates, out-of-order delivery, partial retries — becomes tractable the moment each change carries `product_id + version`, and painful when it does not. Say that out loud.
+</Callout>
+
+## 3. The solution, in plain language first
+
+The simple version: the catalogue database never talks to the search index directly. Every change is captured as an event, put on a durable log (Kafka), and a fleet of indexing workers reads the log, builds search documents, and writes them into the index in bulk. Each event carries the product's version, so a duplicate or a late, stale event is recognised and dropped instead of overwriting newer data.
+
+A full reindex is a separate, slower road to the same destination: build a brand-new index next to the live one, verify it, then flip a pointer — an alias — so searches move to the new index in one atomic step. The old index is deleted only after the new one has proven itself.
+
+Why a log in the middle? Because bursts, retries and worker crashes are normal here, and a log absorbs all three: it buffers the burst, it replays after a crash, and it lets indexing fall behind for a minute without losing anything. That is the whole trick. Everything else is details about ordering and versions.
+
+## 4. Architecture
+
+<ArchDiagram src="scenario-search-indexing-pipeline/architecture" caption="Search indexing pipeline architecture: catalogue changes through CDC and Kafka to version-checked indexing workers and a blue/green search cluster" />
+
+**Component by component**
+
+- **Catalogue database (PostgreSQL).** The source of truth for all 50M products. Every row carries a `version` that increments on every change, and an `updated_at`. Nothing reads search data from here; nothing writes index data from here directly.
+- **Seller and price feeds.** Bulk price files and warehouse stock feeds. They do not write to the index — they write to the catalogue (or to an outbox in it), so there is exactly one source of change events.
+- **CDC capture (Debezium + outbox).** Tails the database write-ahead log and publishes one change event per product change: `{ product_id, version, changed_fields or full row, op }`. Log-based capture means no polling queries against production and no missed deletes.
+- **Kafka.** The durable, replayable buffer. Partition by `product_id`, so all changes for one product stay in order on one partition. Retention of a few days — enough to replay after an indexing bug.
+- **Indexing workers.** Stateless consumers that enrich a change (join category names, compute ranking fields, tokenise text), build the full search document, and write to the cluster in bulk requests — hundreds of documents per request, not one round-trip per product.
+- **Dedup + version check.** Before writing, a worker compares the event's version with the last applied version for that product. Newer: apply. Equal: duplicate, drop. Older: stale, drop. This is what makes retries and replays harmless.
+- **Search cluster (OpenSearch / Elasticsearch).** Holds the live index behind an alias. During a reindex it holds two indices — blue (live) and green (building) — and the alias points at exactly one of them.
+- **Alias manager.** The small, careful piece that flips the alias atomically after a reindex passes verification, and flips it back if the new index misbehaves.
+- **Search API.** Queries only ever go through the alias, never to a named index, so a swap is invisible to callers.
+- **Dead-letter topic + monitoring.** Documents that fail repeatedly (bad data, mapping conflicts) are parked with the error attached, counted and alerted on — never silently dropped, never allowed to stall a partition.
+
+## 5. End-to-end data flow
+
+1. A price changes in the catalogue. In the same transaction, the row's `version` increments. CDC captures the change from the WAL and publishes an event to Kafka, keyed by `product_id`.
+2. An indexing worker consumes the event, checks the version against the version store. If it is not newer than what is already applied, the event is dropped and counted — that was a duplicate or a stale replay.
+3. The worker builds the complete search document for that product (a document update is a whole-document replace in the index — partial field patches are how documents end up internally inconsistent).
+4. Workers accumulate documents and flush them as bulk requests every second or two, or every few hundred documents, whichever comes first. That batching is what makes the write rate affordable; the freshness budget is 60 seconds, so a 1–2 second batching delay is cheap insurance.
+5. The bulk response is checked per document, not per request: a bulk request can partially fail. Failed documents are retried with backoff; documents that keep failing go to the dead-letter topic with the reason.
+6. The offset for the partition is committed only after the bulk write is acknowledged. A worker that crashes mid-batch has committed nothing, so the batch is redelivered — and the version check makes that redelivery safe.
+7. **The reindex flow, separately:** a snapshot job reads the catalogue in keyset-paginated chunks and bulk-indexes into a new, empty index (green), while live changes keep flowing into the old index (blue) *and* are also recorded. When the snapshot finishes, the changes that arrived during the build are replayed into green until it has caught up, counts and spot-checks are verified, and the alias flips from blue to green in one atomic operation. Blue is kept for a rollback window, then deleted.
+
+## 6. Technology choices, and why
+
+| Decision | Choice | Why | Alternative considered |
+|---|---|---|---|
+| Change capture | Log-based CDC (Debezium) | No polling load on production, captures deletes, preserves commit order | Polling `updated_at` — misses deletes, misses same-timestamp changes, and adds query load exactly when the catalogue is busiest |
+| Buffer / log | Kafka | Durable, replayable, per-key ordering by `product_id` | Writing to the index straight from the app — couples catalogue writes to index health; an index slowdown becomes a checkout slowdown |
+| Search engine | OpenSearch / Elasticsearch | Mature bulk indexing, analysers, and the alias primitive this design leans on | A managed search SaaS — fine for small catalogues; at 50M documents with custom ranking fields you want control of mappings and shards |
+| Dedup state | Version in the document itself (`_version` / external versioning) + a lightweight version store for pre-checks | The index can reject a stale document natively; the pre-check avoids wasted bulk writes | "Last write wins by arrival time" — arrival order is not change order once retries and replays exist |
+| Reindex mechanism | New index + alias swap | Atomic, reversible, zero downtime | In-place mapping updates and reindex-into-self — many mapping changes are impossible in place, and a half-finished in-place job has no clean rollback |
+
+**Streaming vs batch.** The freshness path is streaming: one event per change, seconds from commit to searchable. The reindex path is batch: a full scan, hours if needed, optimised for throughput rather than latency. Running both — and being explicit about which one owns correctness at any moment — is the design. The common mistake is trying to make one path do both jobs.
+
+## 7. Partitioning and parallelism
+
+- Kafka partitions by `product_id`: per-product ordering for free, and the version check needs no cross-partition coordination because all changes for one product are consumed in order by one worker at a time.
+- Partition count is the parallelism ceiling for the freshness path. Size it for the peak burst, not the average: a seller price file landing as 100K events in a minute is the load that matters.
+- Indexing workers scale horizontally up to the partition count. Bulk size is the other knob: bigger bulks are more efficient per document but add latency and retry cost when one document in a bulk is bad — a few hundred documents per bulk is the usual sweet spot.
+- The search index itself is sharded by a hash of `product_id`, so document writes spread evenly. Avoid routing by seller or category: one giant seller's price file would hammer one shard — a hot-shard problem of your own making.
+- **Hot product problem:** a flash-sale product updated every second is still just one document; the version check collapses redundant intermediate updates. If several queued events for the same product are pending, only the newest needs indexing — the older ones can be skipped, and a good worker does exactly that.
+
+## 8. Storage strategy
+
+- **The catalogue database** is the only durable source of truth. The index is a derived view: expensive, but rebuildable from scratch at any time. Design decisions get much easier once everyone agrees the index is disposable.
+- **Kafka retention:** 3–7 days of change events — long enough to replay after a bad deploy or a mapping bug, short enough to afford.
+- **The index:** live index plus, during a reindex, the building index — so budget for roughly 2x index storage during rebuilds, and say so; it surprises people in cost reviews. The old index is retained for a short rollback window (hours, not weeks) after a swap.
+- **Version store:** one small entry per product (last applied version). In Redis or in the index's own versioning; it is a cache of a fact the catalogue owns, so it can be rebuilt.
+- **Dead-letter storage:** failed documents kept with payload + error for days, so a data fix can be followed by a replay rather than a shrug.
+
+## 9. Deduplication and idempotency, with a worked example
+
+Delivery here is **at-least-once** at every hop: CDC can re-emit, Kafka consumers replay after crashes, bulk retries resend documents. So duplicates are not an edge case, they are the steady state. The defence is version-guarded, idempotent document writes: indexing the same product at the same version twice produces exactly the same document, and indexing an older version is refused.
+
+The check, in plain code — this is the shape to write on a whiteboard:
+
+```javascript
+// Indexing worker: apply a change only if it is newer than what we have.
+async function applyChange(event, versionStore, search) {
+  const applied = await versionStore.get(event.productId); // last version indexed
+  if (applied !== null && event.version <= applied) {
+    metrics.inc(event.version === applied ? 'duplicate_dropped' : 'stale_dropped');
+    return; // safe: no overwrite, no corruption
+  }
+  const doc = buildDocument(event); // full document, built from the event + catalogue snapshot
+  await search.index({
+    index: 'products-live',          // the alias, never a hard-coded index name
+    id: event.productId,
+    document: doc,
+    version: event.version,          // external versioning: the engine itself rejects stale writes
+    version_type: 'external_gte',
+  });
+  await versionStore.set(event.productId, event.version);
+}
+```
+
+And the bulk version of the same idea: when a bulk request partially fails, retry **only the failed items**, each still carrying its version — never resend the whole bulk blindly and never treat a bulk-level 200 as "everything succeeded":
+
+```python
+result = search.bulk(operations)          # one request, per-item results
+failed = [op for op, res in zip(operations, result.items) if res.error]
+for op in failed:
+    if retryable(op, res): retry_queue.push(op)      # version guard makes this safe
+    else: dlq.push(op, reason=res.error)             # park it, alert, move on
+commit_offsets_only_for_succeeded_partitions()
+```
+
+Two rules make this work. First, the `version` is assigned **once, by the catalogue, at change time** — never by the worker and never from a wall clock, or two changes in the same millisecond become indistinguishable. Second, offsets are committed **after** the index acknowledges the write, so a crash causes a redelivery (which the version check absorbs) rather than a loss.
+
+## 10. Retry, failure handling, checkpointing and recovery
+
+- **Worker crash:** restarts, resumes from the last committed offset, reprocesses the in-flight batch. The version check drops anything that had actually been written before the crash. No loss, no corruption, some wasted work — the right trade.
+- **Partial bulk failure:** per-item results are inspected; retryable failures (timeouts, node pressure) retry with exponential backoff and jitter; permanent failures (mapping conflict, invalid field) go to the dead-letter topic with the full document and error, and an alert fires if the DLQ rate rises.
+- **Search cluster unavailable:** workers pause and Kafka absorbs the backlog. Freshness degrades visibly — lag grows, alerts fire — but no change is lost, and catch-up is automatic when the cluster returns. Catalogue writes are never blocked by index health; that decoupling is the point of the log.
+- **Reindex failure halfway:** the green index is simply abandoned and deleted. Blue never stopped serving. A reindex is restartable from scratch precisely because it never touches the live index.
+- **Checkpointing:** Kafka offsets are the checkpoint for the freshness path; the reindex job checkpoints its keyset-pagination cursor (last `product_id` scanned) plus the Kafka offset it must replay from, so a resumed reindex neither rescans everything nor misses changes made during the build.
+- **Bad deploy of the indexing logic:** stop the workers, fix, resume from offsets. If bad documents were written, the repair is a targeted reindex of the affected products — or a full alias-swap reindex if the damage is wide. Both are possible because the catalogue, not the index, is the truth.
+
+## 11. Monitoring and observability
+
+- **End-to-end freshness lag** — time from catalogue commit to searchable, per percentile. This is the headline metric; alert as it approaches the 60-second budget, not after it breaches.
+- **Consumer lag** per partition (in time, not just messages): the earliest warning that a burst or a slow cluster is building a backlog.
+- **Duplicate and stale-drop rates:** a sudden jump usually means an upstream retry storm or a replay in progress — worth knowing about, not just absorbing silently.
+- **Bulk failure and DLQ rates**, broken down by error type; a mapping error and a timeout are very different incidents wearing the same costume.
+- **Index health:** shard write pressure, rejected writes (thread-pool rejections are the classic silent killer of freshness), refresh latency.
+- **Reindex progress:** documents indexed vs. catalogue count, catch-up lag of the green index, and verification diffs before any alias swap.
+- Structured logs carry `product_id` and `version` end to end, so one product's journey from commit to searchable can be traced across every hop.
+
+## 12. Security
+
+- The pipeline reads the catalogue with a least-privilege replication identity; indexing workers can write only to the search cluster, and only to product indices.
+- Seller feeds are authenticated and schema-validated before they reach the catalogue — a malformed or hostile feed must die at ingestion, not inside a search document.
+- The search API exposes only shopper-safe fields. Cost price, supplier terms and internal margin fields exist in the catalogue; they must be excluded when the document is built, not filtered at query time — anything in the index should be assumed readable.
+- Encryption in transit and at rest throughout; reindex snapshots and DLQ payloads get the same treatment, because they contain the same catalogue data.
+
+## 13. Scalability, the 10x question, and cost
+
+**At 10x change volume:** the architecture does not change. More Kafka partitions, more indexing workers, more index shards and data nodes. The things that break first are the cluster's indexing thread pools and shard write pressure, and the catalogue's WAL volume — not the log. Answers: raise bulk sizes within the latency budget, collapse redundant updates to hot products, and shard the index by product hash so write load spreads.
+
+**At 10x catalogue size (500M products):** the freshness path barely notices — it is driven by change rate, not catalogue size. What grows is the reindex: longer builds, 2x storage during the swap, and verification that must be sampled and count-based rather than exhaustive.
+
+**Cost levers:** the index is the expensive tier, so keep only searchable and ranking fields in it — the full product record stays in the catalogue. Batch bulk writes instead of per-document requests. Keep Kafka retention days, not weeks. Delete the old index promptly after the rollback window. And never let "just reindex everything nightly" become the freshness strategy: at 50M documents that is paying full-build cost to deliver what a change stream delivers for the price of the changes alone.
+
+## 14. Trade-offs, stated honestly
+
+| Choice | You gain | You pay |
+|---|---|---|
+| CDC + log + workers | Decoupled, replayable, burst-proof freshness under a minute | More moving parts than a direct write; freshness is seconds, never zero |
+| Version-guarded writes | Duplicates and stale replays are harmless | Every source of change must maintain a trustworthy per-product version, forever |
+| Whole-document updates | Documents are never internally inconsistent | You rebuild the full document even for a one-field price change |
+| Alias-swap reindex | Zero downtime, atomic, reversible | ~2x index storage during the build, and a catch-up replay step to get right |
+| Freshness-first streaming path | Price/stock visible in seconds | During a backlog, some products are fresher than others — the index is briefly, unevenly stale |
+
+**Ranking freshness vs completeness — name this trade-off explicitly.** When the pipeline is under pressure, you must choose: serve results that are *complete but slightly stale* (every product present, prices a minute behind), or *fresh but briefly incomplete* (newest prices, a few products missing their latest update). For commerce, completeness usually wins for catalogue structure (a missing product is a lost sale and a visible hole) while freshness wins for price and stock (a wrong price is a trust and sometimes legal problem). A senior answer separates the two: protect price/stock freshness with the fast path, and never let a reindex or a backlog make products vanish — the alias only ever points at a complete index.
+
+<Callout type="warn">
+Say this sentence in the interview: "This pipeline does not deliver exactly-once delivery — no pipeline over a network that retries can. It delivers at-least-once delivery with version-guarded, idempotent document writes, which gives exactly-once *effects* in the index: the same change applied twice, or an old change applied late, leaves the index exactly as one correct application would." Conflating delivery with effects is the most common senior-level slip in this problem.
+</Callout>
+
+**Delivery semantics, precisely.** At-most-once (fire the index write and forget it) would lose changes on any hiccup — a price that never updates is exactly the failure this system exists to prevent. At-least-once plus the version guard is the sweet spot. "Exactly-once" features inside a single tool (a transactional producer, an engine's external versioning) are real but narrow: they cover one hop, not the end-to-end claim from database commit to searchable document.
+
+## 15. Interviewer follow-up Q&As
+
+1. **"A worker crashes halfway through a bulk request. What happens?"** — Offsets were not committed, so the batch is redelivered. Documents that did get written are rewritten identically, or dropped by the version check if a newer version has since been applied. No loss, no corruption.
+2. **"How do you prevent a stale update from overwriting a newer price?"** — Every change carries the catalogue's per-product version; the worker and the engine's external versioning both refuse a version that is not newer than the one already applied. Arrival order stops mattering.
+3. **"A seller uploads a price file with 100,000 rows. Walk me through it."** — The file lands in the catalogue transactionally, CDC emits 100K events, Kafka absorbs the burst, workers drain it in bulk requests. Freshness for the last row is worse than for the first — which is why lag is measured and alerted on, and why partition count is sized for bursts.
+4. **"How do you change the text analyser without downtime?"** — You cannot change an analyser on a live index. Build a new index with the new analyser, replay the changes that arrived during the build, verify counts and sample queries, then flip the alias atomically. Rollback is flipping it back.
+5. **"Search is returning a product that was deleted an hour ago. Where do you look?"** — Deletes are change events with `op = delete`. Check whether the delete event was produced (CDC config often silently excludes deletes), whether it is stuck behind a backlog, and whether the worker treats deletes as document writes — a classic bug. Then check the DLQ.
+6. **"Why not update the index synchronously in the same request that updates the catalogue?"** — Then catalogue latency and availability become the index's latency and availability, bulk feeds become thousands of synchronous index writes, and a search-cluster hiccup takes product editing down with it. The log exists to decouple exactly this.
+7. **"Your bulk request returns success, but three documents are missing. How?"** — Bulk responses are per-item: the request succeeded, three items failed. If the code only checks the top-level status, those three are silently lost until the next change to those products — which for a slow-moving product could be weeks. Always inspect item results, retry or DLQ the failures.
+8. **"How do you know the index and the catalogue actually agree?"** — Reconciliation: a scheduled job compares counts and sampled document hashes between catalogue and index, per partition or category, and reports drift. Pipelines fail silently in creative ways; an independent comparison is how you find out before a shopper does.
+9. **"A flash sale starts and one product's stock changes every second. Does it melt anything?"** — No — it is one document. Queued intermediate versions for that product can be collapsed to the newest before indexing. The risk is not the hot product; it is a hot *shard*, which product-hash sharding prevents.
+10. **"During the reindex catch-up, a product is updated. Which index wins?"** — Both get the change: blue because it is live, green because the catch-up replay applies every change from the recorded offset onward, version-guarded in both. The alias flips only when green's lag reaches zero, so no change falls between the two.
+
+## 16. Interview-ready spoken answer
+
+> "First, the requirements I'd pin down: 50 million products, price and stock changes searchable in under a minute, bulk reindex with no downtime, and no lost or double-applied changes. The clarification that matters most is whether every change carries a per-product version — I'll assume it does, and if it doesn't, adding one in the catalogue is step one, because duplicates and out-of-order delivery are coming whether we plan for them or not.
+>
+> The bottleneck is not search — it is change propagation under bursts and failures. So the architecture is: the catalogue stays the source of truth, CDC tails its transaction log and publishes one event per change to Kafka, partitioned by product ID so each product's changes stay ordered. Indexing workers consume from Kafka, build whole documents, and write them to the search cluster in bulk.
+>
+> The data flow is short: change commits, CDC event, worker enriches and builds the document, bulk write, and the document is searchable — seconds end to end, well inside the minute. A separate batch path handles full reindex: build a new index beside the live one, replay the changes that arrived during the build, verify it, and flip an alias atomically.
+>
+> On reliability: delivery is at-least-once everywhere, so I don't pretend otherwise. Each write is guarded by the product's version — a duplicate is a no-op, a stale replay is refused — and offsets are committed only after the index acknowledges the write, so crashes cause redelivery, not loss. Bulk failures are handled per item: retry what's retryable, dead-letter the rest with the reason attached.
+>
+> Scaling is adding Kafka partitions, workers and index shards; the freshness path scales with change rate, not catalogue size. What breaks first is shard write pressure, and bulk batching plus product-hash sharding is the answer.
+>
+> The trade-off I'd flag: I'm choosing at-least-once delivery with idempotent, version-guarded writes — exactly-once *effects* in the index, not exactly-once delivery. And when forced to choose, I protect completeness of the catalogue and freshness of price and stock separately, because a missing product and a wrong price are different kinds of bad."
+
+## 17. Mock interview mode
+
+**Five hard follow-ups, with expected answers**
+
+1. **"Your version comes from `updated_at` timestamps. Two updates land in the same millisecond. What breaks?"** — Expected: the second change can look like a duplicate and be dropped — a real price change silently lost. The fix is a true monotonic version: a sequence, a database-incremented counter per row, or a log position — never a wall-clock timestamp alone. Naming this failure mode unprompted is a senior signal.
+2. **"The alias flipped an hour ago and the business says results got worse. Rollback — go."** — Expected: the old index still exists inside its rollback window; flip the alias back, which is instant and atomic. Then diagnose the new index offline. If the old index was already deleted, the honest answer is that the rollback window was the safety net and it was given up too early.
+3. **"Freshness breaches every day at the same time. Why, and what's the fix?"** — Expected: look for the scheduled bulk feed — a burst that exceeds worker/cluster throughput builds lag that drains over the following hour. Fixes: more partitions and workers, larger bulks, collapsing redundant updates, or staggering the feed. "Add more search nodes" alone misses that the bottleneck may be indexing, not querying.
+4. **"Prove to me no catalogue change was lost last week."** — Expected: offset and count reconciliation — events produced by CDC vs. events consumed vs. documents applied, plus a sampled catalogue-vs-index hash comparison, with drift alerting. "Kafka is durable" is not proof.
+5. **"Why not skip Kafka and use the search engine's own ingest pipelines / a cron reindex every five minutes?"** — Expected: a cron full or incremental reindex polls the catalogue (load, missed deletes, timestamp edge cases), gives 5-minute-plus freshness at best, and collapses exactly when a bulk feed lands. The event pipeline is more machinery, bought with a 60-second SLA and a no-loss requirement — scope the answer to those requirements rather than dismissing the simpler tool absolutely.
+
+**Common candidate mistakes**
+
+- Writing to the index synchronously from the catalogue request path.
+- Claiming "exactly-once delivery" from Kafka or the search engine.
+- Checking only the top-level status of a bulk response and losing the failed items.
+- Proposing an in-place reindex, or a reindex that serves a half-built index.
+- Using arrival time or wall-clock timestamps as the ordering/version source.
+- Forgetting deletes entirely.
+
+**What a senior candidate mentions unprompted**
+
+- Per-product version as the foundation; external versioning in the engine as the second line of defence.
+- Per-item bulk results and a DLQ, not bulk-level success.
+- Alias swap with a catch-up replay and a rollback window.
+- Reconciliation as an independent correctness check.
+- Separating the freshness trade-off (price/stock) from the completeness trade-off (catalogue presence).
+
+**Scoring rubric (out of 10)**
+
+| Score | What it looks like |
+|---|---|
+| 9–10 | CDC + log design, version-guarded idempotent writes, per-item failure handling, alias-swap reindex with catch-up and rollback, delivery semantics stated precisely, reconciliation mentioned |
+| 7–8 | Sound event pipeline and reindex story, but versioning or partial-failure handling is hand-wavy |
+| 5–6 | Components named (Kafka, Elasticsearch) but responsibilities vague; duplicates treated as an afterthought; reindex means downtime or risk |
+| 3–4 | Synchronous index writes from the app, or polling cron as the whole design, no recovery story |
+| 0–2 | Claims exactly-once delivery, no handling of deletes, bursts or partial failure |
+
+Sources: [Apache Kafka documentation — delivery semantics and design](https://kafka.apache.org/documentation/) · [Debezium documentation — log-based change data capture](https://debezium.io/documentation/) · [OpenSearch documentation — indexing, aliases and reindexing](https://opensearch.org/docs/latest/) · [Elasticsearch documentation — external versioning and bulk API](https://www.elastic.co/guide/en/elasticsearch/reference/current/docs-bulk.html)

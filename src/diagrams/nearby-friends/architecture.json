@@ -1,0 +1,129 @@
+{
+  "meta": {
+    "output": ".archify/build/nearby-friends/architecture.html",
+    "title": "Nearby Friends \u2014 Continuous Ingestion, Push Fan-out",
+    "quality_profile": "showcase"
+  },
+  "components": [
+    {
+      "id": "phone1",
+      "label": "Phone A",
+      "sublabel": "location every ~5\u201330s",
+      "type": "external"
+    },
+    {
+      "id": "phone2",
+      "label": "Phone B",
+      "sublabel": "location every ~5\u201330s",
+      "type": "external"
+    },
+    {
+      "id": "gw",
+      "label": "Location Ingestion Service",
+      "sublabel": "accepts continuous updates",
+      "type": "backend"
+    },
+    {
+      "id": "q",
+      "label": "Message Queue / Stream",
+      "sublabel": "buffers write bursts",
+      "type": "cloud"
+    },
+    {
+      "id": "loc",
+      "label": "Location Store",
+      "sublabel": "latest position per user, TTL",
+      "type": "database"
+    },
+    {
+      "id": "fanout",
+      "label": "Fan-out Service",
+      "sublabel": "to active viewers only",
+      "type": "backend"
+    },
+    {
+      "id": "graph",
+      "label": "Friend Graph",
+      "sublabel": "mutual, opted-in friends",
+      "type": "database"
+    },
+    {
+      "id": "phone3",
+      "label": "Phone C, Viewing",
+      "sublabel": "nearby-friends screen",
+      "type": "external"
+    }
+  ],
+  "connections": [
+    {
+      "from": "phone1",
+      "id": "p1-gw",
+      "label": "location every ~5\u201330s",
+      "to": "gw"
+    },
+    {
+      "from": "phone2",
+      "id": "p2-gw",
+      "label": "location every ~5\u201330s",
+      "to": "gw"
+    },
+    {
+      "from": "gw",
+      "id": "gw-q",
+      "to": "q"
+    },
+    {
+      "from": "q",
+      "id": "q-loc",
+      "to": "loc"
+    },
+    {
+      "from": "q",
+      "id": "q-fanout",
+      "to": "fanout"
+    },
+    {
+      "from": "fanout",
+      "id": "fanout-graph",
+      "label": "who may see whom",
+      "to": "graph"
+    },
+    {
+      "from": "fanout",
+      "id": "fanout-p3",
+      "label": "push via WebSocket",
+      "to": "phone3"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Write-heavy, push-based",
+      "items": [
+        "Opposite profile to proximity search: every opted-in phone writes every few seconds, continuously",
+        "Updates are pushed over persistent connections, not pulled by an on-demand query per friend"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Fan-out",
+      "items": [
+        "Fan out only to friends actively viewing the feature \u2014 O(active viewers), not O(all friends)",
+        "Candidate set is mutual, opted-in, active friends: tens, so a Haversine loop beats a spatial index"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Latest position only",
+      "items": [
+        "Overwrite one row per user with a short TTL \u2014 no growing location history to leak or purge",
+        "Pipeline down: friends freeze at last known position; the durable queue catches up on recovery"
+      ]
+    }
+  ],
+  "diagram_type": "architecture",
+  "layout": {
+    "mode": "auto"
+  },
+  "schema_version": 1
+}

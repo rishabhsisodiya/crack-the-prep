@@ -10,6 +10,7 @@ description: "Each core building block in depth — what it is, when to reach fo
 
 import Callout from '../../components/Callout.astro';
 import Mermaid from '../../components/Mermaid.astro';
+import ArchDiagram from '../../components/ArchDiagram.astro';
 
 The [main guide](/prep/system-design) lists these as one-liners so you can rattle them off. This page is the depth behind each one — enough to survive the "okay, go deeper on that" follow-up.
 
@@ -66,13 +67,15 @@ The first lever for read-heavy load. The hard parts are invalidation and stamped
 - **TTL jitter** — `ttl ± random`, so keys populated together don't expire together.
 - **Serve-stale-while-revalidate** — return the expired value immediately and refresh in the background.
 
-<Mermaid caption="Cache-aside with single-flight on miss" code={`flowchart TD
+<ArchDiagram src="building-blocks/architecture-1" caption="Cache-aside with single-flight on miss">
+<Mermaid code={`flowchart TD
   R[Request] --> C{In cache?}
   C -- hit --> RET[Return value]
   C -- miss --> L{Get recompute lock?}
   L -- yes --> DB[(Database)] --> SET[Write to cache] --> RET
   L -- no --> W[Wait for lock holder] --> RET
 `} />
+</ArchDiagram>
 
 **Follow-ups:** What's your hit rate and how did you estimate it? What happens when Redis dies — does the DB fall over? (Cap concurrency to the DB, add a small in-process cache, degrade gracefully.) How do you invalidate on write? (Delete the key on write, or publish an invalidation event to all nodes; never try to update the cached value in place across a fleet.)
 
@@ -98,13 +101,15 @@ Split writes and storage across independent primaries when one can't hold the lo
 
 **Costs you must name:** cross-shard queries and joins (fan-out + merge in the app), cross-shard transactions (need 2PC or saga), rebalancing when you add capacity, and **hot keys** — one celebrity / one viral item can swamp a single shard regardless of scheme. Mitigate hot keys by splitting that key into sub-keys or caching it hard.
 
-<Mermaid caption="Hash sharding with an app-side router" code={`flowchart TD
+<ArchDiagram src="building-blocks/architecture-2" caption="Hash sharding with an app-side router">
+<Mermaid code={`flowchart TD
   A[App] --> RT["Shard router: hash(key) mod N"]
   RT --> S0[(Shard 0)]
   RT --> S1[(Shard 1)]
   RT --> S2[(Shard 2)]
   A -. cross-shard query .-> SC["Scatter to all, gather, merge"]
 `} />
+</ArchDiagram>
 
 ## Consistent hashing
 
@@ -144,7 +149,8 @@ Problem: you need to update your DB *and* publish an event, and you can't do bot
 
 **Transactional outbox** — in the same DB transaction as the domain change, insert a row into an `outbox` table. A separate relay polls the table (or tails the DB log) and publishes each row to the broker, marking it sent. The event is now guaranteed if and only if the transaction committed. Consumers still dedupe, because the relay is at-least-once.
 
-<Mermaid caption="Transactional outbox" code={`flowchart TD
+<ArchDiagram src="building-blocks/architecture-3" caption="Transactional outbox">
+<Mermaid code={`flowchart TD
   H[Handler] --> TX[BEGIN]
   TX --> D[Write domain row]
   TX --> O[Write outbox row]
@@ -154,6 +160,7 @@ Problem: you need to update your DB *and* publish an event, and you can't do bot
   RL --> B[(Message broker)]
   RL --> MK[Mark outbox row sent]
 `} />
+</ArchDiagram>
 
 **CDC (Debezium etc.)** is the same idea without an explicit table — the relay reads the database's replication log directly and turns row changes into events.
 

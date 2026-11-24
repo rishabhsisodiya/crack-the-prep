@@ -10,6 +10,7 @@ description: "Designing an offline-first web app / PWA (notes, todos, field-sale
 
 import Callout from '../../components/Callout.astro';
 import Mermaid from '../../components/Mermaid.astro';
+import ArchDiagram from '../../components/ArchDiagram.astro';
 
 Part of the [system design](/prep/system-design) series. Uses the [frontend framework](/prep/system-design/frontend-system-design). Conflict resolution connects to [Collaborative Document Editing](/prep/system-design/collaborative-editing).
 
@@ -32,7 +33,8 @@ Example: a notes/tasks app, or a field app used by delivery agents or sales reps
 
 Online-first apps fetch, then render, and fail offline. **Offline-first** apps render from a local database, write to it first, and sync with the server in the background. The network becomes an optimization, not a dependency.
 
-<Mermaid caption="UI reads and writes locally; a sync engine moves changes in both directions" code={`flowchart LR
+<ArchDiagram src="frontend-offline-first/architecture" caption="UI reads and writes locally; a sync engine moves changes in both directions">
+<Mermaid code={`flowchart LR
   UI[UI components] -->|read, write| LDB[(IndexedDB<br/>entities + mutation queue)]
   LDB -->|live queries| UI
   SYNC[Sync engine] --> LDB
@@ -40,6 +42,7 @@ Online-first apps fetch, then render, and fail offline. **Offline-first** apps r
   API -->|pull changes since cursor| SYNC
   SW[Service worker<br/>app shell + asset cache] -.->|serves HTML, JS, CSS offline| UI
 `} />
+</ArchDiagram>
 
 Two separate caches, often confused:
 - **Service worker cache** (Cache Storage) — the **app shell** and static assets, so the app *loads* offline.

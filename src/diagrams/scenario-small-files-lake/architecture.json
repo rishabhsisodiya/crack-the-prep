@@ -1,0 +1,187 @@
+{
+  "cards": [
+    {
+      "dot": "cyan",
+      "items": [
+        "Millions of tiny files make planning, listing and metadata \u2014 not data volume \u2014 the bottleneck",
+        "Confirm with file-count, file-size histogram and bytes-scanned-per-query metrics before changing anything"
+      ],
+      "title": "Diagnosis"
+    },
+    {
+      "dot": "emerald",
+      "items": [
+        "Compact small files into 128-512 MB targets and fix partition design so pruning works",
+        "Writers buffer and flush on size or time, never one file per micro-batch"
+      ],
+      "title": "Fix"
+    },
+    {
+      "dot": "rose",
+      "items": [
+        "File-size and file-count guardrails with alerts and scheduled auto-compaction",
+        "Idempotent merges make compaction and replays safe to rerun"
+      ],
+      "title": "Prevention"
+    }
+  ],
+  "components": [
+    {
+      "id": "producers",
+      "label": "Event Producers",
+      "sublabel": "apps, devices, services",
+      "type": "external"
+    },
+    {
+      "id": "kafka",
+      "label": "Kafka",
+      "sublabel": "streaming events",
+      "type": "messagebus"
+    },
+    {
+      "id": "writer",
+      "label": "Streaming Writer",
+      "sublabel": "buffered sink, sized flushes",
+      "type": "backend"
+    },
+    {
+      "id": "lake",
+      "label": "Data Lake",
+      "sublabel": "object storage, Iceberg tables",
+      "type": "database"
+    },
+    {
+      "id": "catalog",
+      "label": "Table Catalog",
+      "sublabel": "metadata, snapshots, manifests",
+      "type": "database"
+    },
+    {
+      "id": "compaction",
+      "label": "Compaction Job",
+      "sublabel": "Spark, rewrite to 128-512 MB files",
+      "type": "backend"
+    },
+    {
+      "id": "dedup",
+      "label": "Dedup + Merge",
+      "sublabel": "idempotent MERGE on event_id",
+      "type": "backend"
+    },
+    {
+      "id": "query",
+      "label": "Query Engine",
+      "sublabel": "Trino / Athena, partition pruning",
+      "type": "backend"
+    },
+    {
+      "id": "analysts",
+      "label": "Analysts & BI",
+      "sublabel": "dashboards and ad-hoc queries",
+      "type": "external"
+    },
+    {
+      "id": "monitor",
+      "label": "Monitoring",
+      "sublabel": "file size, file count, scan cost",
+      "type": "cloud"
+    },
+    {
+      "id": "guardrails",
+      "label": "Guardrails",
+      "sublabel": "partition policy, alerts, auto-compact",
+      "type": "cloud"
+    }
+  ],
+  "connections": [
+    {
+      "from": "producers",
+      "id": "prod-kafka",
+      "label": "events (async)",
+      "to": "kafka",
+      "variant": "dashed"
+    },
+    {
+      "from": "kafka",
+      "id": "kafka-writer",
+      "label": "consume (async)",
+      "to": "writer",
+      "variant": "dashed"
+    },
+    {
+      "from": "writer",
+      "id": "writer-lake",
+      "label": "buffered writes",
+      "to": "lake"
+    },
+    {
+      "from": "lake",
+      "id": "lake-catalog",
+      "label": "snapshots + manifests",
+      "to": "catalog"
+    },
+    {
+      "from": "compaction",
+      "id": "compaction-lake",
+      "label": "rewrite small files (async)",
+      "to": "lake",
+      "variant": "dashed"
+    },
+    {
+      "from": "dedup",
+      "id": "dedup-lake",
+      "label": "MERGE changes",
+      "to": "lake"
+    },
+    {
+      "from": "writer",
+      "id": "writer-dedup",
+      "label": "upserts",
+      "to": "dedup",
+      "variant": "dashed"
+    },
+    {
+      "from": "lake",
+      "id": "lake-query",
+      "label": "scan pruned partitions",
+      "to": "query"
+    },
+    {
+      "from": "query",
+      "id": "query-analysts",
+      "label": "SQL results",
+      "to": "analysts"
+    },
+    {
+      "from": "lake",
+      "id": "lake-monitor",
+      "label": "file metrics",
+      "to": "monitor",
+      "variant": "dashed"
+    },
+    {
+      "from": "monitor",
+      "id": "monitor-guardrails",
+      "label": "breach alerts",
+      "to": "guardrails",
+      "variant": "dashed"
+    },
+    {
+      "from": "guardrails",
+      "id": "guardrails-compaction",
+      "label": "trigger compaction",
+      "to": "compaction",
+      "variant": "dashed"
+    }
+  ],
+  "diagram_type": "architecture",
+  "layout": {
+    "mode": "auto"
+  },
+  "meta": {
+    "output": ".archify/build/scenario-small-files-lake/architecture.html",
+    "quality_profile": "showcase",
+    "title": "The Small-Files Lake Firefight \u2014 Diagnose, Compact, Prevent"
+  },
+  "schema_version": 1
+}

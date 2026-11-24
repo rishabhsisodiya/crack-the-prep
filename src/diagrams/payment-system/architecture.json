@@ -1,0 +1,181 @@
+{
+  "meta": {
+    "title": "Payment System \u2014 Client to Settled Ledger Entry",
+    "output": ".archify/build/payment-system/architecture.html",
+    "quality_profile": "showcase"
+  },
+  "components": [
+    {
+      "id": "client",
+      "type": "external",
+      "label": "Client / Merchant",
+      "sublabel": "POST /charges"
+    },
+    {
+      "id": "api",
+      "type": "backend",
+      "label": "Payment API",
+      "sublabel": "Idempotency-Key header"
+    },
+    {
+      "id": "ik",
+      "type": "database",
+      "label": "Idempotency Store",
+      "sublabel": "one charge per key"
+    },
+    {
+      "id": "sm",
+      "type": "backend",
+      "label": "Payment State Machine",
+      "sublabel": "authorised \u00b7 captured \u00b7 failed"
+    },
+    {
+      "id": "ob",
+      "type": "database",
+      "label": "Outbox",
+      "sublabel": "intent + ledger event, one txn"
+    },
+    {
+      "id": "relay",
+      "type": "backend",
+      "label": "Outbox Relay",
+      "sublabel": "publishes committed events"
+    },
+    {
+      "id": "psp",
+      "type": "external",
+      "label": "PSP Adapter",
+      "sublabel": "Stripe / Adyen"
+    },
+    {
+      "id": "bank",
+      "type": "external",
+      "label": "Card Network / Bank Rail",
+      "sublabel": "settlement"
+    },
+    {
+      "id": "wh",
+      "type": "backend",
+      "label": "Webhook Handler",
+      "sublabel": "succeeded / failed"
+    },
+    {
+      "id": "ledger",
+      "type": "database",
+      "label": "Double-Entry Ledger DB",
+      "sublabel": "settled entries"
+    },
+    {
+      "id": "recon",
+      "type": "backend",
+      "label": "Reconciliation Job",
+      "sublabel": "compares ledger vs PSP"
+    }
+  ],
+  "connections": [
+    {
+      "id": "c-a",
+      "from": "client",
+      "to": "api",
+      "label": "POST /charges + Idempotency-Key",
+      "variant": "emphasis"
+    },
+    {
+      "id": "a-ik",
+      "from": "api",
+      "to": "ik",
+      "label": "check / store key"
+    },
+    {
+      "id": "a-sm",
+      "from": "api",
+      "to": "sm",
+      "label": "create payment intent"
+    },
+    {
+      "id": "sm-ob",
+      "from": "sm",
+      "to": "ob",
+      "label": "write intent + event atomically"
+    },
+    {
+      "id": "ob-r",
+      "from": "ob",
+      "to": "relay",
+      "label": "relay events"
+    },
+    {
+      "id": "r-p",
+      "from": "relay",
+      "to": "psp",
+      "label": "charge via PSP"
+    },
+    {
+      "id": "p-b",
+      "from": "psp",
+      "to": "bank",
+      "label": "authorise / settle"
+    },
+    {
+      "id": "p-w",
+      "from": "psp",
+      "to": "wh",
+      "label": "webhook: succeeded/failed",
+      "variant": "dashed"
+    },
+    {
+      "id": "w-sm",
+      "from": "wh",
+      "to": "sm",
+      "label": "advance state"
+    },
+    {
+      "id": "sm-l",
+      "from": "sm",
+      "to": "ledger",
+      "label": "post ledger entry",
+      "variant": "emphasis"
+    },
+    {
+      "id": "rc-l",
+      "from": "recon",
+      "to": "ledger",
+      "label": "verify entries"
+    },
+    {
+      "id": "rc-p",
+      "from": "recon",
+      "to": "psp",
+      "label": "fetch PSP records"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Idempotency",
+      "items": [
+        "The client's Idempotency-Key is stored before charging \u2014 a retry returns the original result, never a second charge"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Outbox",
+      "items": [
+        "Intent and ledger event commit in one transaction; the relay publishes only committed work",
+        "Webhooks advance the state machine; the ledger is written from state, not from the request"
+      ]
+    },
+    {
+      "dot": "orange",
+      "title": "Safety net",
+      "items": [
+        "Reconciliation compares the ledger against PSP records and catches anything the webhooks missed"
+      ]
+    }
+  ],
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "layout": {
+    "mode": "auto"
+  }
+}

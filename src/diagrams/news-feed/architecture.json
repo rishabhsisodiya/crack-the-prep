@@ -1,0 +1,180 @@
+{
+  "meta": {
+    "title": "News Feed \u2014 Hybrid Fan-Out",
+    "output": ".archify/build/news-feed/architecture.html",
+    "quality_profile": "showcase"
+  },
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "layout": {
+    "mode": "auto"
+  },
+  "components": [
+    {
+      "id": "author",
+      "type": "external",
+      "label": "User Posts",
+      "sublabel": "creates a post"
+    },
+    {
+      "id": "postsvc",
+      "type": "backend",
+      "label": "Post Service",
+      "sublabel": "write path \u00b7 durable first"
+    },
+    {
+      "id": "postsdb",
+      "type": "database",
+      "label": "Posts DB",
+      "sublabel": "sharded by author_id"
+    },
+    {
+      "id": "celeb",
+      "type": "backend",
+      "label": "Celebrity Check",
+      "sublabel": "followers > threshold?"
+    },
+    {
+      "id": "queue",
+      "type": "backend",
+      "label": "Fan-Out Queue",
+      "sublabel": "durable queue"
+    },
+    {
+      "id": "fanout",
+      "type": "backend",
+      "label": "Fan-Out Workers",
+      "sublabel": "push to followers"
+    },
+    {
+      "id": "feedcache",
+      "type": "database",
+      "label": "Redis Feed Cache",
+      "sublabel": "feed:userId \u00b7 capped ~800"
+    },
+    {
+      "id": "skip",
+      "type": "backend",
+      "label": "Skip Fan-Out",
+      "sublabel": "mark celebrity post"
+    },
+    {
+      "id": "reader",
+      "type": "external",
+      "label": "User Opens Feed",
+      "sublabel": "read path"
+    },
+    {
+      "id": "feedsvc",
+      "type": "backend",
+      "label": "Feed Service",
+      "sublabel": "merge + paginate"
+    },
+    {
+      "id": "ranker",
+      "type": "backend",
+      "label": "Ranker",
+      "sublabel": "re-rank feed"
+    }
+  ],
+  "connections": [
+    {
+      "id": "a-p",
+      "from": "author",
+      "to": "postsvc",
+      "label": "create post"
+    },
+    {
+      "id": "p-db",
+      "from": "postsvc",
+      "to": "postsdb",
+      "label": "store post"
+    },
+    {
+      "id": "p-c",
+      "from": "postsvc",
+      "to": "celeb"
+    },
+    {
+      "id": "c-q",
+      "from": "celeb",
+      "to": "queue",
+      "label": "normal user"
+    },
+    {
+      "id": "q-f",
+      "from": "queue",
+      "to": "fanout"
+    },
+    {
+      "id": "f-r",
+      "from": "fanout",
+      "to": "feedcache",
+      "label": "append post id"
+    },
+    {
+      "id": "c-s",
+      "from": "celeb",
+      "to": "skip",
+      "label": "celebrity",
+      "variant": "dashed"
+    },
+    {
+      "id": "r-fs",
+      "from": "reader",
+      "to": "feedsvc",
+      "label": "open feed"
+    },
+    {
+      "id": "fs-r",
+      "from": "feedsvc",
+      "to": "feedcache",
+      "label": "read pushed feed"
+    },
+    {
+      "id": "fs-db",
+      "from": "feedsvc",
+      "to": "postsdb",
+      "label": "merge celebrity posts",
+      "variant": "dashed"
+    },
+    {
+      "id": "fs-rank",
+      "from": "feedsvc",
+      "to": "ranker",
+      "label": "rank"
+    },
+    {
+      "id": "rank-r",
+      "from": "ranker",
+      "to": "reader",
+      "label": "ranked feed"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Push for most",
+      "items": [
+        "Normal posts fan out on write into each follower's Redis feed",
+        "Reads become a cheap read over a precomputed list"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Pull for celebrities",
+      "items": [
+        "A 50M-follower post would explode naive fan-out \u2014 so it is skipped",
+        "Feed service merges celebrity posts from the Posts DB at read time"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Trade-off",
+      "items": [
+        "Fan-out is async: posts appear within seconds, not instantly",
+        "Hybrid caps write cost while keeping the common read fast"
+      ]
+    }
+  ]
+}

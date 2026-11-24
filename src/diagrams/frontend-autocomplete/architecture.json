@@ -1,0 +1,140 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "layout": {
+    "mode": "auto"
+  },
+  "meta": {
+    "title": "Frontend Autocomplete \u2014 Debounce, Cache, Discard Stale",
+    "output": ".archify/build/frontend-autocomplete/architecture.html",
+    "quality_profile": "showcase"
+  },
+  "components": [
+    {
+      "id": "input",
+      "type": "frontend",
+      "label": "Input",
+      "sublabel": "onChange keystrokes"
+    },
+    {
+      "id": "debounce",
+      "type": "frontend",
+      "label": "Debounce",
+      "sublabel": "~200 ms pause in typing"
+    },
+    {
+      "id": "cache",
+      "type": "database",
+      "label": "Suggestion Cache",
+      "sublabel": "query \u2192 results"
+    },
+    {
+      "id": "abort",
+      "type": "frontend",
+      "label": "Abort Previous Request",
+      "sublabel": "AbortController"
+    },
+    {
+      "id": "fetch",
+      "type": "backend",
+      "label": "fetchSuggestions",
+      "sublabel": "called with an AbortSignal"
+    },
+    {
+      "id": "latest",
+      "type": "backend",
+      "label": "Latest-Query Check",
+      "sublabel": "response for the newest query?"
+    },
+    {
+      "id": "render",
+      "type": "frontend",
+      "label": "Render Results",
+      "sublabel": "suggestion dropdown"
+    },
+    {
+      "id": "discard",
+      "type": "backend",
+      "label": "Discard",
+      "sublabel": "stale response dropped"
+    }
+  ],
+  "connections": [
+    {
+      "id": "in-db",
+      "from": "input",
+      "to": "debounce",
+      "label": "keystrokes"
+    },
+    {
+      "id": "db-cache",
+      "from": "debounce",
+      "to": "cache",
+      "label": "debounced query"
+    },
+    {
+      "id": "cache-render",
+      "from": "cache",
+      "to": "render",
+      "label": "hit: render instantly",
+      "variant": "emphasis"
+    },
+    {
+      "id": "cache-abort",
+      "from": "cache",
+      "to": "abort",
+      "label": "miss"
+    },
+    {
+      "id": "abort-fetch",
+      "from": "abort",
+      "to": "fetch",
+      "label": "cancel in-flight, then fetch"
+    },
+    {
+      "id": "fetch-latest",
+      "from": "fetch",
+      "to": "latest",
+      "label": "response arrives"
+    },
+    {
+      "id": "latest-cache",
+      "from": "latest",
+      "to": "cache",
+      "label": "latest: write cache"
+    },
+    {
+      "id": "latest-discard",
+      "from": "latest",
+      "to": "discard",
+      "label": "stale: discard",
+      "variant": "dashed"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Debounce first",
+      "items": [
+        "Wait ~200 ms after the last keystroke before doing any work",
+        "Repeat queries are then served from cache and feel instant"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Race safety needs both",
+      "items": [
+        "Abort the previous request AND check the response is for the latest query",
+        "Abort alone is not enough: a response can arrive just before the abort lands"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Stale responses are dropped",
+      "items": [
+        "Out-of-order network responses never overwrite newer results",
+        "Only the latest response writes the cache and renders"
+      ]
+    }
+  ]
+}

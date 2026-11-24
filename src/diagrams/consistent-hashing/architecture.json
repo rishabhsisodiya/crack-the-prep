@@ -1,0 +1,118 @@
+{
+  "meta": {
+    "title": "Consistent Hashing \u2014 The Ring",
+    "output": ".archify/build/consistent-hashing/architecture.html",
+    "quality_profile": "showcase"
+  },
+  "components": [
+    {
+      "id": "k1",
+      "type": "external",
+      "label": "key: user:42",
+      "sublabel": "hashes onto the ring"
+    },
+    {
+      "id": "k2",
+      "type": "external",
+      "label": "key: user:7",
+      "sublabel": "hashes onto the ring"
+    },
+    {
+      "id": "k3",
+      "type": "external",
+      "label": "key: user:99",
+      "sublabel": "hashes onto the ring"
+    },
+    {
+      "id": "na",
+      "type": "database",
+      "label": "Node A",
+      "sublabel": "owns keys clockwise up to it"
+    },
+    {
+      "id": "nb",
+      "type": "database",
+      "label": "Node B",
+      "sublabel": "owns keys clockwise up to it"
+    },
+    {
+      "id": "nc",
+      "type": "database",
+      "label": "Node C",
+      "sublabel": "owns keys clockwise up to it"
+    }
+  ],
+  "connections": [
+    {
+      "id": "k1-nb",
+      "from": "k1",
+      "to": "nb",
+      "label": "hash + walk clockwise",
+      "variant": "dashed"
+    },
+    {
+      "id": "k2-nc",
+      "from": "k2",
+      "to": "nc",
+      "label": "hash + walk clockwise",
+      "variant": "dashed"
+    },
+    {
+      "id": "k3-na",
+      "from": "k3",
+      "to": "na",
+      "label": "hash + walk clockwise",
+      "variant": "dashed"
+    },
+    {
+      "id": "na-nb",
+      "from": "na",
+      "to": "nb",
+      "label": "next clockwise"
+    },
+    {
+      "id": "nb-nc",
+      "from": "nb",
+      "to": "nc",
+      "label": "next clockwise"
+    },
+    {
+      "id": "nc-na",
+      "from": "nc",
+      "to": "na",
+      "label": "ring wraps",
+      "variant": "dashed"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "The core property",
+      "items": [
+        "A key belongs to the first node clockwise from its hash",
+        "Removing a node only remaps keys between it and its predecessor \u2014 about 1/N of keys"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Why not mod N",
+      "items": [
+        "hash(key) % N remaps ~80% of keys going from 4 nodes to 5",
+        "For a cache that's a near-total wipe at the worst moment"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "In practice",
+      "items": [
+        "Nodes and keys share one 32- or 128-bit hash space",
+        "Virtual nodes even out the load per physical node"
+      ]
+    }
+  ],
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "layout": {
+    "mode": "auto"
+  }
+}

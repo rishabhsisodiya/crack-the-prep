@@ -1,0 +1,291 @@
+---
+title: "Scenario — 500 GB Nightly ETL in a Two-Hour Window"
+track: "system-design"
+kind: "notes"
+order: 72
+slug: "scenario-nightly-batch-window"
+updated: 2026-11-24
+description: "A scenario-based interview problem: a nightly Spark ETL must fit 500 GB into a two-hour window — diagnosing skew, small files and one slow source, with incremental loads, watermarks and SLA alerting."
+---
+
+import Callout from '../../components/Callout.astro';
+import ArchDiagram from '../../components/ArchDiagram.astro';
+
+Part of the [system design](/prep/system-design) series. This is a **scenario** page: you get the problem the way an interviewer would state it, then a full worked solution. **Level 1 — Mid-level engineer.**
+
+> **Original practice scenario** — written for interview preparation; not a question from any specific company's interview.
+
+## 1. The problem statement
+
+Here is how the interviewer puts it. Read it the way you would in the room — nothing in this section is the solution.
+
+> "Every night we run a batch ETL. It pulls data from several source systems — our orders database, billing, a CRM, a couple of partner feeds — roughly **500 GB a night** in total, transforms it with Spark, and loads it into our warehouse so the business reports are ready in the morning.
+>
+> The job is allowed a **two-hour window**: it starts at 01:00 and the reports must be able to run at 03:00. Lately it keeps missing the window — some nights it runs three, four hours — and the morning reports are late or, worse, quietly built on yesterday's data.
+>
+> Nobody can quite say where the time goes. One of the source systems is known to be 'a bit slow'. One of our biggest customers is much, much bigger than the others. And one source seems to produce an awful lot of very small files.
+>
+> Diagnose why the window is being missed, and design the pipeline so it fits — reliably, every night, not just on a good night."
+
+**Functional requirements**
+
+- Extract roughly 500 GB per night from several source systems and load transformed data into a warehouse/lakehouse.
+- Finish inside a hard two-hour window (01:00–03:00) so scheduled business reports can run on fresh data.
+- Load only what changed where possible, instead of re-reading and re-writing everything every night.
+- Support re-running a single night (a backfill or a fix) without corrupting or duplicating the data already loaded.
+- Alert a human *before* the window is breached, not after the reports have already failed.
+
+**Non-functional requirements**
+
+- Reliability over heroics: the pipeline must fit the window on a bad night (a slow source, a big day), not just on average.
+- No silent partial loads: a report must never be built on half of last night's data without anyone knowing.
+- Re-runs must be safe: running the same night twice produces the same result as running it once.
+- Cost matters: you cannot simply throw a 10x bigger cluster at the problem every night forever.
+- The maths has to work: 500 GB in 2 hours is an average of about **250 GB per hour — roughly 70 MB/s, or about 4.2 GB per minute, sustained end to end**. Any stage that runs slower than that average for long *is* the bottleneck, whatever the dashboards say.
+
+## 2. Clarifying questions to ask first
+
+Ask these before drawing anything. Each one changes the design.
+
+| Question | Why it matters |
+|---|---|
+| Is the 500 GB the full data volume, or the amount that actually changes each day? | This is the single biggest lever in the whole problem. If only 5–10% changes daily, an incremental load moves 25–50 GB, not 500 GB — and the window problem mostly disappears. |
+| What time is each source actually ready? Does one of them finish much later than the others? | If one source lands at 02:30, no amount of Spark tuning fits the job into a window that ends at 03:00. The schedule itself may be the bug. |
+| How skewed is the data — is there one customer/key with a huge share of the rows? | Skew decides whether your Spark job is a parallelism problem or a single-task problem. One giant key can leave 199 executors idle while one task runs for an hour. |
+| What file sizes arrive from each source? | Thousands of tiny files make Spark spend its time opening files and scheduling tasks instead of processing data. That is a different fix from "add more executors". |
+| Can each source tell us what changed — a reliable `updated_at` timestamp or a change log? | Watermark-based incremental extraction depends on it. A source with no change marker forces a full scan or a diff, and you need to know that up front. |
+| What happens today when the job misses — do reports run on stale data, fail, or wait? | That defines your failure behaviour and your alerting: who needs to know, and by when, and what is the acceptable degraded outcome? |
+| How far back do we need to backfill, and how often? | A pipeline that must regularly reprocess 90 days needs partition-level overwrites designed in from the start, not bolted on after the first painful backfill. |
+
+<Callout type="tip">
+The highest-value clarification here is "how much of the 500 GB actually changes each day?" Candidates who ask it often shrink the problem by 90% in one sentence. Candidates who don't ask it spend the whole interview optimising the movement of data that did not need to move.
+</Callout>
+
+## 3. The solution, in plain language first
+
+The simple version: stop moving data that did not change, stop letting one source or one customer hold everyone else hostage, and make the files and partitions a sensible size before Spark ever sees them.
+
+In practice that means four fixes, in the order you should look for them. First, extract **incrementally**: each source gives you only the rows changed since last night's watermark, so most nights you process tens of gigabytes, not 500. Second, fix the **layout on landing**: compact thousands of tiny files into a few hundred-MB files as they arrive, so Spark reads data instead of directory listings. Third, fix **skew inside Spark**: repartition to even-sized partitions and salt the one giant customer's key so its work spreads across many tasks instead of sitting on one. Fourth, fix the **schedule**: split the DAG so the slow source runs on its own branch and only the tables that truly need it wait for it — everything else finishes early, and the reports that can run, run.
+
+Do the throughput maths out loud: 500 GB over 2 hours is ~70 MB/s sustained. A healthy Spark cluster reads and writes far faster than that. So when this job takes four hours, the time is almost never going into "processing 500 GB" — it is going into waiting (a late source), imbalance (one long task), and overhead (small files, too many tiny tasks). Naming that is the diagnosis the interviewer is fishing for.
+
+## 4. Architecture
+
+<ArchDiagram src="scenario-nightly-batch-window/architecture" caption="Nightly batch ETL architecture" />
+
+**Component by component**
+
+- **Source systems.** Orders, billing, CRM, partner feeds. Each is extracted on its own schedule and its own branch of the DAG — no source's lateness should block another source's data from landing and being processed.
+- **The slow/late source.** Called out explicitly because it is a first-class design problem, not a footnote. It gets its own extraction branch, its own retry policy, and a decision — made in advance — about which downstream tables genuinely depend on it and which can be published without it and corrected the next night.
+- **Extraction (incremental, watermark-based).** For each source, read only rows with `updated_at` greater than the stored high-water mark, then advance the watermark only after the load succeeds. Where a source offers a change log / CDC stream, prefer it; where it offers nothing, fall back to a periodic full extract for that (usually smaller) table.
+- **Object storage landing (raw zone).** Extracts land untouched in object storage, partitioned by source and load date. A compaction step immediately rewrites thousands of tiny files into files of roughly 128–256 MB. Raw is kept, so any night can be reprocessed from landing without re-asking the source.
+- **Spark cluster.** The transform layer. It reads compacted files, repartitions to even partition sizes, salts known skewed keys before joins/group-bys, and writes results as partition overwrites or merges into the warehouse tables. This is where skew and partitioning are handled — see §7.
+- **Warehouse / lakehouse tables.** Partitioned by date (and, where it helps pruning, by a second low-cardinality column). Loads are idempotent: one partition per business date, overwritten or merged as a unit — see §9.
+- **Reports & BI.** The consumer the whole window exists for. Reports read published tables only; a table is "published" by a completion marker, never merely because some files appeared.
+- **Orchestrator (Airflow-style).** Owns the DAG, per-task retries, backfills, and the schedule. Tasks are small and independently re-runnable, so a failure at 02:40 is a retry of one task, not a restart of the night.
+- **SLA alerting.** The orchestrator emits progress signals against the clock: extraction done by 01:20, transforms by 02:15, loads published by 02:45. Missing an intermediate checkpoint pages a human while there is still time to act — see §11.
+
+## 5. End-to-end data flow
+
+1. **01:00 — DAG starts.** The orchestrator triggers one extraction task per source, in parallel. Each task reads its source's stored watermark.
+2. Each extraction pulls only rows changed since that watermark (`updated_at > watermark`), plus a small overlap window (see §9) to catch late commits, and lands them as raw files in object storage under `source/load_date=…`.
+3. A compaction task per source rewrites the landed files — however tiny they arrived — into ~128–256 MB Parquet files. Spark never reads the tiny originals.
+4. Transform tasks run per subject area, not as one giant job. Each reads the compacted increment, joins it against the current warehouse state where needed, repartitions evenly, and salts the known giant key before the big join/group-by.
+5. Load tasks write results idempotently: overwrite the target date partition, or merge the increment on the table's primary key. Only when a table's load commits does its "published" marker for that date get written.
+6. The slow source's branch runs the same steps whenever it lands. Tables that depend on it publish when it arrives; tables that don't have already published. If it misses its own deadline, the pre-agreed degraded path applies (publish without it, flag the affected reports, correct tomorrow) instead of the whole night failing.
+7. **By 02:45** the final checkpoint fires: all required tables published, row counts and reconciliation checks passed (see §11). At 03:00 the reports run against published tables — fresh, or explicitly flagged as degraded, never silently half-loaded.
+
+On the numbers: on a normal night the increment might be 30–60 GB, which at even a modest sustained 100 MB/s is 5–10 minutes of raw movement — the rest of the window is headroom for transforms, the slow source, and one retry. That headroom is the point. The 500 GB full-volume path still exists (for backfills and full refreshes), and at ~70 MB/s sustained it fits the window only if skew and small files are fixed — which is exactly why those fixes matter even after you go incremental.
+
+## 6. Technology choices, and why
+
+| Decision | Choice | Why | Alternative considered |
+|---|---|---|---|
+| Orchestration | Airflow (or equivalent DAG scheduler) | Per-task retries, backfills by date range, SLA callbacks, and a visible DAG are exactly this problem's needs | One cron job running one script — a failure at minute 110 restarts the whole night, and nobody can see which stage ate the time |
+| Processing | Spark | Handles 500 GB comfortably, has the partitioning/salting controls skew demands, and reads/writes lakehouse formats natively | A single-node script / one big SQL load — fine at 5 GB, and the reason jobs like this end up as interview problems at 500 GB |
+| Landing & storage | Object storage + Parquet, lakehouse table format (Iceberg/Delta-style) | Cheap, immutable raw zone; partition overwrite and merge give you idempotent loads and time-travel for debugging | Loading straight into the warehouse from sources — couples you to source availability, and a half-failed night leaves half-written tables |
+| Extraction | Watermark-based incremental on `updated_at` (CDC where available) | Moves only what changed; the biggest single win available | Nightly full extracts of every table — simple, and at 500 GB it *is* the window problem |
+| Warehouse | Columnar warehouse / lakehouse tables partitioned by date | Reports scan by date; partition-level loads and overwrites map cleanly onto one night's data | Unpartitioned tables — every load and every report scans everything, and safe re-runs become row-by-row surgery |
+
+**Batch vs streaming.** This problem is batch, and you should say so plainly — the business need is "correct data by 03:00", not "data within seconds". But name the boundary: if a source already emits a change stream, capturing changes during the day (micro-batches or CDC into the landing zone) spreads the work out so the night job becomes mostly merges. That is a legitimate evolution, not a rewrite — the landing zone, partitioning, and idempotent load design are identical. What you should *not* do is propose a full streaming platform to solve a scheduling-and-skew problem; the window is missed because of imbalance, lateness, and overhead, none of which Kafka fixes.
+
+## 7. Partitioning and parallelism
+
+- **Target partition size:** aim for roughly **128–256 MB per partition** in Spark. 500 GB at ~200 MB is about 2,500 partitions — a healthy number of tasks for a mid-sized cluster. The default you inherit from the input files is almost never this: it is whatever the file layout gives you, which is why you repartition deliberately.
+- **Too many partitions** (from thousands of small files, or an over-eager `repartition(100000)`) means the scheduler and task overhead dominate — thousands of tasks each doing milliseconds of work. **Too few** means a handful of giant tasks, no parallelism, and spills to disk.
+- **Skew is the real killer.** If one customer is 30% of the data, a `groupBy(customer_id)` sends 30% of all rows to one task. The cluster shows 95% idle while one executor runs for an hour. That single task *is* your runtime — Spark jobs finish when their slowest task finishes.
+- **Salting, step by step:** for the known giant key(s), append a random salt — `customer_id + "#" + rand(0..19)` — before the join or group-by, spreading the giant key across 20 tasks. Then aggregate in two phases: partial results per salted key, then a final combine with the salt stripped. You do not need to salt every key; salting everything adds shuffle for no benefit. Salt the keys the data tells you are skewed (check with a quick count-by-key before the big stage).
+- **Adaptive help:** modern Spark (AQE) can coalesce tiny post-shuffle partitions and split skewed partitions automatically. Turn it on, say so — and still understand salting, because AQE cannot split a single key that lands in one group in every case you will meet.
+- **Repartition vs coalesce:** `repartition` does a full shuffle and evens things out (use it before a join/group-by); `coalesce` just merges partitions without a shuffle (use it before writing, to avoid producing thousands of small output files — which is how you create tomorrow night's small-files problem yourself).
+
+## 8. Storage strategy
+
+- **Raw landing zone:** every extract kept as landed, partitioned `source/load_date`, retained long enough to reprocess any recent night without touching the source again (30–90 days is typical).
+- **Compacted zone:** the same data rewritten to ~128–256 MB Parquet files, partitioned by the table's natural query key (usually event/order date). This is what Spark transforms actually read.
+- **Warehouse tables:** partitioned by business date. One night's load touches one (or a few) partitions, which is what makes partition-overwrite loads, backfills, and "re-run just Tuesday" cheap and safe.
+- **Output discipline:** every Spark write coalesces to the target file size. A job that writes 10,000 tiny files tonight creates the small-files problem for every future reader — including tomorrow's run of itself.
+- **Retention and cost:** raw is cheap object storage; the expensive tier is warehouse storage and compute. Incremental loads cut both: less data scanned per night, less rewritten per night.
+
+## 9. Deduplication and idempotency, with a worked example
+
+Batch ETL fails and gets re-run. That is not an edge case, it is Tuesday. So every load must be safe to run twice, and the incremental extract must survive the messy reality that source rows can be committed late or updated after you read them.
+
+Two patterns cover almost everything:
+
+**Pattern A — overwrite the partition.** If a load produces a complete partition (say, all of yesterday's orders), write it to a staging location and swap it over the target partition as one unit. Run it once, run it five times — the partition contains exactly that night's data, no duplicates, because you replaced rather than appended.
+
+**Pattern B — idempotent incremental merge.** When the increment updates existing rows (a customer's status changed), merge on the primary key: an incoming row replaces the row with the same key, or is inserted if none exists. Re-running the same increment merges the same rows to the same result.
+
+The watermark discipline that makes extraction safe: extract with a small **overlap** (re-read the last, say, 15 minutes before the watermark) so late-committing source rows are not missed — and rely on the merge to make the overlap harmless. Advance the watermark **only after the load commits**, never when the extract starts; if the night fails halfway, tomorrow's run re-reads from the old watermark and the merge absorbs the duplicates.
+
+```python
+# Idempotent incremental load for one night (PySpark-style pseudocode).
+watermark = read_watermark("orders")              # last successfully loaded updated_at
+
+increment = (
+    spark.read.parquet(f"landing/orders/load_date={run_date}")
+    .filter(f"updated_at > '{watermark}'")       # includes the deliberate overlap
+    .dropDuplicates(["order_id"])                 # same row extracted twice -> one copy
+)
+
+target = DeltaTable.forName(spark, "warehouse.orders")   # or Iceberg equivalent
+
+(target.merge(increment, "target.order_id = source.order_id")
+    .whenMatchedUpdateAll()                       # changed row: replace
+    .whenNotMatchedInsertAll()                    # new row: insert
+    .execute())                                   # re-running this merge is a no-op result-wise
+
+new_watermark = increment.agg({"updated_at": "max"}).collect()[0][0]
+write_watermark("orders", new_watermark)          # only AFTER the merge committed
+```
+
+And the full-partition variant, for a table you rebuild per day:
+
+```python
+# Overwrite-partition: the safest load of all. Same input -> same partition, always.
+daily.write.mode("overwrite") \
+    .partitionBy("order_date") \
+    .saveAsTable("warehouse.daily_orders")        # dynamic partition overwrite:
+                                                  # only run_date's partition is replaced
+```
+
+Two rules make this work. First, **never append blindly** — an append is the only common load that duplicates on re-run. Second, **the watermark moves last**: it is a record of what has been *loaded*, not of what has been *seen*.
+
+## 10. Retry, failure handling, checkpointing and recovery
+
+- **Retries belong to tasks, not to the night.** The orchestrator retries each task independently (for example 3 attempts, a few minutes apart, for a flaky source extract). Because every load is idempotent (§9), a retried task cannot duplicate data.
+- **Transient vs real failures:** a source that is briefly unreachable is a retry; a schema change in a source is not — it will fail every retry identically. Cap retries, alert on final failure with the failing task named, and let independent branches continue: one dead source should not stop the other four from publishing.
+- **Checkpointing in batch = the watermark + the published marker.** Recovery state is: which partitions are published for tonight, and each source's watermark. A restart reads those and resumes from the first unpublished step — it does not start the night over.
+- **The slow source, as a failure mode:** give it a deadline, decided in advance (for example: if it has not landed by 02:00, publish the dependent tables without it, flag them, and schedule a correction load when it arrives). A pre-agreed degraded outcome beats a 02:55 improvisation.
+- **Backfills** are the same pipeline with a date range: run the DAG per date, in order, with partition overwrites making each day independently safe. Bound the parallelism — a 30-day backfill at full tilt will fight tonight's regular run for the cluster, so schedule backfills in the day or cap their share.
+- **Poison data** (a malformed file, a row that breaks a cast): quarantine the bad records to a dead-letter location with the error, load the rest, and alert if the quarantined count is non-trivial. One bad row must not hold 500 GB hostage — but it must never be dropped silently either.
+
+## 11. Monitoring and observability
+
+- **Time-based checkpoints against the window**, not just success/failure at the end: extracts landed by 01:20, compaction and transforms done by 02:15, all required tables published by 02:45. Each missed checkpoint is an SLA alert while recovery is still possible. An alert at 03:05 saying "you missed" is an obituary, not monitoring.
+- **Per-stage durations, trended nightly.** The window rarely dies in one night; a transform that grows from 20 to 35 to 50 minutes over a month is next month's miss, visible today. Alert on trend, not only on breach.
+- **The three diagnosis metrics:** longest single Spark task vs median task (skew detector), input file count and average file size per source (small-files detector), and per-source landing time (slow-source detector). These three numbers answer "where did the time go?" — the question the current team cannot answer.
+- **Data checks before publishing:** row counts vs the source's counts for the increment, null-rate and duplicate-key checks on key columns, and a reconciliation total (for example, sum of order values landed vs sum extracted). A fast wrong load is worse than a late right one.
+- **Lineage basics:** every warehouse partition records which run, which watermark range, and which code version produced it. When a number in a report is questioned, you can answer "which night's run, from what data" in minutes.
+
+## 12. Security
+
+- Source credentials live in a secrets manager, one per source, scoped read-only — the ETL should never hold write access to a source system it only reads.
+- Landing and warehouse data are encrypted at rest; access to raw landing (which contains unfiltered personal data) is restricted to the pipeline and a small break-glass role, while analysts get the curated warehouse tables.
+- Apply the warehouse's row/column permissions as data lands — masking or dropping personal fields the reports do not need is both a security control and a size saving.
+- Audit the pipeline's own access: who triggered a manual backfill, who changed a watermark by hand. Manual watermark edits are sometimes necessary — and should always be visible.
+
+## 13. Scalability, the 10x question, and cost
+
+**At 10x (5 TB a night, same 2-hour window):** the average throughput requirement becomes ~700 MB/s sustained, and the honest answer is that the design survives only because of the incremental lever. If daily *change* stays a small fraction, 10x total volume might mean only 2–3x change volume, and the night still fits. If you truly must move 5 TB nightly, then: extraction parallelises per source and per partition of the source, compaction and transforms scale by adding executors (Spark scales close to linearly *once skew is handled* — skew at 10x is 10x worse on the unlucky task, so salting and AQE stop being optional), and the warehouse load becomes the likely bottleneck, pushing you toward load-into-partition designs rather than giant merges. What does *not* change: watermarks, idempotent loads, per-branch DAGs, checkpoint alerting.
+
+**When the window shrinks to 1 hour** (the interviewer's favourite twist — see §15): you do not get a faster cluster by wishing. You cut scope and pre-compute. Concretely: (1) pre-aggregate during the day — land increments and build the heavy joins/aggregations in daytime micro-batches so the night job is mostly final merges; (2) split the reports' inputs into "needed at 03:00" and "can publish at 04:00" and only promise the window for the first set; (3) drop or defer the slowest, least-used tables to a second, later DAG; (4) cache/prepare the reference data the transforms join against, instead of re-reading it nightly. State the principle: *in a shrinking window, you move work out of the window or out of the critical path — you do not just run the same work faster.*
+
+**Cost levers:** incremental extraction (less compute, less warehouse write volume); compaction (fewer, larger reads are cheaper reads); right-sizing the cluster to the increment rather than the full volume, with autoscaling for backfill days; storage tiering for old raw partitions. Name the anti-pattern too: a permanently oversized cluster "because of that one bad night in March" is how batch budgets die.
+
+## 14. Trade-offs, stated honestly
+
+| Choice | You gain | You pay |
+|---|---|---|
+| Incremental loads with watermarks | A fraction of the data moves; the window fits with headroom | Correctness now depends on the source's `updated_at` being trustworthy; deletes and silent back-dated updates can be missed without an overlap window or a periodic reconciliation |
+| Salting skewed keys | The giant customer's work spreads across many tasks | Extra shuffle and a two-phase aggregation; added complexity that is wasted on keys that were never skewed |
+| Compaction step on landing | Spark reads data, not file listings; every downstream job gets faster | An extra stage to run and monitor, and a small delay before transforms can start |
+| Splitting the DAG per source / per table | One slow source degrades one branch, not the night | More tasks to own; "the data is ready" becomes per-table, and someone must define which tables the reports truly need |
+| Occasional full refresh | A guaranteed-consistent baseline that heals incremental drift | A full refresh of a big table may not fit the window — it needs its own schedule (weekend) or a partition-by-partition rolling rebuild |
+
+<Callout type="warn">
+Say this sentence in the interview: "An incremental pipeline is only as correct as its watermark and its source's change timestamps. That is why this design keeps a scheduled full-refresh or reconciliation pass — not because incremental is wrong, but because 'we only load what changed' quietly becomes 'we silently miss what changed in a way we did not expect' if nothing ever checks."
+</Callout>
+
+**Delivery semantics, precisely.** A batch load is not a message stream, but the same honesty applies. A task that is retried after a partial write gives you **at-least-once** application of that increment — the rows may be applied more than once — unless the load is idempotent. An extract that advances its watermark before the load commits risks **at-most-once**: data seen, never loaded, never seen again. The design here deliberately chooses at-least-once extraction (overlap window, watermark moved last) plus idempotent merge/overwrite loads, which together give **exactly-once *effects*** in the warehouse: re-runs and overlaps converge to the same tables. Never claim "exactly-once delivery" from the source — a source cannot promise that, and a crashed extract proves it in one line. Claim the effect, and show the mechanism.
+
+**When full refresh is actually right.** Small dimension tables (a few GB at most): full refresh every night, it is simpler and self-healing. After a source restatement or a logic change in a transform: refresh the affected partitions fully rather than surgically patching increments. And as a scheduled reconciliation (weekly or monthly, outside the tight window) for tables whose sources have unreliable change timestamps. Full refresh is a tool with a cost curve, not a sin — the sin is full-refreshing 500 GB nightly by default because nobody built the incremental path.
+
+## 15. Interviewer follow-up Q&As
+
+1. **"How do you know the job is slow because of skew, and not just because 500 GB is a lot?"** — Compare the longest task to the median task in the slow stage. If the median task takes 2 minutes and one task takes 55, that is skew — the data volume is fine, its distribution is not. Also check stage time vs data read: a stage reading 50 GB should not take an hour on a healthy cluster.
+2. **"Walk me through salting. What exactly do you change?"** — Before the join/group-by on the skewed key, append a random number from a fixed range (say 0–19) to the key of the giant customer, so its rows spread over 20 partitions. Aggregate per salted key, then strip the salt and combine the 20 partial results. Only the skewed keys get salted.
+3. **"The source gives you 40,000 files of about 1 MB each. What do you do?"** — Nothing downstream will be fast until that is fixed, so compact on landing: one job rewrites them into ~128–256 MB Parquet files before the transforms read anything. Longer term, push the source to write bigger files or batch its output — but do not make your pipeline's correctness depend on another team's roadmap.
+4. **"One source is ready at 02:30. The window ends at 03:00. What do you do?"** — First, question the premise in design, not at 02:30 on the night: split the DAG so only the tables that truly need that source wait for it, pre-agree the degraded path (publish without it, flag, correct tomorrow), and escalate the source's readiness time as an organisational SLA. Technically you cannot transform an hour of work into 30 minutes by optimism.
+5. **"Why not just double the cluster size?"** — Because the three root causes are not compute-bound. Doubling executors does nothing for a single skewed task (it still runs on one executor), nothing for waiting on a late source, and little for small-file overhead. Fix distribution, schedule, and layout first; then size the cluster to the fixed job.
+6. **"Your watermark is `updated_at`. A row is updated but its timestamp does not change. What happens?"** — You miss it, silently — that is the known weakness of timestamp watermarks. Defences: an overlap window (catches late commits, not timestamp bugs), preferring a monotonic change sequence or CDC log where the source has one, and a periodic reconciliation/full refresh that heals the drift. Name the weakness before the interviewer does.
+7. **"How do you handle deletes in an incremental load?"** — Honestly: `updated_at` watermarks cannot see a hard delete. Options are a soft-delete flag in the source, a CDC stream that records deletes, or a periodic key-comparison (extract just the keys, diff against the warehouse, delete the missing). Which one you pick depends on how much deletes matter to the reports — ask.
+8. **"The window just shrank to one hour. What changes?"** — Scope and timing, not hope: pre-compute the heavy aggregations during the day from landed increments, move non-critical tables to a later DAG, keep only the report-critical tables in the window, and make sure the critical path has no full-table scans left in it. See §13.
+9. **"A transform fails at 02:40, twenty minutes before the deadline. Walk me through it."** — The orchestrator retries that one task (the others are already published). The load is idempotent, so the retry is safe. The 02:45 checkpoint alert has already told the on-call which table is at risk; if the retry fails, the pre-agreed fallback applies — reports run on the published tables, the one stale table is flagged, and the fix continues after 03:00 instead of blocking everything.
+10. **"When would you do a full refresh instead of an incremental load?"** — Small tables where it is cheap and self-healing; after a source restatement or a transform logic change, for the affected partitions; and as a scheduled reconciliation for sources whose change timestamps you do not fully trust. Full refresh as the nightly default for 500 GB is the problem statement, not a strategy.
+
+## 16. Interview-ready spoken answer
+
+> "First, the requirements I'd pin down: 500 GB a night, a hard two-hour window, reports at 03:00 — and the clarification that matters most: how much of that 500 GB actually changes each day, what time each source is really ready, and whether one key dominates the data. The headline maths is 500 GB over 2 hours, about 70 MB/s sustained — a healthy cluster does that easily, so a four-hour run tells me the time is going into waiting, imbalance, and overhead, not raw processing.
+>
+> So my diagnosis has three suspects, and I'd check them in this order: one slow source gating the whole DAG, one skewed customer key parking the cluster on a single Spark task, and thousands of small files making Spark pay overhead per file instead of per byte.
+>
+> The architecture follows from that. Each source is extracted on its own DAG branch, incrementally, using a watermark on its change timestamp, landing raw in object storage partitioned by source and date. A compaction step rewrites whatever arrived into 128-to-256 MB Parquet files. Spark transforms read the compacted increment, and the orchestrator — Airflow-style — owns per-task retries, backfills, and SLA alerts at checkpoints inside the window, not just at the end.
+>
+> The data flow per night is: extract the increment, compact it, transform per subject area, and publish each warehouse table with a completion marker, so reports only ever read published tables. The slow source's tables publish when it lands; everything else has already finished.
+>
+> On reliability and duplicates: delivery from a source is at-least-once in practice — extracts overlap the watermark slightly and tasks get retried — so every load is idempotent. Increments merge on the primary key, daily tables overwrite their partition, and the watermark only advances after the load commits. Re-running a night is safe by construction, which is also what makes backfills boring.
+>
+> Scaling: the partitioning target is 128–256 MB per partition, skewed keys get salted across twenty or so buckets with a two-phase aggregation, and at 10x the design holds mainly because incremental volume grows slower than total volume. If the window shrinks to one hour, I move work out of the window — daytime pre-aggregation, non-critical tables deferred — rather than pretending the same job runs twice as fast.
+>
+> The trade-off I'd flag honestly: incremental loading buys the window, but its correctness rests on the source's change timestamps, so I keep a scheduled reconciliation and full refresh for small or untrustworthy tables. The system gives exactly-once effects in the warehouse — never exactly-once delivery from the sources — and that distinction is the design."
+
+## 17. Mock interview mode
+
+**Five hard follow-ups, with expected answers**
+
+1. **"You salted the big customer. The job is still slow. Now what?"** — Expected: measure again before guessing — check whether the bottleneck moved (shuffle size, a join against an unpartitioned reference table, spill to disk from too-large partitions, or the warehouse merge itself). Salting fixes one skewed stage; a pipeline can have a second bottleneck behind the first, and the task-duration distribution tells you where.
+2. **"Prove last night's load was complete."** — Expected: reconciliation, not vibes — per-source row counts extracted vs landed vs loaded, a control total (such as summed order value) matched between source increment and warehouse, and the watermark advanced exactly to the extract's maximum. "The DAG was green" is not proof.
+3. **"Your incremental job has run for six months. A report number is wrong and nobody knows since when. How do you recover?"** — Expected: use the retained raw landing zone to reprocess from a known-good date forward, partition by partition, comparing as you go to find where the numbers diverge; the bug is usually a watermark or merge-logic change, and the fix ships with a reconciliation check so the same drift pages someone next time.
+4. **"Why Airflow instead of just running the Spark jobs from cron?"** — Expected: the requirements are per-task retries, date-based backfills, dependency graphs where one branch can fail without failing the night, and SLA alerting — that list *is* an orchestrator's feature set. Cron gives you a start time and a prayer.
+5. **"The business says the slow source cannot be ready earlier, ever. Reports still need its data by 03:00. Resolve the contradiction."** — Expected: name it as a contradiction and negotiate the real degrees of freedom: yesterday's version of that source's data plus a same-day delta later, a later report time for just the dependent reports, or the source team providing a change feed during the day so the night work is a small merge. A senior answer refuses to silently promise the impossible.
+
+**Common candidate mistakes**
+
+- Reaching for a bigger cluster before diagnosing skew, lateness, or small files.
+- Proposing a streaming platform for a problem whose SLA is "correct by 03:00".
+- Appending increments with no idempotency story, so the first retry duplicates the night.
+- Advancing the watermark when the extract *starts*, losing data on any mid-night failure.
+- Treating the slow source as a tuning problem instead of a scheduling and product problem.
+- Never doing the throughput maths — 500 GB / 2 hours — out loud.
+
+**What a senior candidate mentions unprompted**
+
+- "How much actually changes daily?" as the first question, with incremental as the default.
+- Task-duration distribution (longest vs median) as the skew test.
+- Watermark moved last, overlap window, and deletes as the known blind spot.
+- Per-table publishing markers, so reports never read a half-loaded table.
+- SLA alerts at checkpoints *inside* the window, and a pre-agreed degraded path for the slow source.
+- A scheduled full refresh / reconciliation, offered without being asked.
+
+**Scoring rubric (out of 10)**
+
+| Score | What it looks like |
+|---|---|
+| 9–10 | Throughput maths up front, all three root causes diagnosed with a test for each, incremental + watermark discipline correct, salting explained mechanically, DAG split for the slow source, shrinking-window answer moves work instead of wishing |
+| 7–8 | Incremental and partitioning sound, but watermark edge cases (deletes, late commits) or the slow-source degraded path are hand-wavy |
+| 5–6 | Components named (Spark, Airflow) but the diagnosis is generic "optimise the job"; idempotency mentioned, not designed |
+| 3–4 | Bigger cluster as the main answer; appends data with no re-run story; no alerting until after the deadline |
+| 0–2 | Claims exactly-once delivery from the sources, or proposes streaming to fix a scheduling problem |
+
+Sources: [Apache Spark documentation — performance tuning, partitioning and skew handling](https://spark.apache.org/documentation/) · [Apache Airflow documentation — DAGs, retries, SLA misses and backfills](https://airflow.apache.org/docs/) · [Delta Lake documentation — MERGE (upserts) and idempotent writes](https://docs.delta.io/)

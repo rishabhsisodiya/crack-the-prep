@@ -1,0 +1,122 @@
+{
+  "meta": {
+    "title": "Cache-Aside \u2014 Single-Flight on Miss",
+    "output": ".archify/build/building-blocks/architecture-1.html",
+    "quality_profile": "showcase"
+  },
+  "components": [
+    {
+      "id": "req",
+      "type": "external",
+      "label": "Request",
+      "sublabel": "read for a key"
+    },
+    {
+      "id": "lookup",
+      "type": "backend",
+      "label": "Cache Lookup",
+      "sublabel": "cache-aside read path"
+    },
+    {
+      "id": "ret",
+      "type": "external",
+      "label": "Return Value",
+      "sublabel": "hit or freshly computed"
+    },
+    {
+      "id": "lock",
+      "type": "backend",
+      "label": "Single-Flight Lock",
+      "sublabel": "first miss recomputes \u00b7 others wait"
+    },
+    {
+      "id": "db",
+      "type": "database",
+      "label": "Database",
+      "sublabel": "source of truth"
+    },
+    {
+      "id": "fill",
+      "type": "backend",
+      "label": "Write to Cache",
+      "sublabel": "set with jittered TTL"
+    }
+  ],
+  "connections": [
+    {
+      "id": "r-l",
+      "from": "req",
+      "to": "lookup",
+      "label": "GET key"
+    },
+    {
+      "id": "l-ret",
+      "from": "lookup",
+      "to": "ret",
+      "label": "hit: return cached value"
+    },
+    {
+      "id": "l-lock",
+      "from": "lookup",
+      "to": "lock",
+      "label": "miss: try the lock"
+    },
+    {
+      "id": "lock-db",
+      "from": "lock",
+      "to": "db",
+      "label": "winner recomputes"
+    },
+    {
+      "id": "db-fill",
+      "from": "db",
+      "to": "fill",
+      "label": "fresh value"
+    },
+    {
+      "id": "fill-ret",
+      "from": "fill",
+      "to": "ret",
+      "label": "all waiters get the result"
+    },
+    {
+      "id": "lock-ret",
+      "from": "lock",
+      "to": "ret",
+      "label": "losers wait for lock holder",
+      "variant": "dashed"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "The stampede problem",
+      "items": [
+        "A hot key expires and hundreds of requests hit the DB at once",
+        "Single-flight: one recompute per key, everyone else waits"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Combined fixes",
+      "items": [
+        "TTL jitter so keys populated together don't expire together",
+        "Early / probabilistic recompute refreshes before expiry",
+        "Serve-stale-while-revalidate returns the old value instantly"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "If Redis dies",
+      "items": [
+        "Cap concurrency to the DB and degrade gracefully",
+        "A small in-process cache absorbs the first wave"
+      ]
+    }
+  ],
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "layout": {
+    "mode": "auto"
+  }
+}

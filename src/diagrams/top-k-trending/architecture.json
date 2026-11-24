@@ -1,0 +1,141 @@
+{
+  "cards": [
+    {
+      "dot": "cyan",
+      "items": [
+        "Sketch is a fixed d \u00d7 w grid: increment d cells per item, estimate is the minimum \u2014 it never undercounts, error is bounded",
+        "The sketch only estimates counts; the min-heap of size K remembers the candidates for top-K"
+      ],
+      "title": "Count-min sketch + heap"
+    },
+    {
+      "dot": "emerald",
+      "items": [
+        "Partition by item id so all events for an item reach one worker; merging local top-Ks gives the correct global top-K",
+        "Tumbling 1-minute buckets are merged for longer windows; results can be seconds to a minute stale"
+      ],
+      "title": "Fast path"
+    },
+    {
+      "dot": "rose",
+      "items": [
+        "Raw events in S3 / data lake; hourly batch computes exact counts for reporting or payouts \u2014 Lambda architecture",
+        "Trending is a spike over baseline (ratio with smoothing and a minimum volume), not raw popularity"
+      ],
+      "title": "Slow path & trending"
+    }
+  ],
+  "components": [
+    {
+      "id": "producers",
+      "label": "Producers",
+      "sublabel": "view, click, post events",
+      "type": "external"
+    },
+    {
+      "id": "kafka",
+      "label": "Kafka Topic",
+      "sublabel": "partitioned by item id",
+      "type": "messagebus"
+    },
+    {
+      "id": "workers",
+      "label": "Stream Workers",
+      "sublabel": "sketch + heap per window",
+      "type": "backend"
+    },
+    {
+      "id": "merger",
+      "label": "Top-K Merger",
+      "sublabel": "merge per-partition heaps",
+      "type": "backend"
+    },
+    {
+      "id": "redis",
+      "label": "Redis",
+      "sublabel": "top-K per window, dimension",
+      "type": "database"
+    },
+    {
+      "id": "api",
+      "label": "Top-K API",
+      "sublabel": "cheap, frequent reads",
+      "type": "backend"
+    },
+    {
+      "id": "s3",
+      "label": "Raw Event Store",
+      "sublabel": "S3 / data lake",
+      "type": "database"
+    },
+    {
+      "id": "batch",
+      "label": "Batch Job (Hourly)",
+      "sublabel": "exact counts",
+      "type": "backend"
+    },
+    {
+      "id": "exactdb",
+      "label": "Exact Top-K Tables",
+      "sublabel": "for reporting / payouts",
+      "type": "database"
+    }
+  ],
+  "connections": [
+    {
+      "from": "producers",
+      "id": "prod-kafka",
+      "to": "kafka"
+    },
+    {
+      "from": "kafka",
+      "id": "kafka-workers",
+      "to": "workers"
+    },
+    {
+      "from": "workers",
+      "id": "workers-merger",
+      "to": "merger"
+    },
+    {
+      "from": "merger",
+      "id": "merger-redis",
+      "to": "redis"
+    },
+    {
+      "from": "redis",
+      "id": "redis-api",
+      "to": "api"
+    },
+    {
+      "from": "kafka",
+      "id": "kafka-s3",
+      "to": "s3"
+    },
+    {
+      "from": "s3",
+      "id": "s3-batch",
+      "to": "batch"
+    },
+    {
+      "from": "batch",
+      "id": "batch-exact",
+      "to": "exactdb"
+    },
+    {
+      "from": "exactdb",
+      "id": "exact-api",
+      "to": "api"
+    }
+  ],
+  "diagram_type": "architecture",
+  "layout": {
+    "mode": "auto"
+  },
+  "meta": {
+    "output": ".archify/build/top-k-trending/architecture.html",
+    "quality_profile": "showcase",
+    "title": "Top-K / Trending \u2014 Fast Path Approximate, Slow Path Exact"
+  },
+  "schema_version": 1
+}

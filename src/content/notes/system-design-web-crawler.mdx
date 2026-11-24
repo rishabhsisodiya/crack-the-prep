@@ -10,6 +10,7 @@ description: "Designing a distributed web crawler — the URL frontier, politene
 
 import Callout from '../../components/Callout.astro';
 import Mermaid from '../../components/Mermaid.astro';
+import ArchDiagram from '../../components/ArchDiagram.astro';
 
 Part of the [system design](/prep/system-design) series. See the [framework](/prep/system-design) and [building blocks](/prep/system-design/building-blocks) first if you haven't.
 
@@ -29,7 +30,8 @@ Part of the [system design](/prep/system-design) series. See the [framework](/pr
 
 ## 2. High-level architecture
 
-<Mermaid caption="Frontier-centric crawl loop" code={`flowchart TD
+<ArchDiagram src="web-crawler/architecture" caption="Frontier-centric crawl loop">
+<Mermaid code={`flowchart TD
   SEED[Seed URLs] --> FRONTIER[(URL Frontier<br/>priority + politeness queues)]
   FRONTIER --> SCHED[Scheduler]
   SCHED -->|respects per-host rate| W1[Fetch worker]
@@ -44,6 +46,7 @@ Part of the [system design](/prep/system-design) series. See the [framework](/pr
   DEDUPE -- yes --> DROP
   DEDUPE -- no --> FRONTIER
 `} />
+</ArchDiagram>
 
 The whole system is organized around one central structure — the **URL frontier** — because almost every hard requirement (politeness, priority, freshness, fairness across domains) is really a scheduling problem solved by how you structure that queue, not by the fetch workers themselves, which are comparatively simple stateless HTTP clients.
 

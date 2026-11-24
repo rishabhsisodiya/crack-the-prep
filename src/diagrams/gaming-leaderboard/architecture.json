@@ -1,0 +1,145 @@
+{
+  "meta": {
+    "title": "Gaming Leaderboard \u2014 Separate Write and Rank Paths",
+    "output": ".archify/build/gaming-leaderboard/architecture.html",
+    "quality_profile": "showcase"
+  },
+  "components": [
+    {
+      "id": "game",
+      "type": "backend",
+      "label": "Game Server",
+      "sublabel": "match results"
+    },
+    {
+      "id": "api",
+      "type": "backend",
+      "label": "Score Service",
+      "sublabel": "accepts scores"
+    },
+    {
+      "id": "val",
+      "type": "security",
+      "label": "Validate + Anti-Cheat",
+      "sublabel": "plausibility checks"
+    },
+    {
+      "id": "q",
+      "type": "messagebus",
+      "label": "Score-Update Queue",
+      "sublabel": "decouples writes"
+    },
+    {
+      "id": "w",
+      "type": "backend",
+      "label": "Ranking Worker",
+      "sublabel": "applies updates"
+    },
+    {
+      "id": "zs",
+      "type": "database",
+      "label": "Redis Sorted Set",
+      "sublabel": "per window / region"
+    },
+    {
+      "id": "db",
+      "type": "database",
+      "label": "Durable Score Store",
+      "sublabel": "Postgres / Cassandra"
+    },
+    {
+      "id": "client",
+      "type": "frontend",
+      "label": "Player Client",
+      "sublabel": "GET rank / top-N"
+    },
+    {
+      "id": "rs",
+      "type": "backend",
+      "label": "Ranking Read API",
+      "sublabel": "rank lookups"
+    }
+  ],
+  "connections": [
+    {
+      "id": "g-a",
+      "from": "game",
+      "to": "api",
+      "label": "match result"
+    },
+    {
+      "id": "a-v",
+      "from": "api",
+      "to": "val",
+      "label": "check score"
+    },
+    {
+      "id": "v-q",
+      "from": "val",
+      "to": "q",
+      "label": "accepted updates",
+      "variant": "emphasis"
+    },
+    {
+      "id": "q-w",
+      "from": "q",
+      "to": "w",
+      "label": "apply updates"
+    },
+    {
+      "id": "w-z",
+      "from": "w",
+      "to": "zs",
+      "label": "update ranking",
+      "variant": "emphasis"
+    },
+    {
+      "id": "w-d",
+      "from": "w",
+      "to": "db",
+      "label": "persist score"
+    },
+    {
+      "id": "c-r",
+      "from": "client",
+      "to": "rs",
+      "label": "GET rank / top-N"
+    },
+    {
+      "id": "r-z",
+      "from": "rs",
+      "to": "zs",
+      "label": "live rank"
+    },
+    {
+      "id": "r-d",
+      "from": "rs",
+      "to": "db",
+      "label": "cold / historical",
+      "variant": "dashed"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Write path",
+      "items": [
+        "Scores are validated and anti-cheat-checked, then queued \u2014 the game server never waits on ranking",
+        "The worker updates both the Redis sorted set and the durable store"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Read path",
+      "items": [
+        "Rank and top-N read straight from the sorted set in O(log n)",
+        "Historical or cold leaderboards fall back to the durable store"
+      ]
+    }
+  ],
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "layout": {
+    "mode": "auto"
+  }
+}

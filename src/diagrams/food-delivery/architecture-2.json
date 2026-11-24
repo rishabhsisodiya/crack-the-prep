@@ -1,0 +1,140 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Food Delivery \u2014 Order Lifecycle State Machine",
+    "output": ".archify/build/food-delivery/architecture-2.html",
+    "quality_profile": "showcase"
+  },
+  "layout": {
+    "mode": "auto"
+  },
+  "components": [
+    {
+      "id": "created",
+      "type": "backend",
+      "label": "CREATED",
+      "sublabel": "order placed, awaiting payment"
+    },
+    {
+      "id": "paid",
+      "type": "backend",
+      "label": "PAID",
+      "sublabel": "payment confirmed"
+    },
+    {
+      "id": "cancelled",
+      "type": "backend",
+      "label": "CANCELLED",
+      "sublabel": "payment failed / rejected \u00b7 refund"
+    },
+    {
+      "id": "accepted",
+      "type": "backend",
+      "label": "ACCEPTED",
+      "sublabel": "restaurant accepts"
+    },
+    {
+      "id": "preparing",
+      "type": "backend",
+      "label": "PREPARING",
+      "sublabel": "kitchen is cooking"
+    },
+    {
+      "id": "ready",
+      "type": "backend",
+      "label": "READY",
+      "sublabel": "awaiting rider pickup"
+    },
+    {
+      "id": "picked",
+      "type": "backend",
+      "label": "PICKED_UP",
+      "sublabel": "rider confirms pickup"
+    },
+    {
+      "id": "delivered",
+      "type": "backend",
+      "label": "DELIVERED",
+      "sublabel": "terminal \u00b7 order complete"
+    }
+  ],
+  "connections": [
+    {
+      "id": "c-p",
+      "from": "created",
+      "to": "paid",
+      "label": "payment confirmed"
+    },
+    {
+      "id": "c-x",
+      "from": "created",
+      "to": "cancelled",
+      "label": "payment failed or timeout",
+      "variant": "dashed"
+    },
+    {
+      "id": "p-a",
+      "from": "paid",
+      "to": "accepted",
+      "label": "restaurant accepts"
+    },
+    {
+      "id": "p-x",
+      "from": "paid",
+      "to": "cancelled",
+      "label": "restaurant rejects, refund",
+      "variant": "dashed"
+    },
+    {
+      "id": "a-prep",
+      "from": "accepted",
+      "to": "preparing",
+      "label": "kitchen starts"
+    },
+    {
+      "id": "prep-ready",
+      "from": "preparing",
+      "to": "ready",
+      "label": "food ready"
+    },
+    {
+      "id": "ready-pick",
+      "from": "ready",
+      "to": "picked",
+      "label": "rider confirms"
+    },
+    {
+      "id": "pick-del",
+      "from": "picked",
+      "to": "delivered",
+      "label": "drop-off complete"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Guarded transitions",
+      "items": [
+        "Each arrow is one conditional write: UPDATE ... WHERE state = expected",
+        "A duplicate accept tap becomes a no-op, not a second transition"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Payment + cancellation",
+      "items": [
+        "CREATED goes to PAID only on payment confirmation; failure or timeout cancels",
+        "A restaurant rejection from PAID cancels with a refund"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Every transition emits an event",
+      "items": [
+        "The Order service owns this state machine as the shared truth for three parties",
+        "DELIVERED and CANCELLED are the terminal states"
+      ]
+    }
+  ]
+}

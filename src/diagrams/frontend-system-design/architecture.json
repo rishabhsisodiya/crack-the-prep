@@ -1,0 +1,135 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "layout": {
+    "mode": "auto"
+  },
+  "meta": {
+    "title": "Frontend System Design \u2014 Client Architecture",
+    "output": ".archify/build/frontend-system-design/architecture.html",
+    "quality_profile": "showcase"
+  },
+  "components": [
+    {
+      "id": "view",
+      "type": "frontend",
+      "label": "View Components",
+      "sublabel": "render UI \u00b7 subscribe to store"
+    },
+    {
+      "id": "ctrl",
+      "type": "frontend",
+      "label": "Controllers / Hooks",
+      "sublabel": "user intent"
+    },
+    {
+      "id": "store",
+      "type": "database",
+      "label": "Client Store / Cache",
+      "sublabel": "normalized entities"
+    },
+    {
+      "id": "datalayer",
+      "type": "backend",
+      "label": "Data Layer",
+      "sublabel": "fetch \u00b7 retry \u00b7 dedupe"
+    },
+    {
+      "id": "sw",
+      "type": "cloud",
+      "label": "Service Worker",
+      "sublabel": "offline cache"
+    },
+    {
+      "id": "api",
+      "type": "backend",
+      "label": "Server API",
+      "sublabel": "HTTP / WebSocket"
+    }
+  ],
+  "connections": [
+    {
+      "id": "v-ctrl",
+      "from": "view",
+      "to": "ctrl",
+      "label": "user intent"
+    },
+    {
+      "id": "ctrl-store",
+      "from": "ctrl",
+      "to": "store",
+      "label": "reads / updates state"
+    },
+    {
+      "id": "store-view",
+      "from": "store",
+      "to": "view",
+      "label": "state changes re-render"
+    },
+    {
+      "id": "ctrl-dl",
+      "from": "ctrl",
+      "to": "datalayer",
+      "label": "data requests"
+    },
+    {
+      "id": "dl-store",
+      "from": "datalayer",
+      "to": "store",
+      "label": "writes fetched data"
+    },
+    {
+      "id": "sw-dl",
+      "from": "sw",
+      "to": "datalayer",
+      "label": "offline cache",
+      "variant": "dashed"
+    },
+    {
+      "id": "dl-api",
+      "from": "datalayer",
+      "to": "api",
+      "label": "HTTP / WebSocket",
+      "variant": "emphasis"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Views read, never fetch",
+      "items": [
+        "View components render from the client store and dispatch intent to controllers/hooks",
+        "One normalized store means an updated entity shows everywhere at once"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "One data layer",
+      "items": [
+        "All server traffic goes through the data layer: fetch, retry, dedupe, cache writes",
+        "Server state lives in the store; UI state stays local to components"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Offline support",
+      "items": [
+        "Service worker caches the app shell and assets so the app loads offline",
+        "Which parts are server-rendered is an explicit architecture decision"
+      ]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "Browser",
+      "wraps": [
+        "view",
+        "ctrl",
+        "store",
+        "datalayer",
+        "sw"
+      ]
+    }
+  ]
+}

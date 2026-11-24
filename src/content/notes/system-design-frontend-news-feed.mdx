@@ -10,6 +10,7 @@ description: "Designing the client side of a news feed (Facebook / X / LinkedIn)
 
 import Callout from '../../components/Callout.astro';
 import Mermaid from '../../components/Mermaid.astro';
+import ArchDiagram from '../../components/ArchDiagram.astro';
 
 Part of the [system design](/prep/system-design) series. Uses the [frontend framework](/prep/system-design/frontend-system-design). The server side is [News Feed](/prep/system-design/news-feed); the infinite-scroll mechanics are built in [Machine Coding — Infinite Scroll](/prep/machine-coding/infinite-scroll).
 
@@ -28,7 +29,8 @@ Part of the [system design](/prep/system-design) series. Uses the [frontend fram
 
 ## 2. Architecture
 
-<Mermaid caption="Feed components read normalized entities from a client cache; the data layer handles pagination and mutations" code={`flowchart TD
+<ArchDiagram src="frontend-news-feed/architecture" caption="Feed components read normalized entities from a client cache; the data layer handles pagination and mutations">
+<Mermaid code={`flowchart TD
   APP[FeedPage] --> COMPOSER[PostComposer]
   APP --> NEWPILL[NewPostsPill]
   APP --> LIST[VirtualizedFeedList]
@@ -41,6 +43,7 @@ Part of the [system design](/prep/system-design) series. Uses the [frontend fram
   DL[Data layer: fetchFeed, mutations] --> STORE
   DL --> API[Feed API]
 `} />
+</ArchDiagram>
 
 - **Server-render the first page** (SSR/streaming) so the first posts are in the HTML; hydrate, then fetch further pages on the client.
 - `PostCard` is memoized and receives only a post id; it reads from the store, so updating one post re-renders one card.

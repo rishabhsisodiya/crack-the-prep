@@ -1,0 +1,268 @@
+---
+title: "Scenario — 8 TB Historical Backfill + CDC into a Lakehouse"
+track: "system-design"
+kind: "notes"
+order: 63
+slug: "scenario-lakehouse-etl"
+updated: 2026-11-24
+description: "A Level 3 scenario: migrate 8 TB from Postgres, MySQL and SaaS sources into a medallion lakehouse, then keep it fresh with Debezium CDC — schema evolution, data quality gates, and exactly-once effects via idempotent MERGE."
+---
+
+import Callout from '../../components/Callout.astro';
+import Mermaid from '../../components/Mermaid.astro';
+import ArchDiagram from '../../components/ArchDiagram.astro';
+
+Part of the [system design](/prep/system-design) series. This is a **scenario** page: you get the problem the way an interviewer would state it, then a full worked solution. **Level 3 — Lead engineer / Architect.**
+
+> **Original practice scenario** — written for interview preparation; not a question from any specific company's interview.
+
+## 1. The problem statement
+
+Here is how the interviewer puts it. Read it the way you would in the room — nothing in this section is the solution.
+
+> "Our analytics team is drowning. The data they need lives in three places: a **PostgreSQL** database (orders and billing, about **5 TB**), a legacy **MySQL** database (about **2 TB**), and a handful of **SaaS tools** — a CRM and a payments provider — reachable only through their **REST APIs**, which are rate-limited.
+>
+> We want all of it in a **lakehouse**, organised so analysts can trust it: raw data preserved as it arrived, a cleaned layer, and curated tables for the business. The catch is the migration itself: roughly **8 TB of historical data** has to move, the source systems **cannot go down** and cannot be slowed noticeably during business hours, and once the history is loaded the lakehouse has to **stay fresh** — analysts expect new orders to show up within about **15 minutes**.
+>
+> The sources are messy. Schemas change — a column gets renamed, a new one appears. Records arrive **late** or get **corrected** after the fact. A pipeline run can fail halfway and get retried, and when it is retried it must not create duplicates. Finance uses some of these tables, so 'close enough' is not good enough for them.
+>
+> Design the migration and the ongoing pipeline."
+
+**Functional requirements**
+
+- Load ~8 TB of history from PostgreSQL, MySQL and rate-limited SaaS APIs into the lakehouse.
+- Keep the lakehouse continuously fresh afterwards (target: under ~15 minutes behind the sources).
+- Organise data in layers: raw (bronze), cleaned (silver), business-ready (gold).
+- Handle schema changes, late records and corrections without manual surgery.
+- Bad data must be caught before it reaches the curated layer — and must not vanish silently either.
+- Support re-running any period (a day, a table, the whole history) safely.
+
+**Non-functional requirements**
+
+- No downtime and no meaningful load on the production databases during business hours.
+- No duplicates and no lost rows, even when jobs fail and are retried — the *effect* must be exactly-once.
+- Cost matters: this runs every day, forever. A design that scans 8 TB to apply 50 MB of changes is a firing offence.
+- Auditable: for any gold number, you should be able to trace it back to the raw records it came from.
+
+## 2. Clarifying questions to ask first
+
+Simple version first: before drawing anything, find out whether this is a *move data once* problem, a *keep it in sync forever* problem, or — as usual — both, and what "correct" means to the people paying for it.
+
+| Question | Why it matters |
+|---|---|
+| "Is the 15-minute freshness a hard SLA or a nice-to-have?" | Decides streaming CDC vs. frequent micro-batch. A soft target lets you run cheaper 15-minute batch loads; a hard one forces a real streaming path. |
+| "Can I take a consistent snapshot of the sources, and is there a quiet window at all?" | The backfill strategy (and whether you need log-based capture from the start) depends on whether the sources ever sit still. |
+| "Do the source databases keep their transaction logs, and for how long?" | CDC reads the WAL/binlog. If log retention is 24 hours and your snapshot takes 3 days, changes scroll off the end and you lose them — this changes the whole plan. |
+| "How much change per day, per table?" | 8 TB of history with 0.1% daily churn is a different system from 8 TB with 20% churn. It sizes Kafka, the streaming job, and the merge cost. |
+| "What does 'correct' mean for finance — point-in-time history, or just the latest state of each record?" | If they need history (what did this order look like on Tuesday?), silver needs slowly-changing-dimension handling, not just upserts. |
+| "Which platform are we on — Databricks/Spark, Microsoft Fabric/Azure, or open?" | You should design to the estate the company already runs; it decides the table format, the compute, and half the cost model. |
+| "How do the SaaS APIs behave — webhooks, incremental cursors, hard rate limits?" | Rate-limited APIs with no change feed force polling with checkpointed cursors; webhooks would change the ingestion design. |
+| "What happens today when data is wrong — who notices, and how fast must we catch it?" | Sets how heavy the data-quality gates need to be, and whether quarantine-and-alert is acceptable or promotion must block entirely. |
+
+<Callout type="tip">
+The question interviewers are really listening for is the one about **log retention vs. snapshot duration**. Spotting that the snapshot and the change stream have to overlap — and that you must record exactly where in the log you started — is the senior move in this problem. Everything else is engineering; that one is correctness.
+</Callout>
+
+## 3. The solution, in simple language first
+
+Think of it as moving house while still living in the house.
+
+1. **Take a photograph, then record every change.** You copy each table once (the photograph — the snapshot). But the business keeps changing the data while you copy, so from the moment you start, you also record every insert, update and delete in a change log. When the photograph is done, you replay the changes on top of it. The trick is writing down *exactly where in the change log the photograph corresponds to* — then nothing is missed and nothing is applied twice.
+2. **Land everything raw first.** Raw copies are never edited. If anything downstream goes wrong, you can always rebuild from raw — that is your insurance policy.
+3. **Clean in stages.** Raw (bronze) → cleaned and deduplicated (silver) → business tables (gold). Each stage only trusts the one before it, and a **quality gate** stands between stages: data that fails checks is parked in a quarantine area with an alert, not dropped and not promoted.
+4. **Apply changes by merging, not appending.** In silver, each record is written with an upsert keyed on its primary key. Replaying the same change twice produces the same result — that is what makes retries safe.
+5. **Pay for change, not for size.** Daily work is proportional to how much data *changed*, not to the 8 TB total. The expensive full scans happen once, during the migration, in a controlled way.
+
+## 4. Architecture
+
+<ArchDiagram src="scenario-lakehouse-etl/architecture" caption="Lakehouse ETL architecture: sources through Debezium CDC and Kafka into a medallion lakehouse" />
+
+The same shape as a Mermaid sketch, for reference:
+
+
+**How the pieces fit:**
+
+- **Debezium** reads the PostgreSQL WAL and the MySQL binlog. It does not query the tables for changes — it tails the log the database already writes, so the load on the source is close to zero. Crucially, Debezium's snapshot mode does the initial copy *and* records the log position (LSN / binlog offset) the snapshot is consistent with. Streaming then continues from exactly that position.
+- **Kafka** is the durable buffer between capture and the lakehouse. Change events sit in topics (one per table, partitioned by primary key so a record's changes stay in order) and can be replayed if a downstream job dies.
+- **Spark on Databricks** is the workhorse: it lands Kafka events into bronze, runs the backfill, executes the quality checks, and performs the merges into silver and gold. (Platform choice is discussed in §6.)
+- **The lakehouse tables** use an open table format — **Delta Lake** on Databricks, or **Apache Iceberg** if you want format neutrality. The format is not a detail: it is what gives you ACID merges, schema evolution and time travel, and this design leans on all three.
+- **Quality gates** are Spark jobs plus a expectations framework (Great Expectations, or Databricks' built-in expectations / DLT quality rules): schema checks, null checks on key columns, uniqueness of primary keys, row-count and freshness checks. Failures go to a **quarantine table** with the reason attached, and an alert fires.
+- **SaaS sources** have no log to tail, so a polling extractor walks each API with an `updated_at` cursor, checkpointing the cursor only after the data is safely landed. Rate limits are respected with token-bucket throttling and backoff; where a SaaS tool offers webhooks, they feed the same Kafka topics.
+
+## 5. End-to-end data flow
+
+**Phase 1 — the backfill (once):**
+
+1. For each table, record the current log position. Start Debezium in snapshot mode: it copies the table in chunks (keyset pagination on the primary key, throttled, and scheduled against source load) while buffering the changes that occur during the copy.
+2. Snapshot rows land in **bronze** tagged with the snapshot's log position. For the very large tables, a parallel Spark JDBC read (partitioned on a numeric key) can do the heavy lifting instead — same rule: record the log position first.
+3. SaaS history is pulled page by page through the API, respecting rate limits, checkpointing the cursor per page-batch. This is the slowest leg and it is fine — it is a one-off, and it is resumable.
+4. When a table's snapshot is complete, its buffered CDC events are applied on top, in order. The table is now *caught up*, and from here it is just the streaming path.
+
+**Phase 2 — steady state (forever):**
+
+1. Debezium streams changes → Kafka → a Spark structured-streaming (or scheduled micro-batch) job appends them to bronze, with the source log position stored on every row.
+2. On a schedule (or continuously, for the hot tables), Spark reads the *new* bronze rows, runs the quality gate, and **MERGEs** them into silver.
+3. Gold models are rebuilt incrementally from silver changes — aggregations and business tables that only touch the partitions that changed.
+4. Late or corrected records need no special path: a correction *is* a change event. It flows through the same merge and overwrites the stale silver row. If finance needs the old value preserved, silver keeps a history (SCD Type 2) — see §7.
+
+## 6. Technology choices — and the platform question
+
+The interviewer named two plausible estates. Say this out loud: **the architecture is the same either way; the products differ.**
+
+| Concern | Databricks / Spark framing | Microsoft Fabric / Azure framing |
+|---|---|---|
+| Compute | Spark clusters / serverless SQL | Spark in Fabric, or Data Factory + Synapse |
+| Storage + format | Delta Lake on ADLS/S3 | Delta Lake on OneLake |
+| CDC capture | Debezium → Kafka → Spark streaming | Debezium → Event Hubs (Kafka API) → Spark / mirroring |
+| Orchestration | Workflows / DLT pipelines | Data Factory pipelines |
+| Quality | Expectations in DLT / Great Expectations | Great Expectations / data activator alerts |
+
+**Primary pick for this answer: Databricks + Delta Lake**, justified in one line — the merge-heavy, Spark-native workload is exactly what it is built for, and Delta's `MERGE` + time travel make the correctness story (§7) simple to defend. If the company is an Azure/Fabric shop, say you would run the identical design on Fabric rather than fight the estate — the concepts (log-based CDC, medallion, idempotent merge, gates) transfer unchanged. What you should *not* do is propose querying the source databases with `updated_at` polling as the main mechanism: it misses deletes, misses changes that don't touch the timestamp, and puts query load on production. Log-based CDC exists precisely to avoid all three.
+
+**Batch vs. streaming, honestly:** the backfill is batch — there is no other sane way to move 8 TB. Steady state is *micro-batch* for most tables (a merge every 5–15 minutes meets the freshness target at a fraction of streaming's cost and operational pain), with true streaming reserved for any table that genuinely needs sub-minute freshness. Do not stream everything just because you can.
+
+## 7. The hard parts
+
+### Partitioning and parallelism
+
+- Bronze and silver are partitioned by ingestion/change date (and, for the biggest tables, a high-cardinality key bucket) so merges and gold builds touch only recent partitions.
+- Kafka topics are partitioned by primary key: ordering per record is guaranteed, and consumers scale by partition count.
+- The backfill reads sources with parallel partitioned JDBC reads and writes with Spark's normal data parallelism — but it is *throttled*: a backfill that saturates the source's I/O has failed its main non-functional requirement.
+
+### Deduplication and idempotency — the worked example
+
+Delivery in this system is **at-least-once**: Debezium can re-emit, Kafka consumers can re-read after a crash, a Spark job can be retried. So the write into silver must make replay harmless. That is the idempotent `MERGE`:
+
+```sql
+-- Silver: apply a batch of changes exactly once, however many times it runs
+MERGE INTO silver_orders AS target
+USING bronze_changes AS source
+  ON target.order_id = source.order_id
+WHEN MATCHED AND source.op = 'D' THEN DELETE
+WHEN MATCHED AND source.updated_at > target.updated_at THEN
+  UPDATE SET *          -- a correction or a normal update
+WHEN NOT MATCHED AND source.op <> 'D' THEN
+  INSERT *;
+```
+
+Why this is safe to retry: the merge is keyed on the primary key and guarded by the source's update timestamp / log position. Run the same batch twice and the second run matches rows that are already at that version — the `updated_at >` guard makes it a no-op. The batch and the merge commit together (Delta/Iceberg transactions), and the job records the Kafka offsets / log positions it has consumed *in the same transaction pattern* — checkpoint the position only after the merge commits. Crash between merge and checkpoint? You replay, and the merge absorbs it. That is the whole trick, and it is worth saying slowly in the interview.
+
+For the SaaS poller, the same idea in Python-flavoured pseudocode:
+
+```python
+cursor = checkpoint_store.get("crm.accounts")        # last updated_at safely landed
+while True:
+    page = api.get_accounts(updated_since=cursor, limit=500)   # rate-limited client
+    if not page: break
+    bronze.append(page, source="crm")                # raw first, always
+    cursor = max(r.updated_at for r in page)
+    checkpoint_store.put("crm.accounts", cursor)     # only AFTER the land succeeds
+```
+
+If the process dies mid-page, the cursor still points at the last *landed* page, so the page is fetched again — a duplicate in bronze, which the silver merge deduplicates by primary key. Duplicates in bronze are acceptable; duplicates in silver are not, and the design keeps that line bright.
+
+### Schema evolution
+
+- **Additive changes** (new column) flow through: bronze accepts them (schema-on-read / schema merge), silver picks them up with a default.
+- **Renames and type changes** are the dangerous ones. The gate catches them — the incoming schema no longer matches the contract — and the batch is quarantined rather than silently mangling silver. The fix is a deliberate contract update, then a replay from bronze. Because bronze is raw and complete, a replay is always possible; that is the payoff of never editing raw data.
+- Rule to state: **bronze never rejects on schema; silver never accepts an unreviewed schema.** Flexibility at the edge, discipline at the core.
+
+### Retry, failure handling, checkpointing and recovery
+
+- Every stage checkpoints what it has consumed (Kafka offsets, log positions, API cursors) and only advances the checkpoint after its write commits.
+- A failed merge job simply re-runs: the merge is idempotent, so re-running a window is the recovery procedure, not an emergency procedure.
+- Debezium keeps its offset in a dedicated store; if it restarts, it resumes the log from the last committed offset. The operational hard limit is **source log retention** — if the connector is down longer than retention, the log position is gone and that table needs a re-snapshot. Monitor connector lag against retention explicitly; this is the failure mode that actually bites teams.
+- Quarantined data is replayable after a fix, through the same gate — no side-channel manual inserts into silver.
+
+### Monitoring and observability
+
+- **Freshness lag** per table (now minus the newest source timestamp landed in silver) against the 15-minute target — the headline metric.
+- CDC connector health and log-retention headroom; Kafka consumer lag; merge durations and rows affected; gate pass/fail counts and quarantine volume, alerting on spikes.
+- Reconciliation: a scheduled job compares source vs. silver row counts (and checksums on sampled partitions) per table. CDC pipelines fail silently in creative ways; an independent count comparison is how you find out.
+
+### Security
+
+- Least-privilege read access for Debezium (a dedicated replication user), secrets in a vault, encryption in transit and at rest.
+- PII is classified at the silver boundary: tokenised or access-controlled columns in gold, with column-level permissions for analyst groups. Bronze is the most restricted layer — it is a full raw copy of production.
+
+### Scalability — including 10x
+
+- 10x *history* changes nothing steady-state; it makes the backfill longer, and the answer is more parallelism plus the same throttling discipline.
+- 10x *change volume* scales horizontally at every stage: more Kafka partitions, more Spark executors, and merges that stay cheap because they only scan changed partitions. The thing that breaks first is usually the source's log generation and the gold aggregation layer, not the ingestion — say which you'd watch.
+- The design's structural defence is that steady-state cost tracks *churn*, not total size, so growth in table size alone barely moves the bill.
+
+### Cost control
+
+- Micro-batch merges instead of always-on streaming clusters; autoscaling / serverless compute that stops when idle.
+- Partition pruning on every merge and gold build; periodic file compaction (Delta `OPTIMIZE` / Iceberg compaction) so small CDC files don't strangle read performance.
+- Storage tiering for old bronze partitions, and a retention policy agreed with finance rather than "keep everything forever by default."
+
+## 8. Trade-offs
+
+| Decision | Chosen | Alternative | Why not the alternative |
+|---|---|---|---|
+| Change capture | Log-based CDC (Debezium) | Poll `updated_at` columns | Polling misses deletes and timestamp-less updates, and loads production with queries |
+| Freshness | Micro-batch merges (5–15 min) | True streaming everywhere | Streaming costs more to run and to operate; the SLA doesn't need it for most tables |
+| Table format | Delta Lake (or Iceberg) | Plain Parquet files | No ACID merge, no time travel — idempotency and recovery become hand-rolled |
+| Raw layer | Keep bronze forever (tiered) | Transform in flight, keep nothing raw | No replay, no audit trail, schema fixes become migrations instead of re-runs |
+| Platform | Databricks/Spark primary | Fabric/Azure | Equal design; pick the estate the company runs — here, Spark-native merge tooling wins the argument |
+
+**The delivery-guarantee honesty paragraph — say it verbatim if needed:** "Kafka and Debezium give me **at-least-once** delivery. I am not claiming exactly-once *delivery* — across a database log, a broker and a lakehouse, that isn't on the menu. What I can guarantee is **exactly-once effect**: because every write into silver is an idempotent merge keyed on the primary key and versioned by log position, delivering the same change twice changes nothing. At-most-once would risk losing changes; at-least-once plus idempotent writes is the standard, honest way to get correctness here."
+
+## 9. Interviewer follow-up Q&As
+
+1. **"Your snapshot takes 3 days. The WAL is only kept for 24 hours. What happens?"** — You lose the changes that scroll off, silently. Prevention: start capturing the log *before/with* the snapshot (Debezium snapshot mode does exactly this and records the start position), and negotiate longer retention for the migration window. This is the first thing to check, before writing any code.
+2. **"A consumer crashes halfway through a merge. Duplicates?"** — No. The merge either commits atomically or doesn't; the offset checkpoint only advances after commit, so the batch replays — and the idempotent merge makes the replay a no-op for already-applied rows.
+3. **"A column gets renamed in production at 2pm. Walk me through it."** — CDC events keep arriving (bronze takes anything). The silver gate sees a schema that breaks the contract, quarantines the batch, alerts. We update the contract/mapping deliberately, then replay from bronze. No data lost, no silent mangling.
+4. **"How do you handle a record that was deleted in the source?"** — The delete is a change event like any other (`op = 'D'`). Silver either hard-deletes via the merge or — if history/audit matters — marks it deleted (soft delete / SCD2 end-date). The choice is per-table and driven by the consumers, finance usually wants the soft version.
+5. **"Finance says a gold total is wrong for last Tuesday. How do you debug it?"** — Time-travel silver/gold to Tuesday's version, diff against the current one, then trace the differing records back through bronze to the exact CDC events and log positions. The raw layer plus table-format history turns this from archaeology into a query.
+6. **"Why not just use a managed connector / ELT tool for all of this?"** — For the SaaS sources and simple tables, honestly, you might — buy don't build. The custom CDC path earns its complexity on the large, high-churn, correctness-critical tables. A senior answer scopes the hand-built part instead of gold-plating everything.
+7. **"How do you prove the migration is complete and correct before cutover?"** — Per-table reconciliation: row counts, key-range checksums, and sampled full-row comparisons between source and silver, run over a quiet window, plus a parallel-run period where both the old reports and gold produce the same numbers.
+8. **"The SaaS API only allows 100 requests a minute and has 2 million records. Your move?"** — The backfill takes as long as it takes — paginate with a checkpointed cursor, run it off-peak, and ask the vendor for a bulk export / raised limit for the initial load (surprisingly often available). Steady state only polls the *delta* since the cursor, which is small.
+9. **"What breaks first at 10x change volume?"** — Merge cost on the hottest tables and gold aggregations, then Kafka partition hotspots on skewed keys. Mitigations: partition by key, isolate hot tables into their own streaming path, and make gold builds incremental.
+10. **"Why keep bronze at all if silver is clean?"** — Because every correctness recovery story — schema fix, merge bug, finance dispute — ends with "replay from raw." Delete bronze and every one of those becomes a re-extraction from production, if it's even still possible.
+
+## 10. Interview-ready spoken answer (~2–3 minutes)
+
+> "First, I'd clarify two things: how fresh the data really has to be, and how long the source databases keep their transaction logs — because my whole plan depends on the log outliving the snapshot.
+>
+> The bottleneck is that this is two problems wearing one coat: moving 8 TB once, and then keeping up with change forever, without hurting production.
+>
+> So the architecture is: Debezium tails the Postgres WAL and the MySQL binlog — no queries against production — and publishes change events to Kafka, partitioned by primary key. For the SaaS tools, a polling extractor with a checkpointed cursor does the same job within their rate limits. Everything lands raw in a bronze layer that I never edit. Spark jobs clean bronze into silver, and silver into gold business tables, with a data-quality gate between layers — failures go to quarantine with an alert, never silently in or out.
+>
+> For the migration itself, Debezium's snapshot mode copies each table while recording the exact log position the snapshot matches, then streams changes from that position — so the copy and the stream overlap with no gap and no double-apply.
+>
+> On reliability: delivery is at-least-once, and I won't pretend otherwise. Correctness comes from the write side — silver is updated with an idempotent MERGE on the primary key, versioned by log position, and I only checkpoint offsets after the merge commits. Crash, retry, replay — the result is the same. That's exactly-once *effect*, which is the honest version of the guarantee.
+>
+> It scales because steady-state work is proportional to how much changed, not to the 8 TB — merges only touch changed partitions. And the main trade-off I'd flag is micro-batch over true streaming: fifteen-minute freshness at a fraction of the cost, unless a specific table earns a streaming path."
+
+## 11. Mock interview mode
+
+**Five hard follow-ups, with expected answers:**
+
+1. *"Your Debezium connector was down for a weekend. Monday, it won't start. Why, and what's your recovery?"* — Expected: the offset's log position has aged past WAL/binlog retention; the log is gone. Recovery is a re-snapshot of the affected tables (snapshot mode re-syncs them), plus the process fix: alerting on connector downtime and retention headroom so a weekend can't silently become a re-snapshot.
+2. *"Two changes to the same record arrive out of order. Silver ends up stale. How did your design allow that, and how do you fix it?"* — Expected: ordering is per-key via Kafka partitioning by primary key, and the merge guards on source version/log position (`updated_at >`), so an older change cannot overwrite a newer one. If it happened, partitioning or the version guard is broken — name both defences.
+3. *"Gold needs a restatement for the last 90 days because a mapping rule was wrong. What's the operational plan?"* — Expected: fix the rule, replay silver→gold for the affected partitions from the retained bronze/silver history, using table-format versioning to publish the restated version atomically. No source re-extraction. Mention communicating the restatement to finance as a versioned change.
+4. *"Why is your merge getting slower every week even though change volume is flat?"* — Expected: small-file accumulation from CDC micro-batches and un-compacted partitions; the merge scans more files each run. Fix: scheduled compaction/optimisation, partition pruning checks, and possibly larger micro-batch intervals for cold tables.
+5. *"The business now wants 30-second freshness on orders. What changes, what breaks, what does it cost?"* — Expected: move that one table to a true streaming path (continuous streaming merge / DLT), keep the rest micro-batch. Costs: always-on compute, trickier exactly-once bookkeeping at the sink, more on-call surface. Breaks first: merge contention on hot partitions.
+
+**Common candidate mistakes:**
+
+- Proposing `updated_at` polling as "CDC" — and not noticing it misses deletes.
+- Starting the snapshot without recording a log position, creating a gap nobody can see.
+- Claiming "Kafka gives us exactly-once" without the idempotent-write half of the sentence.
+- Designing the backfill with no throttling, i.e. volunteering to take production down.
+- Treating data quality as a dashboard instead of a gate with a quarantine path.
+
+**What a senior candidate mentions unprompted:** log retention vs. snapshot duration; per-key ordering; checkpoint-after-commit; reconciliation jobs as an independent correctness check; cost proportional to churn, not size; and scoping managed tools for the easy sources instead of building everything.
+
+**Scoring rubric (out of 10):**
+
+| Score | What it sounds like |
+|---|---|
+| 3–4 | Moves data with a batch job; no CDC/log-position concept; duplicates "handled" by hope |
+| 5–6 | CDC + medallion named, but snapshot/stream overlap and idempotency are hand-wavy |
+| 7–8 | Correct snapshot+CDC handover, idempotent merge, quality gates, honest delivery guarantees |
+| 9–10 | All of the above, plus retention risk, reconciliation, schema-evolution recovery via bronze replay, and a cost model tied to churn |
+
+Sources: written from standard, publicly documented practice — [Debezium documentation (snapshot modes, log-based CDC)](https://debezium.io/documentation/) · [Delta Lake MERGE documentation](https://docs.delta.io/latest/delta-update.html) · [Apache Kafka documentation (delivery semantics)](https://kafka.apache.org/documentation/). No specific company's interview question is reproduced or claimed.

@@ -10,6 +10,7 @@ description: "Designing a food delivery platform — restaurant discovery, the o
 
 import Callout from '../../components/Callout.astro';
 import Mermaid from '../../components/Mermaid.astro';
+import ArchDiagram from '../../components/ArchDiagram.astro';
 
 Part of the [system design](/prep/system-design) series. See the [framework](/prep/system-design) and [building blocks](/prep/system-design/building-blocks) first if you haven't. It builds on [Proximity Service](/prep/system-design/proximity-service), [Ride-Sharing Dispatch](/prep/system-design/ride-sharing-dispatch) and [Payment System](/prep/system-design/payment-system).
 
@@ -29,7 +30,8 @@ Part of the [system design](/prep/system-design) series. See the [framework](/pr
 
 ## 2. High-level architecture
 
-<Mermaid caption="Separate services for discovery, orders, dispatch and tracking, connected by order events" code={`flowchart TD
+<ArchDiagram src="food-delivery/architecture-1" caption="Separate services for discovery, orders, dispatch and tracking, connected by order events">
+<Mermaid code={`flowchart TD
   CU[Customer app] --> GW[API gateway]
   RE[Restaurant app] --> GW
   RI[Rider app] --> GW
@@ -47,6 +49,7 @@ Part of the [system design](/prep/system-design) series. See the [framework](/pr
   BUS --> NOTIF[Notification service]
   BUS --> TRK[Tracking service<br/>WebSocket to customer]
 `} />
+</ArchDiagram>
 
 ## 3. Discovery — "restaurants that deliver to me"
 
@@ -59,7 +62,8 @@ Part of the [system design](/prep/system-design) series. See the [framework](/pr
 
 The order is the shared truth between three parties. Model it as an explicit state machine owned by the Order service; every transition is a conditional write and emits an event.
 
-<Mermaid caption="Order lifecycle — each arrow is one conditional state transition plus an event" code={`stateDiagram-v2
+<ArchDiagram src="food-delivery/architecture-2" caption="Order lifecycle — each arrow is one conditional state transition plus an event">
+<Mermaid code={`stateDiagram-v2
   [*] --> CREATED
   CREATED --> PAID: payment confirmed
   CREATED --> CANCELLED: payment failed or timeout
@@ -72,6 +76,7 @@ The order is the shared truth between three parties. Model it as an explicit sta
   DELIVERED --> [*]
   CANCELLED --> [*]
 `} />
+</ArchDiagram>
 
 - **Transitions are guarded**: `UPDATE orders SET state='ACCEPTED' WHERE id=:id AND state='PAID'`. A duplicate "accept" tap from a flaky restaurant tablet becomes a no-op instead of a second transition.
 - **Every client call carries an idempotency key** — especially place-order. The customer app retries on timeout; the server must return the same order, not create two.

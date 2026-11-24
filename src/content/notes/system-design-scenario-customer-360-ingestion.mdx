@@ -1,0 +1,296 @@
+---
+title: "Scenario — Customer 360: Five Sources, One Customer Record"
+track: "system-design"
+kind: "notes"
+order: 65
+slug: "scenario-customer-360-ingestion"
+updated: 2026-11-24
+description: "A scenario-based interview problem: unify CRM, billing, product events, support tickets and a marketing tool into one customer profile, with survivorship rules, identity resolution, and GDPR erasure that reaches every downstream copy."
+---
+
+import Callout from '../../components/Callout.astro';
+import ArchDiagram from '../../components/ArchDiagram.astro';
+
+Part of the [system design](/prep/system-design) series. This is a **scenario** page: you get the problem the way an interviewer would state it, then a full worked solution. **Level 2 — Senior engineer.**
+
+> **Original practice scenario** — written for interview preparation; not a question from any specific company's interview.
+
+## 1. The problem statement
+
+Here is how the interviewer puts it. Read it the way you would in the room — nothing in this section is the solution.
+
+> "We sell a subscription product, and the same customer shows up in five different systems. The **CRM** has their name, company and phone number from sales calls. **Billing** has the address they actually pay from and the email on their invoices. Our **product** emits events — sign-ups, logins, feature use — from web and mobile, often before anyone in sales has heard of them. **Support** has tickets tied to whatever email the customer happened to write in from. And a **marketing tool** has its own copy of every contact, plus consent flags and campaign history.
+>
+> Right now these five copies disagree. The name is spelled two ways, the phone in the CRM is old, billing has the current email and the CRM does not, and marketing keeps emailing people who unsubscribed in the product.
+>
+> We want **one customer profile** — a Customer 360 view — that support, marketing and analytics can all trust. About **2 million customers**, roughly **50,000 source changes a day** from the batch systems, plus **1–2 million product events a day** streaming in. And when a customer exercises their **right to erasure**, or withdraws consent, that has to reach every copy, including the downstream tools, not just our own database.
+>
+> Design the ingestion and unification system."
+
+**Functional requirements**
+
+- Ingest from five sources: CRM, billing, product events, support tickets, and a marketing tool.
+- Resolve records from different sources that belong to the same person into one profile, and keep a link back to every source record.
+- When sources disagree on a field, apply a clear, per-field rule for which value wins, and keep the losing values for audit.
+- Keep the profile current: streaming product events within minutes, batch sources on their daily or hourly cycle.
+- Propagate consent changes and erasure requests to the profile store, the warehouse, and every downstream consumer.
+- Support un-merge: if two people were wrongly merged, split the profile back apart.
+
+**Non-functional requirements**
+
+- No silent data loss: a source change that was accepted must eventually appear in, or be visibly rejected from, the profile.
+- Ingestion must be idempotent: replaying a batch file or redelivering an event must not create a second profile or corrupt a field.
+- A wrong merge is worse than a missed merge: merging two different people leaks one person's data to another, so matching must favour precision over recall.
+- Erasure must complete within a defined SLA (for example 30 days legally, 72 hours as an internal target) and be provable afterwards.
+- Field-level lineage: for any value on the profile, you can answer "which source, which record, when".
+- Cost matters: 2 million profiles is not a big-data problem, and the design should not pretend it is.
+
+## 2. Clarifying questions to ask first
+
+Ask these before drawing anything. Each one changes the design.
+
+| Question | Why it matters |
+|---|---|
+| Is there any shared key across sources at all — an account ID, or is email the closest thing? | If billing and the product share an account ID, most matching is deterministic and easy. If nothing is shared, identity resolution is the whole problem. |
+| Which source is most trustworthy for which field — who owns name, email, address, phone? | Survivorship is a business decision, not a technical one. You need the interviewer to state (or accept your proposal for) a per-field source of truth. |
+| How bad is a wrong merge versus a missed merge? | Wrong merges are a privacy incident; missed merges are an inconvenience. That asymmetry sets your matching thresholds and whether probabilistic matches need human review. |
+| What identifiers can we match on, and are any of them shared or recycled — family emails, company phone numbers, shared devices? | Email and phone look like person keys but often identify a household or a company. Treating them as unique creates wrong merges at scale. |
+| Which sources are batch and which are streaming, and how fresh must the profile be? | CRM and billing usually arrive as daily dumps or CDC; product events stream. Freshness requirements decide whether you need a streaming path at all or a fast micro-batch is enough. |
+| What exactly does erasure have to cover — our stores only, or processors and downstream tools too, and what about backups and the warehouse? | Erasure that stops at your own database is not erasure. The answer sets the fan-out list, the tombstone design, and the verification job. |
+| Who consumes the profile, and do they need the merged view or also the per-source view? | Support wants one screen; analytics often wants source-level history. That decides whether the warehouse keeps both the golden record and the raw source tables. |
+| Is consent per channel (email, ads, product analytics) or one global flag? | Per-channel consent is the normal case and it changes the model: consent is a set of scoped flags with timestamps, not a boolean on the profile. |
+
+<Callout type="tip">
+The single highest-value clarification here is the asymmetry: a wrong merge is a privacy incident, a missed merge is a nuisance. Say that out loud and let it drive every threshold that follows. Candidates who optimise matching for recall first have the problem backwards.
+</Callout>
+
+## 3. The solution, in plain language first
+
+The simple version: every source sends its changes — some as daily files, some as a live stream — into one durable log. A cleaning step translates each source's records into one common shape and throws away exact redeliveries. Then an identity step decides which existing profile (if any) each record belongs to, using exact identifier matches first and fuzzy matches only with a human or a high bar. Finally, a merge step builds the golden record field by field: for each field, a written rule says which source wins, and every value keeps a note of where it came from. Consent and erasure are not side quests — they run through the same pipeline as special, high-priority changes that fan out to every place a copy lives.
+
+Why a log and a staged pipeline, instead of each source writing straight into a profile table? Because the hard parts here are replay, audit and correction. When (not if) a matching rule turns out to be wrong, you need to rebuild profiles from the raw source records with the fixed rule. That is only possible if the raw records were kept, untouched, in order.
+
+## 4. Architecture
+
+<ArchDiagram src="scenario-customer-360-ingestion/architecture" caption="Customer 360 architecture: five sources through ingestion and Kafka into dedup, identity resolution and a golden-record profile store, with a privacy service fanning erasure out to every consumer" />
+
+**Component by component**
+
+- **Source systems.** CRM and billing are systems of record owned by other teams; support and marketing are SaaS tools; the product is your own. You do not control their schemas or their release cycles, which is exactly why nothing downstream may depend on a source's raw shape.
+- **Ingestion layer.** Three flavours, one contract. Batch loaders pick up CRM and billing dumps (or read their CDC feeds where available), webhooks and CDC capture support and marketing changes, and the product emits events directly. Every loader does the same three jobs: stamp each change with the source name, the source's own record ID and a source event ID; land the raw payload untouched in the archive; and publish it to Kafka. No matching or merging happens here.
+- **Kafka.** The durable, replayable buffer between ingestion and processing. Partition by the source's customer key (account ID where there is one, otherwise the source record ID), so all changes for one source record stay in order. Retention of weeks, not days — the long-term copy lives in the lake, but a generous Kafka window makes short replays cheap.
+- **Dedup and normalise.** Consumes raw source changes, drops exact redeliveries on the source event ID, and translates each source schema into one canonical customer-change shape: standardised email (lowercased, trimmed), phone in international format, names normalised, addresses parsed. Bad records go to a dead-letter topic with the reason, never silently dropped.
+- **Identity resolution.** The brain. It maintains the identity graph — profile IDs linked to source record IDs and to identifiers (emails, phones, device IDs) — and for each incoming record decides: attach to an existing profile, create a new profile, or send to a review queue. Deterministic rules run first; probabilistic scoring runs second and is deliberately conservative.
+- **Customer profile store.** The golden record: one row per resolved person, with the winning value per field plus field-level lineage (source, source record, timestamp, rule applied). A relational database (Postgres) is the right size here — 2 million profiles with transactional upserts and joins to the identity graph. It publishes its own change feed (CDC) so downstream consumers see profile changes, merges, splits and erasures as events.
+- **Data lake and warehouse.** Every raw source record archived as it arrived, plus history tables of the profile over time. This is what makes reprocessing, audit and "what did this profile look like last March" possible.
+- **Privacy service.** Owns consent state and erasure requests. It writes consent changes and erasure tombstones into the same pipeline at high priority, tracks the fan-out to every registered consumer, and runs the verification job that proves an erased identifier no longer appears anywhere it should not.
+- **Downstream consumers.** Email platform, ad audiences, support UI, analytics. They consume the profile change feed rather than polling, and each one must acknowledge erasure events — an unacknowledged erasure is an open item, not a completed one.
+- **Monitoring.** Match rates, review-queue depth, merge and split counts, ingestion lag per source, erasure SLA tracking. A sudden change in match rate usually means a source changed its schema or its ID policy upstream.
+
+## 5. End-to-end data flow
+
+1. A source changes a customer: a salesperson edits a phone in the CRM, billing records a new email, the product sees a sign-up, support receives a ticket from a new address, marketing records an unsubscribe.
+2. The ingestion loader for that source stamps the change with source name, source record ID and a source event ID, archives the raw payload to the lake, and publishes it to Kafka keyed by the source customer key.
+3. The dedup and normalise step drops redeliveries (same source event ID seen before), translates the record into the canonical shape, and standardises the identifiers matching will depend on.
+4. Identity resolution looks up the record's identifiers in the identity graph. An exact account ID or verified email match attaches it to an existing profile. No exact match triggers probabilistic scoring against candidates sharing a phone, device or name-plus-address. Above the auto-merge threshold it merges; in the grey zone it queues for review; below it, a new profile is created.
+5. The merge step applies survivorship rules field by field: the winning value is written to the golden record, the losing values are retained in lineage, and any field whose winner changed is marked dirty.
+6. The profile store commits the update transactionally and emits a profile-changed event on its CDC feed, carrying the profile ID and the changed fields (or, for erasure, a tombstone).
+7. Downstream consumers apply the change: marketing updates its contact and its consent flags, support refreshes its customer view, analytics updates the warehouse copy. Consent and erasure events are processed ahead of ordinary updates and must be acknowledged.
+8. In parallel, a batch reconciliation job compares source record counts and sampled fields against the profile store, so a loader that silently stopped is detected within a day, not discovered by a customer complaint.
+
+## 6. Technology choices, and why
+
+| Decision | Choice | Why | Alternative considered |
+|---|---|---|---|
+| Ingestion transport | Batch loaders plus CDC for systems of record, events for the product | Matches how each source actually exposes data; CDC avoids the daily-dump freshness cliff where available | Forcing every source onto streaming — the SaaS tools and the CRM will not do it, and the design has to meet sources where they are |
+| Buffer and log | Kafka | Durable, replayable, ordered per key; replay is a hard requirement for rebuilding profiles after a matching fix | Writing straight to the profile database — loses raw history, makes reprocessing and audit impossible |
+| Stream and batch processing | Kafka Streams or Flink for the streaming path, Spark or plain SQL jobs for batch loads and reconciliation | The streaming path handles product events and consent; batch handles dumps and the daily reconciliation honestly | A single batch-only pipeline — simpler, and defensible if the freshness requirement relaxes to daily; name that trade-off |
+| Identity graph and profile store | Postgres | Transactional upserts, joins between profiles, source links and lineage, and 2 million rows is comfortably small | A graph database — genuinely tempting for identity links, but the profile, lineage and consent tables are relational, and two stores are worse than one at this scale |
+| Search for match candidates | Blocking keys plus a search index (OpenSearch) over normalised name, address and identifiers | Probabilistic matching cannot compare a record against 2 million profiles; blocking reduces it to a handful of candidates first | Comparing against everything — does not scale and is never what real matchers do |
+| Erasure fan-out | Profile CDC feed with mandatory acknowledgement per consumer | Erasure is only done when every consumer confirms; a fire-and-forget event cannot prove anything | A nightly erasure batch — simpler, but consent withdrawal (especially marketing) needs to land in minutes, not overnight |
+
+**Batch vs streaming.** This system is deliberately a mix, because the sources are a mix. Product events and consent changes stream, because a customer who unsubscribes or signs up should see the effect in minutes. CRM and billing arrive in batch or CDC because that is what those systems offer, and pretending otherwise adds fragility for no benefit. The important design point is that both paths converge before identity resolution: there is exactly one place where matching and survivorship happen, regardless of how a record arrived. Two merge implementations — one for batch, one for streaming — will diverge, and divergent merge logic is how profiles corrupt quietly.
+
+## 7. Partitioning and parallelism
+
+- Kafka partitions by source customer key: all changes for one source record stay ordered on one partition, and the normalise step needs no cross-partition coordination.
+- Identity resolution is the step that does not partition naively. Two records for the same person can arrive under different source keys at the same time and race to create two profiles. Mitigations: the identity graph lookup and profile creation happen in one transaction in Postgres, keyed on the identifier, so the second creator finds the first's profile instead of duplicating it; and merges are written to be commutative where possible (survivorship picks a winner deterministically, so applying two updates in either order converges).
+- Parallelism needs are modest: 50,000 batch changes a day is trivial, and 1–2 million product events a day is roughly 25 events per second average with sign-up spikes. The honest answer is that throughput is not the constraint here — correctness of matching is. Size the pipeline for the spike, spend the design effort on the merge.
+- The batch reconciliation and any full reprocessing run are partitioned by profile ID range, so a rebuild after a matching-rule fix can run in parallel slices and be compared slice by slice against the live store before cutover.
+
+## 8. Storage strategy
+
+- **Raw archive:** every source payload as received, in object storage, partitioned by source and date. Retained per policy; this is the reprocessing and audit source of truth. Note the tension: erasure may require purging raw records too, so the archive must support per-person deletion, not just whole-file expiry.
+- **Profile store:** Postgres, one golden record per person, plus three supporting tables — source links (profile to source records), identifier index (identifier to profile, with type and verification state), and field lineage (profile, field, winning source, losing values, timestamps).
+- **History:** profile snapshots or a change-history table in the warehouse, so analytics can work with the profile as it was at a point in time and merges can be audited after the fact.
+- **Review queue:** grey-zone matches stored with their candidate profiles and scores, so a human decision is itself recorded data that improves the rules later.
+- **Erasure register:** a minimal, access-restricted record that an erasure happened (request ID, date, scope, completion evidence) — kept precisely because the erased data itself is gone, and you still need to prove the erasure occurred.
+
+## 9. Deduplication and idempotency, with a worked example
+
+There are two different duplicate problems here, and confusing them is the classic mistake. **Delivery duplicates** are the same source change arriving twice — a retried webhook, a replayed batch file. **Identity duplicates** are two genuinely different source records that turn out to be the same person. The first is solved with idempotency keys; the second is identity resolution (Section 4) and is never solved by a unique constraint alone.
+
+Every source change carries an idempotency key: source name plus source event ID (or, for batch files, source plus record ID plus the record's source-side version or hash). Processing is a conditional write against that key:
+
+```sql
+-- Idempotent ingest: the same source change applied twice is a no-op.
+-- processed_source_events is the processing-state table.
+INSERT INTO processed_source_events (source, source_event_id, profile_id, applied_at)
+VALUES ($1, $2, $3, now())
+ON CONFLICT (source, source_event_id) DO NOTHING
+RETURNING source_event_id;
+-- If no row was returned, this change was already applied: stop, change nothing.
+```
+
+The profile update itself is also conditional — survivorship is applied as a guarded upsert, so a stale replay cannot overwrite a newer winning value:
+
+```python
+# Apply one canonical change to a profile, idempotently.
+def apply_change(change, db):
+    # 1. Claim the change. If the key exists, this is a redelivery.
+    if not db.claim(change.source, change.source_event_id):
+        metrics.inc("duplicate_change_dropped")
+        return "already_applied"
+
+    profile_id = resolve_identity(change, db)   # match, merge, or create
+
+    # 2. Survivorship per field, as guarded writes: a field only
+    #    changes if this source outranks the current winner for
+    #    that field, or the current value is older from the same source.
+    for field, value in change.fields.items():
+        winner = SURVIVORSHIP[field]  # e.g. email -> billing, phone -> CRM
+        db.upsert_field(
+            profile_id, field, value,
+            only_if=(change.source == winner
+                     or db.field_source(profile_id, field) != winner),
+            lineage=(change.source, change.source_record_id, change.event_ts),
+        )
+
+    # 3. Consent is never overwritten by a stale source copy: the
+    #    newest consent event wins, regardless of source rank.
+    if change.consent:
+        db.apply_consent(profile_id, change.consent,
+                         only_if_newer_than=change.event_ts)
+    db.mark_applied(change.source, change.source_event_id, profile_id)
+    return profile_id
+```
+
+Worked example: billing re-sends yesterday's file after a failed transfer. Every record in it carries the same source event IDs as the first send. Step 1 claims none of them — all conflicts, all dropped, zero profile changes, and the duplicate counter tells operations exactly what happened. Contrast that with a genuinely new change: the same customer updates their email in billing. New event ID, claim succeeds, billing outranks the CRM for email under the survivorship table, the golden record's email changes, the old email is kept in lineage and added to the identifier index (people write to support from old addresses), and a profile-changed event flows downstream. Same pipeline, opposite outcomes — that is what idempotency plus survivorship buys you.
+
+Two rules make this work. First, the idempotency key is created **by the source, at the change**, or failing that by the loader as a hash of the record's content and version — never regenerated randomly per delivery attempt. Second, a record is only marked applied **after** the profile write commits, so a crash mid-apply causes a redelivery that the claim step then resolves safely, in one direction or the other.
+
+## 10. Retry, failure handling, checkpointing and recovery
+
+- **Loader failure mid-batch:** files are processed record by record with per-record claims (Section 9), so re-running the whole file is safe. Never design a batch load that only works if it runs exactly once.
+- **Consumer crash:** the streaming path restarts from its last committed Kafka offset; records after the checkpoint are redelivered and the claim table absorbs the overlap.
+- **Poison records** (a source sends a schema-breaking payload): after a small number of attempts, route to a dead-letter topic with the raw payload and the error, and alert if the rate spikes. One bad CRM export must not stall every other source.
+- **Wrong merge discovered:** this is a data failure, not a crash, and the recovery is the split operation — because source links and field lineage were kept, the two profiles can be rebuilt from their respective source records. A design that merges destructively, discarding source records, cannot recover from its own mistakes. Say that explicitly.
+- **Downstream consumer down during erasure:** the erasure stays open in the privacy service, retries with backoff, and escalates as the SLA approaches. Erasure completion is tracked per consumer, not assumed.
+- **Reprocessing after a rule fix:** fix the matching or survivorship rule, replay the raw archive through the new logic into a shadow profile store, diff against live, then cut over. This is the recovery story for the most likely serious incident in this system — a bad rule, not a dead server.
+
+## 11. Monitoring and observability
+
+- **Per-source ingestion lag and record counts**, reconciled daily against source-side counts: a loader that silently stopped is the most common real failure.
+- **Match quality metrics:** auto-merge rate, review-queue rate and depth, split rate. A sudden shift in any of them after a source release is an early warning of an upstream ID or schema change.
+- **Duplicate-change rate** per source: a spike usually means a source-side retry storm or a re-sent file.
+- **Field-conflict rate:** how often sources disagree per field. Rising conflict on a field the business cares about (email, consent) deserves a data-quality conversation with the owning team.
+- **Erasure and consent SLA tracking:** open erasures by age, per-consumer acknowledgement lag, and the verification job's results.
+- Structured logs carry the source event ID and the profile ID end to end, so one change can be traced from raw payload to golden record to downstream event.
+
+## 12. Security
+
+- This system concentrates personal data from five places into one — it is, by construction, one of the most sensitive stores in the company. Encrypt in transit and at rest, and restrict profile-store access to named services and roles; analysts work in the warehouse, not against the live profile store.
+- **Erasure and consent, in full:** an erasure request creates a tombstone that flows on the profile change feed; every consumer (including the warehouse, the lake archive, the marketing tool and ad audiences) must delete or anonymise its copy and acknowledge. Backups are handled by policy: erased identifiers are placed on a suppression list applied when a backup is restored, since rewriting backups is usually impractical. The verification job searches the identifier and profile stores for the erased identifiers and reports any hit as an incident.
+- **Consent is data, not a flag on the side:** scoped per channel, timestamped, with the source of the consent change recorded. Marketing may only email profiles whose email-consent state is granted and current; the profile feed carries consent changes at high priority so a withdrawal lands in minutes.
+- **Access to the identity graph is itself sensitive:** it reveals which accounts belong to the same person. Log reads, not just writes, and keep the human review queue behind the same access controls — reviewers see personal data from multiple sources side by side.
+- Source credentials and webhook secrets are per-source and rotatable; a compromised marketing-tool key must not grant access to billing data.
+
+## 13. Scalability, the 10x question, and cost
+
+**At 10x (20 million customers, 20 million product events a day):** the architecture does not change; two things get harder. First, match-candidate blocking: the blocking keys and search index must stay tight, or the probabilistic step drowns in candidates — expect to add more blocking passes (by phone, by device, by name-plus-postcode) run as separate, cheaper passes rather than one expensive one. Second, the review queue: if even 0.1 percent of records need human review, 10x volume means a review team problem, not a software problem — the honest scaling answer includes tightening deterministic coverage (getting a shared account ID into more sources) to shrink the grey zone, not just adding reviewers.
+
+**Cost levers:** this is a modest-scale system and should be costed like one. Postgres and a small Kafka cluster cover it; the lake archive is cheap object storage. The real costs are operational — review labour, data-quality work with source teams, and erasure verification — and a senior answer names those instead of quoting instance prices.
+
+## 14. Trade-offs, stated honestly
+
+| Choice | You gain | You pay |
+|---|---|---|
+| Precision-first matching (high auto-merge bar, human review in the grey zone) | Wrong merges — the privacy incident — stay rare | Missed merges persist; some customers have two profiles until a deterministic link appears, and you fund a review queue |
+| Per-field survivorship over whole-record winner | Each field comes from its most trustworthy source; the profile is better than any single source | More rules to agree, encode and test; a field can flip sources and confuse a downstream consumer watching it |
+| Keeping raw records and full lineage forever | Reprocessing, audit, split and un-merge are all possible | Storage and sensitivity grow; the archive itself becomes an erasure target |
+| One merge path for batch and streaming | Matching behaves identically however a record arrived | The streaming path inherits batch-grade checks; very fresh product data may wait seconds to minutes behind normalisation |
+
+<Callout type="warn">
+Say this sentence in the interview: "This design does not deliver exactly-once delivery — no design over sources that retry files and webhooks can. It delivers at-least-once delivery with idempotent application, which gives exactly-once *effects* on the golden record: a change applied twice changes the profile once." Conflating delivery with effects is the most common senior-level slip in this problem.
+</Callout>
+
+**Delivery semantics, precisely.** At-most-once (drop on failure, never retry) would silently lose source changes — unacceptable when one of those changes is a consent withdrawal. At-least-once plus the claim table and guarded upserts in Section 9 is the sweet spot: files can be re-sent, webhooks can retry, consumers can replay, and the profile converges to the same state. Exactly-once delivery end to end does not exist here, because the sources are outside your transactional control — a SaaS marketing tool will not join your transaction. What you can honestly promise is exactly-once *effects* on stores you control, verified by reconciliation, plus tracked, acknowledged propagation to the stores you do not.
+
+## 15. Interviewer follow-up Q&As
+
+1. **"The CRM says the phone is X, billing says Y, the product has Z. Which goes on the profile?"** — Whichever the survivorship table says for phone — and the table is per field, agreed with the business, not per record. All three values are kept in lineage with timestamps, so the answer is explainable and reversible if the rule changes.
+2. **"A husband and wife share one email address. Your matching merges them. How do you prevent that?"** — Email alone is never a sufficient auto-merge key for exactly this reason. Deterministic merge needs email plus a second corroborating signal (account ID, or name match); email-only matches go to the grey zone. Shared and recycled identifiers are a named risk in the design, not a surprise.
+3. **"How do you un-merge two people who were wrongly merged?"** — Because merges are non-destructive — source links and lineage are kept — a split rebuilds each profile from its own source records, reassigns the identifiers, emits split events downstream, and records the incident so the rule that caused it can be tightened.
+4. **"A customer asks to be erased. Walk me through everything that happens."** — The privacy service issues a tombstone on the profile feed; the profile store deletes or anonymises the golden record and removes identifiers from the index; the warehouse and lake purge or anonymise their copies; each downstream consumer deletes and acknowledges; backups are covered by a suppression list applied on restore; and a verification job confirms the identifiers no longer resolve anywhere, closing the request with evidence.
+5. **"Marketing says the profile is wrong and their tool is right. Who wins?"** — For any given field, the survivorship table decides, and marketing is the source of truth for almost nothing except campaign history and its own engagement data. The productive answer is to show them the lineage: the winning value, its source and its timestamp, and the value their tool sent and when.
+6. **"Why not buy a customer data platform instead of building this?"** — A fair challenge. A CDP buys you ingestion connectors and basic matching quickly. You still own survivorship decisions, consent and erasure propagation into your own warehouse and tools, and the split and audit requirements. The honest answer is build-versus-buy turns on how unusual your matching and privacy requirements are, and a senior candidate says so rather than defending building on principle.
+7. **"The product sign-up stream creates a profile, and the next day the CRM batch creates the same person again. What happens?"** — The batch record's identifiers are looked up in the identity graph inside the profile-creation transaction; the email or account ID already exists, so the record attaches to the streaming-created profile and survivorship fills in the CRM-owned fields. The transaction and the identifier index are what prevent the duplicate.
+8. **"How do you test matching changes before they go live?"** — Replay a sampled (and, in non-production, anonymised) set of raw source records through the new rules into a shadow store, then diff: how many merges change, how many new merges appear, how many splits result. A matching change that cannot show its diff does not ship.
+9. **"Consent was withdrawn in the product, but marketing emailed the customer anyway. What went wrong, architecturally?"** — Either the consent change was treated as an ordinary update and sat behind batch traffic, or the marketing consumer did not treat consent as authoritative from the feed and kept trusting its local flag. The design prevents both: consent travels as a high-priority event, and consumers must apply feed consent over local state and acknowledge it.
+10. **"Where does this design break first as the company grows?"** — The grey zone. Volume growth multiplies review-queue work faster than it multiplies compute cost, and match quality depends on upstream teams keeping their ID discipline. The growth fix is upstream: a shared account ID in more sources, which converts probabilistic matches into deterministic ones.
+
+## 16. Interview-ready spoken answer
+
+> "First, the requirements I'd pin down: five sources, about two million customers, batch dumps from CRM and billing plus a streaming product feed, and two hard constraints — a wrong merge is a privacy incident, and erasure has to reach every copy, not just ours. The clarifications that matter most are whether any shared key exists across sources, and who owns each field, because survivorship is a per-field business decision.
+>
+> The bottleneck is not throughput — the volumes are modest. It is correctness of matching. So the architecture is staged: loaders for each source land raw records untouched in an archive and publish them to Kafka; one normalise step translates every source into a common shape and drops exact redeliveries; then a single identity and merge path handles everything, however it arrived.
+>
+> The data flow through that path is: look the record's identifiers up in an identity graph; deterministic matches on account ID or verified email attach immediately; probabilistic matches need a high bar or a human; then survivorship builds the golden record field by field — billing wins email, the CRM wins phone — with every value keeping its lineage. The profile store publishes its own change feed, and that feed is how support, marketing, analytics and the warehouse stay in sync.
+>
+> On reliability: sources retry, so delivery is at-least-once, and I don't pretend otherwise. Every change carries a source event ID claimed in a processing-state table, and profile writes are guarded upserts, so applying a change twice has exactly-once effects. Merges are non-destructive, which is what makes the split operation — the recovery from a wrong merge — possible at all.
+>
+> Privacy runs through the same pipes: consent is timestamped, per-channel data that travels at high priority, and erasure is a tombstone event that every consumer must act on and acknowledge, verified afterwards by a job that checks the erased identifiers resolve nowhere.
+>
+> Scaling is mostly about the grey zone, not the servers: at ten times the volume, blocking for match candidates and the human review queue are what strain, and the real fix is getting a shared account ID into more sources.
+>
+> The main trade-off I'd flag: I'm choosing precision over recall in matching, deliberately — I'd rather explain a duplicate profile than a leaked one — and I'm paying for a review queue and full lineage storage to keep that choice safe and reversible."
+
+## 17. Mock interview mode
+
+**Five hard follow-ups, with expected answers**
+
+1. **"Your probabilistic matcher merged a father and son who share a surname, an address and a home phone. Defend the design."** — Expected: those three signals are household signals, not person signals, and should never reach the auto-merge threshold on their own; auto-merge needs at least one person-level identifier (verified email, account ID, personal mobile). The incident triggers a rule fix, a split using lineage, and a shadow replay to find other merges made by the same rule.
+2. **"Prove to me an erasure from last month actually reached the ad platform."** — Expected: the erasure register holds the request, the tombstone event, and the ad platform's acknowledgement with a timestamp; plus the verification job's clean result for those identifiers. "We sent the event" alone is not proof.
+3. **"Billing changes its export format without telling anyone. What happens on Monday morning?"** — Expected: schema validation at ingestion rejects or dead-letters the new shape, per-source record-count reconciliation flags the shortfall the same day, and the profile store keeps serving the last good data. The failure is loud and contained, not a silent day of missing updates.
+4. **"Why is the profile store Postgres and not a graph database, when identity is a graph?"** — Expected: the identity links are graph-shaped but shallow (profile to source records and identifiers), while the profile, lineage and consent workloads are transactional and relational. At 2 million profiles, Postgres does both; a graph store earns its place at much larger, deeper traversal workloads.
+5. **"A source sends a delete for a record. Is that the same as a GDPR erasure?"** — Expected: no. A source delete removes one source's record and may just mean the CRM record was a duplicate; the profile survives on its other sources, with lineage updated. A GDPR erasure is person-scoped, fans out to every source copy and downstream consumer, and is tracked to acknowledged completion. Conflating them either under-deletes (privacy breach) or over-deletes (data loss).
+
+**Common candidate mistakes**
+
+- Treating email as a unique person key, with no story for shared or recycled identifiers.
+- Picking a winning source per record instead of per field.
+- Merging destructively, so a wrong merge can never be undone.
+- Erasure that stops at the profile database and forgets the warehouse, the archive, backups and downstream tools.
+- Claiming exactly-once delivery from sources that retry files and webhooks.
+- Reaching for big-data tooling at 2 million profiles while hand-waving the matching logic, which is the actual problem.
+
+**What a senior candidate mentions unprompted**
+
+- The precision-over-recall asymmetry, and that it is a privacy position, not a tuning detail.
+- Blocking keys: matching never compares against the whole base.
+- Field-level lineage as the thing that makes audit, disputes and splits possible.
+- Consent as timestamped, per-channel data with newest-wins semantics, independent of field survivorship.
+- Shadow replay with a diff before any matching or survivorship rule ships.
+- Daily reconciliation counts per source, because silent loader failure is the likeliest incident.
+
+**Scoring rubric (out of 10)**
+
+| Score | What it looks like |
+|---|---|
+| 9–10 | Staged pipeline with one merge path, per-field survivorship with lineage, precision-first matching with a review queue and split support, erasure tracked to acknowledged completion in every copy, delivery semantics stated precisely |
+| 7–8 | Sound ingestion and matching, survivorship present, but erasure fan-out or un-merge is hand-wavy |
+| 5–6 | Sources and a profile table named, matching reduced to "match on email", duplicates treated as an afterthought |
+| 3–4 | Each source writes straight into one table, last-write-wins, no lineage, no recovery from a wrong merge |
+| 0–2 | Claims exactly-once delivery, treats a source delete as a GDPR erasure, or merges on a single shared identifier with no safeguards |
+
+Sources: [Apache Kafka documentation — delivery semantics and design](https://kafka.apache.org/documentation/) · [European Commission — GDPR right to erasure guidance](https://commission.europa.eu/law/law-topic/data-protection_en) · [Segment Protocols and customer data platform documentation — identity resolution concepts](https://segment.com/docs/)

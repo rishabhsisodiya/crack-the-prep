@@ -1,0 +1,133 @@
+{
+  "meta": {
+    "title": "Key-Value Store \u2014 Leaderless Request Path",
+    "output": ".archify/build/key-value-store/architecture.html",
+    "quality_profile": "showcase"
+  },
+  "components": [
+    {
+      "id": "client",
+      "type": "external",
+      "label": "Client",
+      "sublabel": "GET / PUT by key"
+    },
+    {
+      "id": "coord",
+      "type": "backend",
+      "label": "Coordinator Node",
+      "sublabel": "any node can take the request"
+    },
+    {
+      "id": "ring",
+      "type": "backend",
+      "label": "Consistent Hash Ring",
+      "sublabel": "hash key \u2192 preference list"
+    },
+    {
+      "id": "n1",
+      "type": "database",
+      "label": "Replica 1",
+      "sublabel": "preference list node"
+    },
+    {
+      "id": "n2",
+      "type": "database",
+      "label": "Replica 2",
+      "sublabel": "preference list node"
+    },
+    {
+      "id": "n3",
+      "type": "database",
+      "label": "Replica 3",
+      "sublabel": "preference list node"
+    }
+  ],
+  "connections": [
+    {
+      "id": "c-co",
+      "from": "client",
+      "to": "coord",
+      "label": "request"
+    },
+    {
+      "id": "co-r",
+      "from": "coord",
+      "to": "ring",
+      "label": "hash key onto ring"
+    },
+    {
+      "id": "r-n1",
+      "from": "ring",
+      "to": "n1",
+      "label": "fan out to preference list"
+    },
+    {
+      "id": "r-n2",
+      "from": "ring",
+      "to": "n2"
+    },
+    {
+      "id": "r-n3",
+      "from": "ring",
+      "to": "n3"
+    },
+    {
+      "id": "n1-co",
+      "from": "n1",
+      "to": "coord",
+      "label": "ack",
+      "variant": "dashed"
+    },
+    {
+      "id": "n2-co",
+      "from": "n2",
+      "to": "coord",
+      "label": "ack",
+      "variant": "dashed"
+    },
+    {
+      "id": "n3-co",
+      "from": "n3",
+      "to": "coord",
+      "label": "ack",
+      "variant": "dashed"
+    },
+    {
+      "id": "co-c",
+      "from": "coord",
+      "to": "client",
+      "label": "success once W acks received"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Leaderless by design",
+      "items": [
+        "No single leader to bottleneck or fail over",
+        "The coordinator fans out to the key's N preference-list nodes"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Tunable consistency",
+      "items": [
+        "W acks to write, R responses to read \u2014 pick per request",
+        "'Latest write, I'll wait' and 'anything now' in the same store"
+      ]
+    },
+    {
+      "dot": "orange",
+      "title": "Why it exists",
+      "items": [
+        "Amazon's cart couldn't reject a write because a few nodes were unreachable",
+        "Billions of keys / tens of TB without a full-cluster rebuild"
+      ]
+    }
+  ],
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "layout": {
+    "mode": "auto"
+  }
+}

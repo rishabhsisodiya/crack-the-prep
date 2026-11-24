@@ -1,0 +1,238 @@
+---
+title: "Scenario — Nightly + Real-Time Sales Reporting for a Retail Chain"
+track: "system-design"
+kind: "notes"
+order: 64
+slug: "scenario-retail-reporting"
+updated: 2026-11-24
+description: "A Level 1 scenario: 300 stores send sales as nightly batch files plus a live order stream. Managers want near-real-time dashboards today; finance wants exact end-of-day numbers. Store offline/replay, duplicate files, and store-day timezones."
+---
+
+import Callout from '../../components/Callout.astro';
+import Mermaid from '../../components/Mermaid.astro';
+import ArchDiagram from '../../components/ArchDiagram.astro';
+
+Part of the [system design](/prep/system-design) series. This is a **scenario** page: you get the problem the way an interviewer would state it, then a full worked solution. **Level 1 — Mid-level engineer.** This one is deliberately simpler than the other scenarios: the win is a clean, correct design, not exotic technology.
+
+> **Original practice scenario** — written for interview preparation; not a question from any specific company's interview.
+
+## 1. The problem statement
+
+Here is how the interviewer puts it. Read it the way you would in the room — nothing in this section is the solution.
+
+> "We run a retail chain with **300 stores**. Every store has a point-of-sale (POS) system that records sales. At the end of the day, each store sends us a **batch file** with all of that day's sales. Stores also have a newer system that can send each order **live, as it happens**, as a stream of events — but not every store has it switched on yet, and store internet connections are unreliable: a store can be **offline for hours** and then send everything at once when it reconnects.
+>
+> Two groups want reports. **Store and regional managers** want a dashboard during the day: 'how are sales going *today*, per store, per hour?' — a few minutes of delay is fine. **Finance** wants the opposite: one **exact** report per day, after the day closes, that they can reconcile to the rupee. If finance's number and the dashboard's number for yesterday disagree, finance's number wins.
+>
+> Files sometimes get **sent twice** — a store retries an upload and we receive the same batch two times. That must not double the sales. Stores are in **different timezones**, and a store's 'day' is its own local day.
+>
+> Design the reporting system."
+
+**Functional requirements**
+
+- Ingest nightly batch files from 300 stores, and a live order stream from the stores that have it.
+- A near-real-time dashboard: today's sales per store / region / hour, a few minutes stale at most.
+- An exact end-of-day finance report per store per day, reconcilable to the source data.
+- Duplicate batch files and replayed orders must not double-count.
+- A store that was offline must be able to catch up by sending its backlog — and its sales must land on the *correct day*.
+
+**Non-functional requirements**
+
+- Correctness for finance beats freshness for dashboards, every time they conflict.
+- Any single day must be **reprocessable**: if something went wrong, you can rebuild that day's numbers from the raw inputs.
+- Keep it operable by a small team. This is 300 stores, not 300,000 — do not build a space programme.
+
+**Scale, to keep you honest:** 300 stores × a few thousand orders a day is on the order of a million orders a day — a few dozen orders per second on average, a few hundred at peak. Any mainstream stack handles this comfortably. The interesting problems here are *correctness* problems (duplicates, offline replay, day boundaries), not scale problems. Saying that out loud is worth marks.
+
+## 2. Clarifying questions to ask first
+
+Simple version first: the whole problem turns on two definitions — what counts as "a day," and which report is the truth when two reports disagree. Ask about those before any boxes and arrows.
+
+| Question | Why it matters |
+|---|---|
+| "When a store is offline and its orders arrive six hours late, do they count on the day they *happened* or the day they *arrived*?" | This is the single most important question. (The sane answer: the day they happened — the sale's own timestamp and store timezone decide. Everything else follows from it.) |
+| "Is the batch file the complete, authoritative record of a store's day?" | If yes, the nightly file can be the finance source of truth, and the live stream is a best-effort early view. If no, finance needs a different reconciliation story. |
+| "Do orders have a unique ID from the POS?" | Deduplication is easy with a stable order ID and somewhere between hard and impossible without one. If they don't, proposing one becomes part of your design. |
+| "Can a sale be corrected or refunded after the fact, and how does that arrive?" | Corrections change closed days. You need to know whether finance re-opens a day or books the correction on the day it was made. |
+| "How late can a batch file arrive and still count for that day?" | Sets the day-close rule: e.g. a store-day closes at local midnight + a grace window, after which the store is flagged missing rather than silently absent. |
+| "Do managers compare today's dashboard with yesterday's finance number?" | They will, whatever you say — so the dashboard should be labelled as provisional, and yesterday's dashboard view should be *replaced* by the finance number once the day closes. |
+
+<Callout type="tip">
+The mid-level trap in this problem is reaching for streaming technology first. The senior-sounding move at this level is the opposite: notice that the volumes are small, that the batch file is the natural source of truth, and that the stream is an *accelerator* for the dashboard — then design the correctness rules (IDs, store-days, reprocessing) carefully.
+</Callout>
+
+## 3. The solution, in simple language first
+
+Think of it as a shop's day book, kept two ways.
+
+1. **Every sale is written down raw, exactly as it arrived, and never erased.** Batch files and live events both land in a raw store first. If any report is ever questioned, you can rebuild it from these raw records.
+2. **The live stream writes the draft.** As orders arrive during the day, they update a running total — the dashboard. It is fast and useful, and it is understood to be a draft: an offline store's sales simply aren't in it yet.
+3. **The nightly batch writes the final version.** When a store's day closes, its batch file is processed as a complete set: that store-day's numbers are *recomputed from scratch* and replace whatever the draft said. Finance reads only these final numbers.
+4. **Duplicates are recognised, not feared.** Every order carries an ID. Processing the same file or the same order twice produces the same numbers, because writes are keyed on that ID — the second copy overwrites the first with identical data.
+5. **A "day" belongs to the store.** Each sale is assigned to a store-day using the store's own timezone and the time the sale happened — never the time it arrived and never UTC-by-default.
+
+## 4. Architecture
+
+<ArchDiagram src="scenario-retail-reporting/architecture" caption="Retail sales reporting architecture" />
+
+The same shape as a Mermaid sketch, for reference:
+
+
+**How the pieces fit:**
+
+- **Ingestion service** is the single front door for both paths. It validates each record (store ID known? order ID present? amounts sane?), stamps it with the store-day it belongs to, and writes it to the raw store. Anything invalid goes to a **dead-letter queue** with the reason — visible, countable, replayable after a fix, never silently dropped.
+- **The live path** is deliberately thin: a stream consumer (Kafka consumer group, or a small Flink/Spark streaming job — at this volume, even a well-written consumer service is fine) maintains running aggregates: sales per store per hour for *today*.
+- **The nightly batch job** is the authority. For each store-day that has closed, it recomputes the day's facts from the raw records — all of them, including the ones that arrived late via replay — and **overwrites** that store-day in the warehouse. Overwrite-a-partition is the key operation: it makes the batch idempotent by construction.
+- **The warehouse** (any columnar store — BigQuery, Snowflake, Redshift, or Postgres at this scale, honestly) holds one fact table of individual sales plus aggregate tables for dashboards and finance. Dashboards query the aggregates; finance queries the closed store-days.
+- **Monitoring** watches the things that actually go wrong here: stores that haven't sent a file by their deadline, stream lag, dead-letter volume, and a daily check comparing streamed totals vs. batch totals per store-day (a small, explainable gap *during* the day; zero unexplained gap after close).
+
+This shape has a name — a **lambda architecture** (a fast, approximate path plus a slow, exact path that corrects it). Name it, and immediately add that at this scale it's the *simple* version of the idea: one raw store, two jobs, no exotic serving layer.
+
+## 5. End-to-end data flow
+
+**During the day (live path):**
+
+1. A store sells something. The POS emits an order event with its unique order ID, the store ID, the sale's local timestamp, and the line items.
+2. The event goes to the order stream (Kafka, partitioned by store ID). The ingestion consumer validates it, assigns its store-day, and appends it to the raw store, keyed by order ID.
+3. The stream job updates today's running aggregates. The dashboard reads them — labelled "today, so far, provisional."
+
+**Store offline, then reconnecting:**
+
+1. The POS keeps selling and queues events locally (and still produces its nightly file — the file doesn't depend on the live connection).
+2. On reconnect it replays the queue. Events arrive hours late, possibly twice (it retried before an acknowledgement).
+3. Ingestion doesn't care: each event's store-day comes from *its own timestamp*, so a 2pm sale replayed at 8pm still lands on today, in the 2pm hour bucket. Duplicates are absorbed by the order-ID key (next section).
+
+**End of day (batch path):**
+
+1. A store's day closes at local midnight plus a grace window (say 2 hours) for its file to arrive.
+2. The nightly job takes the store's batch file — the complete record of that store-day — lands it raw, and recomputes the store-day's facts and totals from *all* raw records for that store-day (file + any streamed orders for that day).
+3. It overwrites that store-day's partition in the warehouse. The dashboard's view of yesterday now shows the finance number, because they're reading the same corrected data.
+4. Stores whose file hasn't arrived by the deadline are flagged on an exceptions list — a missing store is an alert, not a silent zero.
+
+## 6. Technology choices, batch vs. streaming, storage
+
+- **Stream:** Kafka for the live orders (durable, replayable, partitioned by store). At this volume, Kinesis/Pub/Sub or even a managed queue would also be defensible — the property that matters is *durable and replayable*, not the brand.
+- **Batch:** files land in object storage (S3/GCS); a scheduled Spark job — or plain SQL/Python at this scale — does the nightly recompute. Don't oversell Spark here; a million rows a day is a small job.
+- **Storage:** raw records in object storage or an append-only table (partitioned by store-day); the warehouse holds the fact table (one row per order line, partitioned by store-day, clustered by store) plus two aggregate tables: hourly running totals (for dashboards) and daily closed totals (for finance).
+- **Batch vs. streaming is not either/or here** — it's a division of labour. Streaming answers "how is today going?" and is allowed to be incomplete. Batch answers "what exactly happened yesterday?" and is not allowed to be wrong. Each is simple because it only has one job.
+
+**Partitioning and parallelism:** everything partitions by store-day, and within it by store. That gives natural parallelism (300 stores process independently), cheap reprocessing (one store-day is a small, bounded unit of work), and pruning on every dashboard query.
+
+## 7. The hard parts (which are all correctness parts)
+
+### Deduplication and idempotency — the worked example
+
+Two duplicate sources: the same **file** sent twice, and the same **order** arriving twice (stream replay, or once in the stream and once in the file). Both are solved by the same rule: *writes are keyed, never blind appends.*
+
+- **File level:** each file carries (or is assigned on arrival) an identity — store ID + store-day + a content hash. If a file with the same hash for the same store-day was already processed, it is skipped and logged. Same store-day, *different* hash? That's a corrected file: process it, and let the store-day overwrite (below) replace the numbers.
+- **Order level:** the fact table's key is the order ID (plus store). Landing a record is an upsert:
+
+```sql
+-- Land one order (or a batch of them) — safe to run any number of times
+MERGE INTO sales_fact AS target
+USING incoming_orders AS source
+  ON target.store_id = source.store_id
+ AND target.order_id = source.order_id
+WHEN MATCHED THEN UPDATE SET *
+WHEN NOT MATCHED THEN INSERT *;
+```
+
+- **Day level:** the nightly job doesn't *add to* the day's totals — it **recomputes and replaces** the whole store-day partition. Run it once, run it five times, the answer is identical. This "overwrite, don't accumulate" rule is the simplest idempotency there is, and it's the right default at this scale.
+
+In Python-flavoured pseudocode, the nightly job is almost boring — and boring is the goal:
+
+```python
+for store_day in closed_store_days():
+    records = raw.read(store=store_day.store, day=store_day.day)  # file + stream, deduped by order_id
+    facts = dedupe_by_order_id(records)
+    warehouse.replace_partition(store=store_day.store, day=store_day.day, rows=facts)
+    reconcile(store_day, expected_count=store_day.file_record_count, actual=len(facts))
+```
+
+### Timezones and store-day boundaries
+
+- Every store has a configured timezone. A sale's store-day = the calendar date of the sale's timestamp **in that store's timezone**. A sale at 11:30pm local on Monday is Monday's sale even if it arrives Tuesday and even though it's already Tuesday in UTC.
+- Store the original local timestamp, the UTC timestamp, and the derived store-day on every record. Deriving the day once, at ingestion, and storing it means no report ever re-derives it differently.
+- Day close is per store: local midnight + grace window. The nightly job processes each store-day as it closes, not one global midnight sweep.
+
+### Retry, failure handling, checkpointing and recovery
+
+- Stream consumer commits its Kafka offset only after the records are written to the raw store — crash, restart, re-read, upserts absorb the duplicates.
+- A failed nightly job re-runs the affected store-days only; because the job replaces partitions, a re-run needs no cleanup and no apology.
+- **Recovery by reprocessing a day** is the headline feature, not an edge case: any store-day can be rebuilt from raw at any time. Yesterday's file was corrupt? Fix it, re-land it, re-run that store-day. This works *because* raw records are never mutated and the batch job is deterministic.
+- Late corrections after a day is closed: the corrected file (or correction records) reprocesses that store-day and the finance report is re-issued as a new version — with the change visible, not silently edited. Whether finance *accepts* restated days is a business policy; the system's job is to make it possible and auditable.
+
+### Monitoring, security, scalability, cost
+
+- **Monitoring:** missing-store alerts at each store-day deadline; stream lag; dead-letter counts; the daily stream-vs-batch comparison per store-day; file record counts vs. landed record counts (the reconcile step above).
+- **Security:** store credentials scoped per store for uploads/stream publishing (one store can't write as another); PII is minimal here (orders, not customers), but payment references are tokenised references only — card data never enters this system.
+- **Scalability, including 10x:** 3,000 stores or 10M orders/day changes quantities, not design: more Kafka partitions, a bigger nightly window or per-region schedules, warehouse auto-scaling. The first real strain would be the single nightly batch window — the fix is closing store-days per timezone through the day (which the design already does) rather than one global run.
+- **Cost:** this is a small system. Object storage and a warehouse with per-day partitioning, a modest Kafka cluster, one scheduled batch job. The main cost discipline is not streaming everything through always-on compute when a scheduled job meets the requirement — the live path is the only always-on piece, and it's thin.
+
+## 8. Trade-offs
+
+| Decision | Chosen | Alternative | Why not the alternative |
+|---|---|---|---|
+| Source of truth for finance | The nightly batch recompute | Trust the stream's running totals | The stream can miss offline stores and double-see replays; finance needs a number that was computed from the complete set |
+| Duplicate handling | Keyed upserts + partition overwrite | Try to prevent duplicates at the source | You can't — retries and replays are facts of life. Absorb duplicates instead of forbidding them |
+| Day definition | Store-local day, derived at ingestion | UTC days for everyone | A store's Monday sales would split across two reports; managers and finance would never agree with the store's own till records |
+| Dashboard freshness | Minutes, provisional | Real-time to the second | Costs always-on streaming complexity to buy precision the users explicitly said they don't need |
+| Reprocessing | Rebuild any store-day from raw | Patch wrong numbers with manual adjustments | Patches are unauditable and unreproducible; a rebuild is a button |
+
+**The delivery-guarantee honesty paragraph:** the stream gives **at-least-once** delivery — a POS retry or a consumer restart can deliver an order twice, and this design doesn't claim otherwise. It doesn't need to: because every write is keyed on the order ID and every day is recomputed rather than accumulated, a duplicate delivery has **exactly-once effect** on the numbers. **At-most-once** (drop on doubt) would lose real sales, which is the one thing finance will never forgive. At this scale, at-least-once + idempotent writes is not a compromise — it's the correct engineering answer.
+
+## 9. Interviewer follow-up Q&As
+
+1. **"A store uploads the same file twice. What exactly happens?"** — The second file has the same store, store-day and content hash as the first, so it's recognised and skipped. Even if it weren't, its orders would upsert onto the same order IDs and the nightly job would replace the same partition with the same numbers. Two independent safety nets.
+2. **"A store was offline all day. Its dashboard shows zero. Is that a bug?"** — No — it's the honest state of the live path, and the dashboard should show "no data received since 10am" rather than a confident zero. When the store reconnects and replays, its sales land on the correct hours and days, and the nightly file makes the day exact.
+3. **"The dashboard says Store 12 did ₹4.1 lakh yesterday; finance says ₹4.0 lakh. Who's right and why did it happen?"** — Finance, by definition — their number is computed from the complete store-day. The dashboard's streamed total likely included a duplicated replay or missed a correction that the file carried. After the nightly overwrite, the dashboard reads the same corrected partition, so the disagreement heals itself overnight.
+4. **"An order arrives in the live stream but is missing from the nightly file. What do you do?"** — That's exactly what the reconciliation step is for: the nightly job counts file records vs. landed records per store-day and flags mismatches. The streamed order is in raw, so the recompute includes it — but the mismatch is reported, because a POS whose file and stream disagree has a bug worth knowing about.
+5. **"How do refunds work in this design?"** — A refund is a record like any other — negative amount, its own ID, referencing the original order — assigned to the store-day it *occurred* on (per the policy you clarified up front). It flows through both paths and the same dedup rules.
+6. **"Why not just have the dashboard query the POS databases directly?"** — 300 stores, 300 unreliable connections, 300 schemas to babysit, and dashboard queries hammering tills during trading hours. Centralising the data once is cheaper, faster, and it's the only way finance and managers can ever look at the same numbers.
+7. **"The nightly job fails at 90% of stores done. What's the state of the system?"** — 90% of store-days are correctly closed; 10% still show yesterday's streamed draft and are flagged as not-closed. Re-running the job only redoes the missing store-days, and because each store-day is an independent partition replace, there's no partial-day corruption to clean up.
+8. **"A store in a different timezone closes its day while your headquarters is at lunch. Does your 'nightly' job handle that?"** — Yes — there's no single night. Each store-day closes on its own schedule (local midnight + grace), and the job processes store-days as they close. "Nightly" describes the pattern, not a single run.
+9. **"What if two different orders somehow share an order ID?"** — Then the ID isn't an ID, and dedup will eat a real sale. Defence in depth: the key is (store, order ID) so cross-store collisions are impossible, the POS generates IDs from a store-scoped sequence/UUID, and the reconciliation counts would surface a within-store collision as a count mismatch.
+10. **"How would you add a new report — say, sales by product category — next quarter?"** — The fact table already holds order lines, so it's a new aggregation over existing facts, backfillable for any past day by reprocessing. This is the payoff of keeping raw records and line-level facts instead of only pre-aggregated totals.
+
+## 10. Interview-ready spoken answer (~2 minutes)
+
+> "I'd start by pinning down two definitions: a 'day' is the store's local day, decided by when the sale happened — not when it arrived — and when the dashboard and finance disagree, finance wins.
+>
+> The volumes here are modest — about a million orders a day — so the hard part isn't scale, it's correctness: duplicates, offline stores, and day boundaries.
+>
+> The design is a simple lambda shape. Everything lands raw first: live order events from a Kafka stream, and the nightly batch files into object storage, both through one ingestion step that validates records and stamps each one with its store-day. During the day, a stream job keeps running totals per store per hour — that's the managers' dashboard, and it's explicitly provisional. When a store's day closes — local midnight plus a grace window — a batch job recomputes that store-day completely from the raw records and overwrites it in the warehouse. Finance only reads closed store-days.
+>
+> Duplicates are handled by keying, not by hope: every order has an ID, landing is an upsert on that ID, duplicate files are recognised by store, day and content hash, and the nightly job replaces a day's numbers instead of adding to them — so running anything twice changes nothing. Delivery is at-least-once; the *effect* is exactly-once, and I'd say it that way.
+>
+> And because raw data is never mutated and every store-day is independently reprocessable, the recovery story for almost any failure is the same sentence: fix the input, re-run that store-day."
+
+## 11. Mock interview mode
+
+**Five hard follow-ups, with expected answers:**
+
+1. *"Your stream consumer dies at 6pm and restarts at 6:20. The dashboard team says the 6pm hour looks doubled. Explain."* — Expected: on restart the consumer re-reads from its last committed offset; if it had processed records but not committed, those orders are delivered again (at-least-once). They should *not* double the numbers, because landing is an upsert on order ID — so if the hour really doubled, the aggregation is accumulating instead of keying, and that's the bug to name. The nightly recompute fixes the day regardless.
+2. *"Finance needs the March report restated because a store sent a corrected file for March 14th. Walk me through it."* — Expected: land the corrected file raw (same store-day, new hash — so it's processed, not skipped), re-run that one store-day's recompute, replace the partition, re-issue the report as a new version with the delta visible. No other days touched.
+3. *"Why did you partition everything by store-day instead of just by date?"* — Expected: because "date" is ambiguous across timezones and because the unit of closing, reprocessing, and reconciliation is one store's one day. Partitioning by the unit you operate on makes every operation — close, rebuild, audit — small and independent.
+4. *"A store's POS clock is wrong by a day. Its sales all land on the wrong store-day. How do you notice, and how do you fix it?"* — Expected: notice via reconciliation and sanity checks (a store whose file date and record dates disagree, or a sudden zero day followed by a double day). Fix: correct the derived store-day for that store's records in raw-land/reprocess — the raw timestamps are preserved, so you can re-derive store-days and rebuild the two affected days.
+5. *"The business opens 50 stores in a new country, 10 timezones away, mid-year. What changes?"* — Expected: almost nothing structurally — store timezone is configuration, day-close already runs per store, partitions are per store-day. The honest additions: currency becomes a real field (report in local + converted), and the batch schedule spreads further across the clock.
+
+**Common candidate mistakes:**
+
+- Designing for scale that isn't there (sharding, exotic streaming platforms) while hand-waving duplicates.
+- Using arrival date or UTC for the day boundary — the quiet killer in this problem.
+- Letting the dashboard's streamed number be the finance number "because it's usually right."
+- Accumulating totals (`total += amount`) instead of recomputing/replacing, making every retry a corruption.
+- Treating a missing store file as a zero-sales day instead of an exception to alert on.
+
+**What a senior candidate mentions unprompted:** that the volumes are small and the problems are correctness problems; store-day as the unit of everything (partition, close, reprocess, reconcile); overwrite-don't-accumulate; a missing store is an alert, not a zero; and labelling the dashboard as provisional so the two audiences never fight over two numbers.
+
+**Scoring rubric (out of 10):**
+
+| Score | What it sounds like |
+|---|---|
+| 3–4 | One pipeline, totals accumulated, duplicates and timezones unaddressed |
+| 5–6 | Batch + stream both present, dedup by order ID mentioned, but day boundaries fuzzy |
+| 7–8 | Lambda shape with a clear source of truth, keyed upserts, store-local days, reprocessable store-days |
+| 9–10 | All of the above, plus reconciliation/exceptions for missing stores, corrected-file handling, and the at-least-once vs. exactly-once-effect distinction stated cleanly |
+
+Sources: written from standard, publicly documented practice — [Apache Kafka documentation (delivery semantics)](https://kafka.apache.org/documentation/) · the lambda-architecture pattern as described in Nathan Marz's public writing on batch + speed layers. No specific company's interview question is reproduced or claimed.

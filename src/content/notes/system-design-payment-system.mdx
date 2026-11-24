@@ -10,6 +10,7 @@ description: "Designing a payment system around idempotency keys, a double-entry
 
 import Callout from '../../components/Callout.astro';
 import Mermaid from '../../components/Mermaid.astro';
+import ArchDiagram from '../../components/ArchDiagram.astro';
 
 Part of the [system design](/prep/system-design) series. See the [framework](/prep/system-design) and [building blocks](/prep/system-design/building-blocks) first if you haven't.
 
@@ -31,7 +32,8 @@ Part of the [system design](/prep/system-design) series. See the [framework](/pr
 
 ## 2. Where it sits / high-level architecture
 
-<Mermaid caption="Request path from client to settled ledger entry" code={`flowchart LR
+<ArchDiagram src="payment-system/architecture" caption="Request path from client to settled ledger entry">
+<Mermaid code={`flowchart LR
   C[Client / Merchant] -->|POST /charges + Idempotency-Key| API[Payment API]
   API --> IK[(Idempotency store)]
   API --> SM[Payment state machine]
@@ -45,6 +47,7 @@ Part of the [system design](/prep/system-design) series. See the [framework](/pr
   Recon[Reconciliation job] --> Ledger
   Recon --> PSP
 `} />
+</ArchDiagram>
 
 - The **idempotency store** guards the API boundary — the same key returns the same recorded result, never re-executes the charge.
 - The **outbox pattern** ties the state transition and the ledger write to one local transaction, so "committed the intent but never emitted the ledger event" can't happen.

@@ -1,0 +1,183 @@
+{
+  "meta": {
+    "title": "Ticket Booking \u2014 Waiting Room, Seat Holds, No Double-Sell",
+    "output": ".archify/build/ticket-booking/architecture.html",
+    "quality_profile": "showcase"
+  },
+  "components": [
+    {
+      "id": "user",
+      "type": "external",
+      "label": "User",
+      "sublabel": "buys tickets"
+    },
+    {
+      "id": "wr",
+      "type": "backend",
+      "label": "Virtual Waiting Room",
+      "sublabel": "admits with a token"
+    },
+    {
+      "id": "gw",
+      "type": "cloud",
+      "label": "API Gateway",
+      "sublabel": "entry point"
+    },
+    {
+      "id": "cat",
+      "type": "backend",
+      "label": "Catalog Service",
+      "sublabel": "movies \u00b7 venues \u00b7 shows"
+    },
+    {
+      "id": "cc",
+      "type": "database",
+      "label": "Catalog Cache / CDN",
+      "sublabel": "static catalog reads"
+    },
+    {
+      "id": "sm",
+      "type": "backend",
+      "label": "Seat Map Service",
+      "sublabel": "live seat view"
+    },
+    {
+      "id": "sc",
+      "type": "database",
+      "label": "Seat Status Cache",
+      "sublabel": "Redis bitmap per show"
+    },
+    {
+      "id": "bk",
+      "type": "backend",
+      "label": "Booking Service",
+      "sublabel": "holds + confirms"
+    },
+    {
+      "id": "inv",
+      "type": "database",
+      "label": "Seat Inventory DB",
+      "sublabel": "source of truth"
+    },
+    {
+      "id": "pay",
+      "type": "backend",
+      "label": "Payment Service",
+      "sublabel": "charges the user"
+    },
+    {
+      "id": "swp",
+      "type": "backend",
+      "label": "Hold Expiry Sweeper",
+      "sublabel": "releases expired holds"
+    }
+  ],
+  "connections": [
+    {
+      "id": "u-w",
+      "from": "user",
+      "to": "wr",
+      "label": "joins queue"
+    },
+    {
+      "id": "w-g",
+      "from": "wr",
+      "to": "gw",
+      "label": "admitted token",
+      "variant": "emphasis"
+    },
+    {
+      "id": "g-c",
+      "from": "gw",
+      "to": "cat",
+      "label": "browse catalog"
+    },
+    {
+      "id": "c-cc",
+      "from": "cat",
+      "to": "cc",
+      "label": "cached reads"
+    },
+    {
+      "id": "g-s",
+      "from": "gw",
+      "to": "sm",
+      "label": "view seats"
+    },
+    {
+      "id": "s-sc",
+      "from": "sm",
+      "to": "sc",
+      "label": "seat status"
+    },
+    {
+      "id": "g-b",
+      "from": "gw",
+      "to": "bk",
+      "label": "hold / confirm",
+      "variant": "emphasis"
+    },
+    {
+      "id": "b-i",
+      "from": "bk",
+      "to": "inv",
+      "label": "conditional hold",
+      "variant": "emphasis"
+    },
+    {
+      "id": "b-p",
+      "from": "bk",
+      "to": "pay",
+      "label": "take payment"
+    },
+    {
+      "id": "p-b",
+      "from": "pay",
+      "to": "bk",
+      "label": "webhook: success or fail",
+      "variant": "dashed"
+    },
+    {
+      "id": "i-sc",
+      "from": "inv",
+      "to": "sc",
+      "label": "status change events",
+      "variant": "dashed"
+    },
+    {
+      "id": "sw-i",
+      "from": "swp",
+      "to": "inv",
+      "label": "expire holds"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Reads",
+      "items": [
+        "Catalog and seat-map reads are cached \u2014 they never hit the inventory DB"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Holds",
+      "items": [
+        "A hold is a conditional update on the seat inventory \u2014 one winner only",
+        "Payment webhook confirms or releases the hold"
+      ]
+    },
+    {
+      "dot": "orange",
+      "title": "Fairness",
+      "items": [
+        "The waiting room admits users with tokens, flattening the on-sale spike"
+      ]
+    }
+  ],
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "layout": {
+    "mode": "auto"
+  }
+}

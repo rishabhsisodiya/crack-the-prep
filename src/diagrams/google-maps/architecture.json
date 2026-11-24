@@ -1,0 +1,137 @@
+{
+  "meta": {
+    "output": ".archify/build/google-maps/architecture.html",
+    "title": "Google Maps \u2014 Tile Serving and Routing, Two Subsystems",
+    "quality_profile": "showcase"
+  },
+  "components": [
+    {
+      "id": "client",
+      "label": "Client",
+      "sublabel": "map view + navigation",
+      "type": "external"
+    },
+    {
+      "id": "cdn",
+      "label": "CDN / Tile Cache",
+      "sublabel": "tiles keyed by zoom, x, y",
+      "type": "cloud"
+    },
+    {
+      "id": "tilesvc",
+      "label": "Tile Rendering Service",
+      "sublabel": "base map + traffic overlay",
+      "type": "backend"
+    },
+    {
+      "id": "geodb",
+      "label": "Indexed Map Data",
+      "sublabel": "roads, POIs, imagery",
+      "type": "database"
+    },
+    {
+      "id": "routeapi",
+      "label": "Routing API",
+      "sublabel": "source, destination, mode",
+      "type": "backend"
+    },
+    {
+      "id": "routing",
+      "label": "Routing Engine",
+      "sublabel": "Contraction Hierarchies / A*",
+      "type": "backend"
+    },
+    {
+      "id": "graph",
+      "label": "Road Graph",
+      "sublabel": "precomputed shortcuts",
+      "type": "database"
+    },
+    {
+      "id": "traffic",
+      "label": "Live Traffic Ingestion",
+      "sublabel": "anonymised speed samples",
+      "type": "cloud"
+    }
+  ],
+  "connections": [
+    {
+      "from": "client",
+      "id": "c-cdn",
+      "label": "tiles",
+      "to": "cdn"
+    },
+    {
+      "from": "cdn",
+      "id": "cdn-tile",
+      "label": "miss",
+      "to": "tilesvc",
+      "variant": "dashed"
+    },
+    {
+      "from": "tilesvc",
+      "id": "tile-geo",
+      "to": "geodb"
+    },
+    {
+      "from": "client",
+      "id": "c-route",
+      "label": "src, dst",
+      "to": "routeapi"
+    },
+    {
+      "from": "routeapi",
+      "id": "route-eng",
+      "to": "routing"
+    },
+    {
+      "from": "routing",
+      "id": "eng-graph",
+      "to": "graph"
+    },
+    {
+      "from": "traffic",
+      "id": "traffic-graph",
+      "label": "edge weight updates",
+      "to": "graph"
+    },
+    {
+      "from": "traffic",
+      "id": "traffic-tile",
+      "label": "traffic tiles",
+      "to": "tilesvc",
+      "variant": "dashed"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Two subsystems",
+      "items": [
+        "Tile serving is CDN-cacheable, near-static and read-dominated \u2014 ~1.7M req/s at peak estimates",
+        "Routing is a specialised low-latency graph query; the halves barely share request-time infrastructure"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Contraction Hierarchies",
+      "items": [
+        "Offline contraction adds shortcuts past unimportant nodes, so queries run sub-millisecond",
+        "Precomputation bakes in static edge costs \u2014 live traffic does not cleanly fit the model"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Graceful degradation",
+      "items": [
+        "Traffic pipeline dies: fall back to last-known or time-of-day average weights \u2014 ETAs get worse, never broken",
+        "Road closures ride a fast exception layer on top of the stale precomputed graph"
+      ]
+    }
+  ],
+  "diagram_type": "architecture",
+  "layout": {
+    "mode": "auto"
+  },
+  "schema_version": 1
+}

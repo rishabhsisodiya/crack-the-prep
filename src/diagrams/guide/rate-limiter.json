@@ -1,0 +1,109 @@
+{
+  "cards": [
+    {
+      "dot": "cyan",
+      "items": [
+        "The limit is global but each server sees only its own traffic \u2014 state must be shared",
+        "Token bucket is the default: smooth average rate with controlled bursts"
+      ],
+      "title": "Why distributed is hard"
+    },
+    {
+      "dot": "emerald",
+      "items": [
+        "One Lua script refills by elapsed time, spends a token if available, writes back \u2014 one round trip, ~0.5ms",
+        "Extreme scale: shard buckets by client key, or sync a local approximate counter to Redis periodically"
+      ],
+      "title": "Atomic check in Redis"
+    },
+    {
+      "dot": "rose",
+      "items": [
+        "Fail open (allow) for a customer-facing API; fail closed for an abuse-prone endpoint",
+        "Alternatives: fixed window allows a 2x edge burst; sliding-window log is accurate but costs memory"
+      ],
+      "title": "When Redis is down"
+    }
+  ],
+  "components": [
+    {
+      "id": "client",
+      "label": "Client",
+      "sublabel": "API key / user / IP",
+      "type": "external"
+    },
+    {
+      "id": "fleet",
+      "label": "Stateless API Servers",
+      "sublabel": "fleet \u00b7 each sees only its own traffic",
+      "type": "backend"
+    },
+    {
+      "id": "limiter",
+      "label": "Rate Limiter Check",
+      "sublabel": "token bucket \u00b7 Lua script",
+      "type": "backend"
+    },
+    {
+      "id": "redis",
+      "label": "Redis Token Bucket",
+      "sublabel": "tokens + timestamp \u00b7 atomic update",
+      "type": "database"
+    },
+    {
+      "id": "upstream",
+      "label": "Upstream Service",
+      "sublabel": "allowed requests proceed",
+      "type": "backend"
+    },
+    {
+      "id": "denied",
+      "label": "429 + Retry-After",
+      "sublabel": "limit exceeded \u00b7 e.g. 1,000 req/min",
+      "type": "external"
+    }
+  ],
+  "connections": [
+    {
+      "from": "client",
+      "id": "c-f",
+      "label": "request",
+      "to": "fleet"
+    },
+    {
+      "from": "fleet",
+      "id": "f-l",
+      "label": "check limit",
+      "to": "limiter"
+    },
+    {
+      "from": "limiter",
+      "id": "l-r",
+      "label": "Lua: refill + spend atomically",
+      "to": "redis"
+    },
+    {
+      "from": "limiter",
+      "id": "l-u",
+      "label": "allowed: token spent",
+      "to": "upstream"
+    },
+    {
+      "from": "limiter",
+      "id": "l-d",
+      "label": "denied: bucket empty",
+      "to": "denied",
+      "variant": "dashed"
+    }
+  ],
+  "diagram_type": "architecture",
+  "layout": {
+    "mode": "auto"
+  },
+  "meta": {
+    "output": ".archify/build/guide/rate-limiter.html",
+    "quality_profile": "showcase",
+    "title": "Distributed Rate Limiter \u2014 Token Bucket in Redis"
+  },
+  "schema_version": 1
+}

@@ -10,6 +10,7 @@ description: "Designing a Dynamo-style distributed key-value store: partitioning
 
 import Callout from '../../components/Callout.astro';
 import Mermaid from '../../components/Mermaid.astro';
+import ArchDiagram from '../../components/ArchDiagram.astro';
 
 Part of the [system design](/prep/system-design) series. See the [framework](/prep/system-design) and [building blocks](/prep/system-design/building-blocks) first if you haven't.
 
@@ -28,7 +29,8 @@ Part of the [system design](/prep/system-design) series. See the [framework](/pr
 
 ## 2. High-level architecture
 
-<Mermaid caption="Client request path in a leaderless key-value store" code={`flowchart LR
+<ArchDiagram src="key-value-store/architecture" caption="Client request path in a leaderless key-value store">
+<Mermaid code={`flowchart LR
   C[Client] --> CO[Coordinator node<br/>any node can take the request]
   CO -->|hash key onto ring| R{Consistent hash ring}
   R --> N1[(Replica 1)]
@@ -37,6 +39,7 @@ Part of the [system design](/prep/system-design) series. See the [framework](/pr
   N1 & N2 & N3 -->|ack| CO
   CO -->|success once W acks received| C
 `} />
+</ArchDiagram>
 
 Any node can act as coordinator for any request — there's no single leader to bottleneck or fail over. The coordinator hashes the key onto a [consistent-hash ring](/prep/system-design/consistent-hashing) (this is where that piece plugs in directly) to find the key's **preference list** — the N nodes responsible for it — and fans the request out to them.
 

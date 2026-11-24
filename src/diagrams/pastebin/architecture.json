@@ -1,0 +1,143 @@
+{
+  "cards": [
+    {
+      "dot": "cyan",
+      "items": [
+        "Metadata rows stay tiny and fast in a KV store",
+        "Bodies up to 10 MB live in object storage, compressed 3\u20135\u00d7"
+      ],
+      "title": "Storage split"
+    },
+    {
+      "dot": "emerald",
+      "items": [
+        "CDN + cache in front of a key-value lookup",
+        "Immutable pastes cache perfectly; random IDs keep unlisted pastes unguessable"
+      ],
+      "title": "Read path"
+    },
+    {
+      "dot": "rose",
+      "items": [
+        "Read path checks expires_at on every read and returns 404 if expired",
+        "Cleaner is only garbage collection; burn-after-read uses atomic delete"
+      ],
+      "title": "Expiry"
+    }
+  ],
+  "components": [
+    {
+      "id": "user",
+      "label": "User",
+      "sublabel": "creates a paste",
+      "type": "external"
+    },
+    {
+      "id": "viewer",
+      "label": "Viewer",
+      "sublabel": "opens a paste URL",
+      "type": "external"
+    },
+    {
+      "id": "api",
+      "label": "Paste API",
+      "sublabel": "create paste",
+      "type": "backend"
+    },
+    {
+      "id": "cdn",
+      "label": "CDN",
+      "sublabel": "cached reads",
+      "type": "cloud"
+    },
+    {
+      "id": "read-svc",
+      "label": "Read Service",
+      "sublabel": "checks expiry on every read",
+      "type": "backend"
+    },
+    {
+      "id": "meta",
+      "label": "Metadata KV",
+      "sublabel": "id, owner, expiry, visibility, blob key",
+      "type": "database"
+    },
+    {
+      "id": "obj",
+      "label": "Object Storage",
+      "sublabel": "compressed paste body",
+      "type": "cloud"
+    },
+    {
+      "id": "expiry",
+      "label": "Expiry Cleaner",
+      "sublabel": "background sweeper",
+      "type": "backend"
+    }
+  ],
+  "connections": [
+    {
+      "from": "user",
+      "id": "u-api",
+      "to": "api"
+    },
+    {
+      "from": "api",
+      "id": "api-meta",
+      "label": "write metadata",
+      "to": "meta"
+    },
+    {
+      "from": "api",
+      "id": "api-obj",
+      "label": "write body",
+      "to": "obj"
+    },
+    {
+      "from": "viewer",
+      "id": "v-cdn",
+      "to": "cdn"
+    },
+    {
+      "from": "cdn",
+      "id": "cdn-rd",
+      "to": "read-svc"
+    },
+    {
+      "from": "read-svc",
+      "id": "rd-meta",
+      "label": "lookup + expiry check",
+      "to": "meta"
+    },
+    {
+      "from": "read-svc",
+      "id": "rd-obj",
+      "label": "fetch body",
+      "to": "obj"
+    },
+    {
+      "from": "expiry",
+      "id": "exp-meta",
+      "label": "delete expired",
+      "to": "meta",
+      "variant": "dashed"
+    },
+    {
+      "from": "expiry",
+      "id": "exp-obj",
+      "label": "delete blobs",
+      "to": "obj",
+      "variant": "dashed"
+    }
+  ],
+  "diagram_type": "architecture",
+  "layout": {
+    "mode": "auto"
+  },
+  "meta": {
+    "output": ".archify/build/pastebin/architecture.html",
+    "quality_profile": "showcase",
+    "title": "Pastebin \u2014 Metadata in KV, Content in Blob Storage"
+  },
+  "schema_version": 1
+}

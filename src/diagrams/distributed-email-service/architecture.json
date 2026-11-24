@@ -1,0 +1,200 @@
+{
+  "meta": {
+    "title": "Email Service \u2014 Independent Inbound and Outbound Paths",
+    "output": ".archify/build/distributed-email-service/architecture.html",
+    "quality_profile": "showcase"
+  },
+  "components": [
+    {
+      "id": "u1",
+      "type": "external",
+      "label": "User Composes",
+      "sublabel": "outbound mail"
+    },
+    {
+      "id": "sub",
+      "type": "backend",
+      "label": "Submission API",
+      "sublabel": "accepts outgoing mail"
+    },
+    {
+      "id": "oq",
+      "type": "messagebus",
+      "label": "Outbound Queue",
+      "sublabel": "decouples sending"
+    },
+    {
+      "id": "send",
+      "type": "backend",
+      "label": "Sending MTA",
+      "sublabel": "DKIM / SPF sign"
+    },
+    {
+      "id": "ext",
+      "type": "external",
+      "label": "External Mail Server",
+      "sublabel": "SMTP peer"
+    },
+    {
+      "id": "bounce",
+      "type": "backend",
+      "label": "Bounce / Complaint Handler",
+      "sublabel": "protects reputation"
+    },
+    {
+      "id": "ext2",
+      "type": "external",
+      "label": "External Sender",
+      "sublabel": "inbound mail"
+    },
+    {
+      "id": "mx",
+      "type": "backend",
+      "label": "Inbound MTA / MX",
+      "sublabel": "receives SMTP"
+    },
+    {
+      "id": "spam",
+      "type": "security",
+      "label": "Spam + Virus Filter",
+      "sublabel": "before delivery"
+    },
+    {
+      "id": "route",
+      "type": "backend",
+      "label": "Mailbox Router",
+      "sublabel": "per-user delivery"
+    },
+    {
+      "id": "store",
+      "type": "database",
+      "label": "Mail Store",
+      "sublabel": "sharded by user"
+    },
+    {
+      "id": "idx",
+      "type": "database",
+      "label": "Search Index",
+      "sublabel": "full-text search"
+    },
+    {
+      "id": "u2",
+      "type": "external",
+      "label": "User Reads Mail",
+      "sublabel": "mailbox access"
+    },
+    {
+      "id": "api",
+      "type": "backend",
+      "label": "Mailbox API",
+      "sublabel": "read + search"
+    }
+  ],
+  "connections": [
+    {
+      "id": "u1-s",
+      "from": "u1",
+      "to": "sub",
+      "label": "compose / send"
+    },
+    {
+      "id": "s-o",
+      "from": "sub",
+      "to": "oq",
+      "label": "queue mail"
+    },
+    {
+      "id": "o-m",
+      "from": "oq",
+      "to": "send",
+      "label": "send mail",
+      "variant": "emphasis"
+    },
+    {
+      "id": "m-e",
+      "from": "send",
+      "to": "ext",
+      "label": "SMTP"
+    },
+    {
+      "id": "m-b",
+      "from": "send",
+      "to": "bounce",
+      "label": "bounces / complaints",
+      "variant": "dashed"
+    },
+    {
+      "id": "e2-mx",
+      "from": "ext2",
+      "to": "mx",
+      "label": "SMTP"
+    },
+    {
+      "id": "mx-sp",
+      "from": "mx",
+      "to": "spam",
+      "label": "filter mail",
+      "variant": "emphasis"
+    },
+    {
+      "id": "sp-r",
+      "from": "spam",
+      "to": "route",
+      "label": "clean mail"
+    },
+    {
+      "id": "r-st",
+      "from": "route",
+      "to": "store",
+      "label": "deliver to mailbox"
+    },
+    {
+      "id": "st-i",
+      "from": "store",
+      "to": "idx",
+      "label": "index mail",
+      "variant": "dashed"
+    },
+    {
+      "id": "u2-a",
+      "from": "u2",
+      "to": "api",
+      "label": "read mail"
+    },
+    {
+      "id": "a-st",
+      "from": "api",
+      "to": "store",
+      "label": "fetch messages"
+    },
+    {
+      "id": "a-i",
+      "from": "api",
+      "to": "idx",
+      "label": "search"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Outbound",
+      "items": [
+        "Submission \u2192 queue \u2192 sending MTA, signed with DKIM/SPF",
+        "Bounces and complaints feed back to protect sender reputation"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Inbound",
+      "items": [
+        "MX servers receive, the spam/virus filter runs before the router delivers into the per-user sharded mail store",
+        "Reads go through the mailbox API against the store and search index"
+      ]
+    }
+  ],
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "layout": {
+    "mode": "auto"
+  }
+}

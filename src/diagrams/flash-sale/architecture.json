@@ -1,0 +1,157 @@
+{
+  "meta": {
+    "title": "Flash Sale \u2014 A Funnel That Rejects Early",
+    "output": ".archify/build/flash-sale/architecture.html",
+    "quality_profile": "showcase"
+  },
+  "components": [
+    {
+      "id": "users",
+      "type": "external",
+      "label": "10M Users",
+      "sublabel": "sale opens"
+    },
+    {
+      "id": "cdn",
+      "type": "cloud",
+      "label": "CDN",
+      "sublabel": "static page \u00b7 countdown \u00b7 assets"
+    },
+    {
+      "id": "gw",
+      "type": "security",
+      "label": "Gateway",
+      "sublabel": "rate limit \u00b7 bot checks \u00b7 sale token"
+    },
+    {
+      "id": "flag",
+      "type": "backend",
+      "label": "Sold-Out Flag",
+      "sublabel": "local check, near-free"
+    },
+    {
+      "id": "soldout",
+      "type": "backend",
+      "label": "Return Sold Out",
+      "sublabel": "cheap rejection"
+    },
+    {
+      "id": "inv",
+      "type": "backend",
+      "label": "Inventory Service",
+      "sublabel": "Redis atomic decrement"
+    },
+    {
+      "id": "mq",
+      "type": "messagebus",
+      "label": "Order Queue",
+      "sublabel": "absorbs the spike"
+    },
+    {
+      "id": "ord",
+      "type": "backend",
+      "label": "Order Workers",
+      "sublabel": "async fulfilment"
+    },
+    {
+      "id": "db",
+      "type": "database",
+      "label": "Orders DB",
+      "sublabel": "confirmed orders"
+    },
+    {
+      "id": "pay",
+      "type": "backend",
+      "label": "Payment",
+      "sublabel": "charges the buyer"
+    }
+  ],
+  "connections": [
+    {
+      "id": "u-c",
+      "from": "users",
+      "to": "cdn",
+      "label": "load sale page"
+    },
+    {
+      "id": "c-g",
+      "from": "cdn",
+      "to": "gw",
+      "label": "buy request"
+    },
+    {
+      "id": "g-f",
+      "from": "gw",
+      "to": "flag",
+      "label": "sold out?"
+    },
+    {
+      "id": "f-s",
+      "from": "flag",
+      "to": "soldout",
+      "label": "yes \u2014 reject"
+    },
+    {
+      "id": "f-i",
+      "from": "flag",
+      "to": "inv",
+      "label": "no \u2014 try to buy",
+      "variant": "emphasis"
+    },
+    {
+      "id": "i-m",
+      "from": "inv",
+      "to": "mq",
+      "label": "stock left",
+      "variant": "emphasis"
+    },
+    {
+      "id": "i-s2",
+      "from": "inv",
+      "to": "soldout",
+      "label": "no stock \u2014 reject",
+      "variant": "dashed"
+    },
+    {
+      "id": "m-o",
+      "from": "mq",
+      "to": "ord",
+      "label": "process order"
+    },
+    {
+      "id": "o-d",
+      "from": "ord",
+      "to": "db",
+      "label": "write order"
+    },
+    {
+      "id": "o-p",
+      "from": "ord",
+      "to": "pay",
+      "label": "take payment"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "The funnel",
+      "items": [
+        "Each layer rejects most remaining traffic before the next, more expensive layer",
+        "Most users are turned away by the CDN, gateway or a local flag \u2014 never reaching inventory"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "The buy",
+      "items": [
+        "One atomic Redis decrement decides who gets stock",
+        "Winners enter the order queue; payment and fulfilment happen async"
+      ]
+    }
+  ],
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "layout": {
+    "mode": "auto"
+  }
+}

@@ -1,0 +1,110 @@
+{
+  "meta": {
+    "title": "Rate Limiter \u2014 Placement Options",
+    "output": ".archify/build/rate-limiter/architecture-1.html",
+    "quality_profile": "showcase"
+  },
+  "components": [
+    {
+      "id": "client",
+      "type": "external",
+      "label": "Client"
+    },
+    {
+      "id": "gw",
+      "type": "cloud",
+      "label": "API Gateway / Edge",
+      "sublabel": "Cloudflare \u00b7 Kong \u00b7 Envoy"
+    },
+    {
+      "id": "lb",
+      "type": "cloud",
+      "label": "Load Balancer"
+    },
+    {
+      "id": "s1",
+      "type": "backend",
+      "label": "App Server",
+      "sublabel": "middleware limiter"
+    },
+    {
+      "id": "s2",
+      "type": "backend",
+      "label": "App Server",
+      "sublabel": "middleware limiter"
+    },
+    {
+      "id": "redis",
+      "type": "database",
+      "label": "Shared Counter Store",
+      "sublabel": "Redis"
+    }
+  ],
+  "connections": [
+    {
+      "id": "c-g",
+      "from": "client",
+      "to": "gw",
+      "label": "request"
+    },
+    {
+      "id": "g-l",
+      "from": "gw",
+      "to": "lb",
+      "label": "passes the edge limit"
+    },
+    {
+      "id": "l-s1",
+      "from": "lb",
+      "to": "s1"
+    },
+    {
+      "id": "l-s2",
+      "from": "lb",
+      "to": "s2"
+    },
+    {
+      "id": "s1-r",
+      "from": "s1",
+      "to": "redis",
+      "label": "check + increment"
+    },
+    {
+      "id": "s2-r",
+      "from": "s2",
+      "to": "redis",
+      "label": "check + increment"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Edge / gateway",
+      "items": [
+        "Stops abusive traffic before it costs bandwidth or app CPU",
+        "Where Cloudflare enforces its network-wide limits"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Middleware in the app",
+      "items": [
+        "Business-logic limits the edge can't know: per-user plan, per-API-key tier",
+        "Most production systems run both layers"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Why shared state",
+      "items": [
+        "A per-process counter is useless the moment you scale horizontally",
+        "The limiter must degrade, not disappear, if its dependency dies"
+      ]
+    }
+  ],
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "layout": {
+    "mode": "auto"
+  }
+}

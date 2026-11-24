@@ -1,0 +1,115 @@
+{
+  "meta": {
+    "title": "Hash Sharding \u2014 App-Side Router",
+    "output": ".archify/build/building-blocks/architecture-2.html",
+    "quality_profile": "showcase"
+  },
+  "components": [
+    {
+      "id": "app",
+      "type": "backend",
+      "label": "App",
+      "sublabel": "issues reads and writes"
+    },
+    {
+      "id": "router",
+      "type": "backend",
+      "label": "Shard Router",
+      "sublabel": "hash(key) mod N"
+    },
+    {
+      "id": "s0",
+      "type": "database",
+      "label": "Shard 0",
+      "sublabel": "key range by hash"
+    },
+    {
+      "id": "s1",
+      "type": "database",
+      "label": "Shard 1",
+      "sublabel": "key range by hash"
+    },
+    {
+      "id": "s2",
+      "type": "database",
+      "label": "Shard 2",
+      "sublabel": "key range by hash"
+    },
+    {
+      "id": "scatter",
+      "type": "backend",
+      "label": "Cross-Shard Query",
+      "sublabel": "scatter \u00b7 gather \u00b7 merge in the app"
+    }
+  ],
+  "connections": [
+    {
+      "id": "a-r",
+      "from": "app",
+      "to": "router",
+      "label": "every keyed request"
+    },
+    {
+      "id": "r-s0",
+      "from": "router",
+      "to": "s0",
+      "label": "hash routes to exactly one shard"
+    },
+    {
+      "id": "r-s1",
+      "from": "router",
+      "to": "s1"
+    },
+    {
+      "id": "r-s2",
+      "from": "router",
+      "to": "s2"
+    },
+    {
+      "id": "a-sc",
+      "from": "app",
+      "to": "scatter",
+      "label": "cross-shard query",
+      "variant": "dashed"
+    },
+    {
+      "id": "sc-s",
+      "from": "scatter",
+      "to": "s0",
+      "label": "fan-out to all shards",
+      "variant": "dashed"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Why shard",
+      "items": [
+        "Splits writes and storage across primaries",
+        "One shard stays the bottleneck for a hot key no matter the scheme"
+      ]
+    },
+    {
+      "dot": "orange",
+      "title": "Costs you must name",
+      "items": [
+        "Cross-shard queries and joins: fan-out + merge in the app",
+        "Cross-shard transactions need 2PC or a saga",
+        "Rebalancing when you add capacity"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Hot keys",
+      "items": [
+        "Split a celebrity key into sub-keys, or cache it hard",
+        "Directory-based sharding rebalances by moving ranges instead"
+      ]
+    }
+  ],
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "layout": {
+    "mode": "auto"
+  }
+}

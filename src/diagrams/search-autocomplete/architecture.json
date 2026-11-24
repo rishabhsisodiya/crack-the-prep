@@ -1,0 +1,143 @@
+{
+  "meta": {
+    "title": "Search Autocomplete \u2014 Offline-Ranked Trie",
+    "output": ".archify/build/search-autocomplete/architecture.html",
+    "quality_profile": "showcase"
+  },
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "layout": {
+    "mode": "auto"
+  },
+  "components": [
+    {
+      "id": "client",
+      "type": "external",
+      "label": "Client",
+      "sublabel": "debounced keystroke"
+    },
+    {
+      "id": "cdn",
+      "type": "backend",
+      "label": "CDN / Edge Cache",
+      "sublabel": "top global prefixes"
+    },
+    {
+      "id": "qps",
+      "type": "backend",
+      "label": "Query Processing Service",
+      "sublabel": "read path \u00b7 pure lookup"
+    },
+    {
+      "id": "cache",
+      "type": "database",
+      "label": "Redis",
+      "sublabel": "hot prefix cache"
+    },
+    {
+      "id": "trie",
+      "type": "backend",
+      "label": "Trie Service",
+      "sublabel": "sharded \u00b7 in-memory \u00b7 top-K per node"
+    },
+    {
+      "id": "logs",
+      "type": "database",
+      "label": "Query Logs Stream",
+      "sublabel": "executed searches"
+    },
+    {
+      "id": "agg",
+      "type": "backend",
+      "label": "Offline Aggregation",
+      "sublabel": "hourly / daily counts"
+    },
+    {
+      "id": "builder",
+      "type": "backend",
+      "label": "Trie Builder",
+      "sublabel": "builds new trie version"
+    }
+  ],
+  "connections": [
+    {
+      "id": "c-cdn",
+      "from": "client",
+      "to": "cdn",
+      "label": "debounced keystroke"
+    },
+    {
+      "id": "cdn-qps",
+      "from": "cdn",
+      "to": "qps",
+      "label": "miss"
+    },
+    {
+      "id": "qps-cache",
+      "from": "qps",
+      "to": "cache",
+      "label": "hot prefix lookup"
+    },
+    {
+      "id": "cache-trie",
+      "from": "cache",
+      "to": "trie",
+      "label": "miss",
+      "variant": "dashed"
+    },
+    {
+      "id": "trie-qps",
+      "from": "trie",
+      "to": "qps",
+      "label": "top-K completions"
+    },
+    {
+      "id": "qps-c",
+      "from": "qps",
+      "to": "client",
+      "label": "suggestions"
+    },
+    {
+      "id": "logs-agg",
+      "from": "logs",
+      "to": "agg"
+    },
+    {
+      "id": "agg-builder",
+      "from": "agg",
+      "to": "builder"
+    },
+    {
+      "id": "builder-trie",
+      "from": "builder",
+      "to": "trie",
+      "label": "swap new trie version"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Precompute offline",
+      "items": [
+        "Ranking happens in the offline pipeline, never at request time",
+        "A lookup walks the prefix and returns its precomputed top-K"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Memory-speed read path",
+      "items": [
+        "CDN and Redis cover hot prefixes; the sharded trie serves the rest",
+        "p99 well under 100ms, set by typing cadence"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Failure mode",
+      "items": [
+        "The trie is a derived structure, rebuildable from query logs",
+        "If it dies, suggestions disappear \u2014 search itself keeps working"
+      ]
+    }
+  ]
+}

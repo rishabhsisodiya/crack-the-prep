@@ -10,6 +10,7 @@ description: "How frontend system design rounds differ from backend ones, and a 
 
 import Callout from '../../components/Callout.astro';
 import Mermaid from '../../components/Mermaid.astro';
+import ArchDiagram from '../../components/ArchDiagram.astro';
 
 Part of the [system design](/prep/system-design) series. Frontend problems: [News Feed UI](/prep/system-design/frontend-news-feed) · [Autocomplete Widget](/prep/system-design/frontend-autocomplete) · [Chat App UI](/prep/system-design/frontend-chat-app) · [Offline-First App](/prep/system-design/frontend-offline-first) · [E-commerce Product & Checkout](/prep/system-design/frontend-ecommerce).
 
@@ -34,7 +35,8 @@ Spend roughly: Requirements ~10%, Architecture ~15%, Data model ~10%, Interface 
 
 **A — Architecture.** Draw the main components and their responsibilities: view components, a client store/cache, a data-fetching layer, and the server. Say which parts are server-rendered.
 
-<Mermaid caption="A typical client architecture — views read from a client store; a data layer talks to the server" code={`flowchart LR
+<ArchDiagram src="frontend-system-design/architecture" caption="A typical client architecture — views read from a client store; a data layer talks to the server">
+<Mermaid code={`flowchart LR
   subgraph Browser
     V[View components] --> CTRL[Controllers / hooks<br/>user intent]
     CTRL --> STORE[(Client store / cache<br/>normalized entities)]
@@ -45,6 +47,7 @@ Spend roughly: Requirements ~10%, Architecture ~15%, Data model ~10%, Interface 
   end
   DL -->|HTTP / WebSocket| API[Server API]
 `} />
+</ArchDiagram>
 
 **D — Data model.** The client-side entities and where each piece of state lives:
 - **Server state** (posts, users) — cached copies of server data; needs invalidation, pagination, staleness rules. Libraries like TanStack Query, SWR, Apollo/Relay handle this.

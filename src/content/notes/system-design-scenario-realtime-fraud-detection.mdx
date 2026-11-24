@@ -1,0 +1,294 @@
+---
+title: "Scenario — Real-Time Fraud Scoring in Under 100 ms"
+track: "system-design"
+kind: "notes"
+order: 66
+slug: "scenario-realtime-fraud-detection"
+updated: 2026-11-24
+description: "A scenario-based interview problem: score every payment for fraud in under 100 ms p99 at 20K transactions/sec, with an online/offline feature store, a rules plus ML ensemble, a strict false-positive budget, and labels that arrive days later as chargebacks."
+---
+
+import Callout from '../../components/Callout.astro';
+import ArchDiagram from '../../components/ArchDiagram.astro';
+
+Part of the [system design](/prep/system-design) series. This is a **scenario** page: you get the problem the way an interviewer would state it, then a full worked solution. **Level 3 — Lead / Architect.**
+
+> **Original practice scenario** — written for interview preparation; not a question from any specific company's interview.
+
+## 1. The problem statement
+
+Here is how the interviewer puts it. Read it the way you would in the room — nothing in this section is the solution.
+
+> "We process card payments for online merchants. Before we authorise a payment, we want a fraud decision: approve, challenge with extra verification, send to manual review, or block. The decision has to come back in **under 100 milliseconds at p99, end to end** — the merchant's checkout is waiting on us, and every extra 100 ms of checkout latency measurably costs conversion.
+>
+> Peak volume is **20,000 transactions per second**. The decision uses signals like the account's recent velocity, whether this device and IP have been seen before, amount patterns, and how this transaction compares with the customer's history — features computed from data that is itself streaming in.
+>
+> Two things make this harder than a normal scoring service. First, **blocking a good customer is expensive**: every false positive is lost revenue and an insulted customer, and the business gives us a strict false-positive budget — roughly, we may wrongly block well under **1 percent of good transactions**. Second, we usually do not know whether we were right until **days later**, when a chargeback or a fraud report arrives. Some transactions are never labelled at all.
+>
+> Design the real-time scoring system: the online path, the features, the decision logic, and the loop that learns from outcomes."
+
+**Functional requirements**
+
+- Return a fraud decision (approve, challenge, review, block) for every payment authorisation request.
+- Combine deterministic rules (hard blocks, velocity limits) with an ML model score in one decision.
+- Compute and serve features — velocity counters, device and IP reputation, customer history aggregates — fresh enough to catch an attack in progress.
+- Record every decision with the exact features, rule outcomes, model version and score used, so any decision can be explained and replayed later.
+- Ingest delayed outcome labels (chargebacks, fraud reports, manual review verdicts) and feed them back into training and rule tuning.
+- Support rolling out a new model version safely: shadow scoring, canary, and instant rollback.
+
+**Non-functional requirements**
+
+- Latency: under 100 ms p99 end to end for the scoring call at 20,000 transactions/sec peak, with headroom.
+- Availability of the decision path must match the payment path: if scoring is down, payments either stop (lost revenue) or flow unscored (fraud losses) — the fallback behaviour must be a deliberate, per-segment decision.
+- False positives are budgeted: the system must be tunable to hold wrongly blocked good transactions well under 1 percent, and must measure itself against that budget continuously.
+- No double decisions: a retried authorisation request must not be scored and logged as two independent transactions, and a decision once made for a transaction must be reproducible.
+- Training/serving consistency: the features the model trains on must mean the same thing as the features it sees online — no training/serving skew by construction, not by hope.
+- Audit: every block must be explainable after the fact (which rules fired, what the model saw, which version decided).
+
+## 2. Clarifying questions to ask first
+
+Ask these before drawing anything. Each one changes the design.
+
+| Question | Why it matters |
+|---|---|
+| Is the 100 ms budget for our scoring call alone, or does it include the merchant's network hop and the rest of authorisation? | It decides how much you actually have — often 40–60 ms of usable budget — and therefore how many feature lookups and model calls you can afford. |
+| What actions can a decision take — only approve/block, or also challenge (3-D Secure, OTP) and manual review? | A challenge option changes the whole economics: borderline transactions get stepped up instead of blocked, which is how you hold the false-positive budget. |
+| What is the actual cost asymmetry — a missed fraud versus a wrongly blocked good customer, per segment? | A 5,000-dollar electronics order and a 5-dollar subscription do not deserve the same threshold or the same fallback. This sets thresholds per segment, not one global number. |
+| Which features must be real-time (seconds old) and which can be hourly or daily? | Velocity during an attack must be seconds-fresh; a customer's 90-day average can be daily. Separating them is what makes the online store small and fast. |
+| How do labels arrive, how late, and how complete are they? | Chargebacks arrive in days to weeks and only cover some fraud; review verdicts arrive in hours. Label delay and bias decide the training pipeline and how much you can trust offline metrics. |
+| When scoring is slow or down, what should happen — fail open or fail closed — and who decides? | There is no universally right answer; there is a per-segment policy (fail open for small, low-risk; fail closed or challenge for high-value). Getting the interviewer to state it is the senior move. |
+| Are there hard compliance rules that must never be overridden by the model — sanctioned entities, stolen-card lists? | Rules that legally must fire sit outside and above the model, and the model must never be able to vote them down. |
+| What volume of manual review can operations actually staff? | The review queue is a human capacity constraint. A design that routes 5 percent to review with staffing for 0.5 percent is a design that silently approves the overflow. |
+
+<Callout type="tip">
+The single highest-value clarification here is the fallback policy: fail open or fail closed, per segment, decided in advance. Every candidate designs the happy path; senior candidates design what happens at 03:00 when the feature store is down, and can price both errors — fraud loss versus blocked good customers — in the same sentence.
+</Callout>
+
+## 3. The solution, in plain language first
+
+The simple version: when an authorisation request arrives, a scoring service gathers a small set of precomputed features — it does not compute anything heavy on the spot — runs cheap deterministic rules first, then asks a versioned ML model for a score, combines the two into one decision, writes the decision down exactly once, and answers, all inside the 100 ms budget. The heavy work happens off the critical path: a stream processor keeps the online feature store continuously updated as transactions flow, and a separate offline pipeline rebuilds the same features from history for training, using the same feature definitions so training and serving cannot drift apart. Days later, when chargebacks and review verdicts arrive, they join back to the recorded decisions and become the labels the next model trains on.
+
+Why precompute features instead of querying source systems at decision time? Because the budget forbids it. At 100 ms p99 you can afford a handful of in-memory or Redis lookups and one model inference. You cannot afford joins across three databases. The whole architecture follows from that one fact: move every expensive computation to write time, keep the read path embarrassingly small.
+
+## 4. Architecture
+
+<ArchDiagram src="scenario-realtime-fraud-detection/architecture" caption="Real-time fraud scoring architecture: payments through Kafka into a sub-100 ms scoring service backed by an online feature store, rules engine and ML ensemble, with an offline store and delayed label loop for training" />
+
+**Component by component**
+
+- **Checkout and payments API.** The caller. It sends the authorisation request — amount, card token, device, IP, merchant, account — and waits for the decision. It owns the overall authorisation timeout and treats the scoring budget as a contract, not a hope.
+- **Kafka.** Every transaction event (requests, decisions, outcomes) is published to Kafka, partitioned by account ID. It is the feed for feature computation, the decision log's transport, and the replayable record that the offline pipeline trains from. Note what Kafka is not doing here: the synchronous scoring call does not go through Kafka — the latency budget will not tolerate a broker hop in the middle of the decision. Kafka carries the asynchronous copies; the decision itself is a direct service call.
+- **Scoring service.** The orchestrator on the critical path, stateless and horizontally scaled. It fetches features, evaluates rules, calls the model, applies the decision policy (thresholds per segment, challenge versus block), and writes the decision record idempotently — in that order, against a strict internal time budget per step, with a deadline after which it falls back rather than overruns.
+- **Online feature store.** Redis (or an equivalent low-latency store) holding precomputed features keyed by account, card, device and IP: velocity counters over sliding windows, last-seen timestamps, reputation flags, and pointers to longer-history aggregates. Reads are single-digit milliseconds. A stream processor updates it continuously from the Kafka transaction feed.
+- **Rules engine.** Deterministic, human-authored rules: hard blocks (stolen-card and sanctions lists), velocity caps, and known attack patterns. Rules are configuration with versions, evaluated in microseconds to low milliseconds, and their outcomes are recorded individually — a rule firing is an explanation, not just an input to the score.
+- **ML model ensemble.** One or more versioned models (typically a gradient-boosted model doing most of the work, sometimes a specialised model for account takeover or first-party fraud) served in-process or as a co-located inference service to keep the call inside the budget. The ensemble combines into a single calibrated score. Every model artifact is versioned, and the serving config pins which version is live, which is in shadow, and which is canarying.
+- **Dedup and decision log.** The system of record for decisions: one row per transaction ID, written with a conditional insert, carrying the feature snapshot (or a pointer to it), rule outcomes, model version, score, decision and latency. This is what makes audits, replays, disputes and label joins possible.
+- **Offline store and training pipeline.** The lake-side mirror: historical features computed with point-in-time correctness, joined to delayed labels, used to train and evaluate new model versions. Feature definitions are shared code with the online path — one definition, two executions (streaming and batch) — which is the only reliable cure for training/serving skew.
+- **Downstream actions.** Approve, challenge (step-up verification), manual review queue, block. Review verdicts are themselves labels and flow back as outcomes.
+- **Monitoring.** Latency histograms per step, decision mix (approve, challenge, review, block rates), feature-store freshness and hit rates, model score distributions, and drift detectors comparing live feature and score distributions against training. A block-rate spike is paged like an outage, because commercially it is one.
+
+## 5. End-to-end data flow
+
+1. The payments API receives an authorisation request with a unique transaction ID and calls the scoring service synchronously, with a deadline inside the 100 ms budget.
+2. The scoring service first checks the decision log for that transaction ID. A hit means this is a retry: return the recorded decision, do not score again.
+3. It fetches the feature set from the online store in one pipelined round trip: account and card velocity, device and IP reputation, amount-versus-history aggregates. Each fetch has its own small timeout; a missing feature is passed as missing, not as zero — the model was trained to know the difference.
+4. The rules engine evaluates. A hard-block rule ends the flow immediately with a block decision and its reason. Other rule outcomes become inputs and explanations alongside the model score.
+5. The model ensemble scores the transaction. The decision policy combines rule outcomes and the calibrated score against per-segment thresholds: below the low threshold, approve; in the middle band, challenge or route to review depending on segment and review capacity; above the high threshold, block.
+6. The decision is written to the decision log with a conditional insert on the transaction ID, together with the feature snapshot reference, rule outcomes, model version and score — then returned to the payments API. Total elapsed time is recorded against the budget.
+7. In parallel and off the critical path, the transaction and its decision are published to Kafka. The stream processor updates velocity counters and reputation features in the online store, so the next transaction for this account, seconds later, sees this one.
+8. Hours to weeks later, outcomes arrive: review verdicts, fraud reports, chargebacks. They are joined to the decision log by transaction ID, producing labelled examples with the exact features and model version that decided them — the training set, and the scorecard for the false-positive and catch-rate budgets.
+
+## 6. Technology choices, and why
+
+| Decision | Choice | Why | Alternative considered |
+|---|---|---|---|
+| Decision transport | Direct synchronous service call (gRPC) with a hard deadline | The 100 ms p99 budget cannot absorb a broker round trip; gRPC with connection pooling keeps the call to low single-digit milliseconds of overhead | Scoring via Kafka request/reply — elegant and decoupled, and too slow and jittery for this budget; Kafka still carries the async copies |
+| Online feature store | Redis, features precomputed by a stream processor | Single-digit millisecond reads, atomic counters and sliding-window structures for velocity, TTLs that age features out naturally | Querying source databases at decision time — the latency budget forbids it, and a source outage becomes a scoring outage |
+| Stream processing for features | Flink or Kafka Streams | Event-time windows and checkpointed state for velocity features; exactly the counters an attack-in-progress needs, seconds fresh | Batch-only features — an hour-old velocity counter does not see a card being tested 200 times in five minutes |
+| Model serving | In-process or co-located inference of a gradient-boosted ensemble, versioned artifacts | Inference in low milliseconds with no extra network hop; version pinning makes shadow, canary and rollback configuration changes, not deployments | A remote model microservice per model — each hop eats budget and adds a failure mode; justified only when models are large (deep networks on raw sequences) |
+| Offline features and training | Lake tables (Parquet/Iceberg) with point-in-time joins, shared feature-definition code | Point-in-time correctness prevents label leakage; shared definitions prevent training/serving skew | Separately hand-written batch SQL for training features — the classic skew factory; it works until the day it silently does not |
+| Decision log | Append-only store keyed by transaction ID (Postgres or a wide-column store), conditional inserts | One reproducible decision per transaction, joinable to late labels, auditable per decision | Logging to files or metrics only — you cannot join a chargeback to a log line reliably, and you cannot answer a dispute with a dashboard |
+
+**Batch vs streaming.** This system is streaming where freshness is the point and batch where correctness is the point. Velocity and reputation features stream, because fraud arrives in bursts that batch cannot see. Training data is built in batch, because point-in-time-correct joins over weeks of history and late labels are a batch-shaped problem, and because training on streaming-approximate features teaches the model a slightly different world than the one it was evaluated on. The contract between the two is the shared feature definition: the same code computes a feature online (incrementally, in the stream processor) and offline (over history, in batch), and a parity job continuously compares the two on sampled transactions and alerts when they diverge. Parity is measured, not assumed.
+
+## 7. Partitioning and parallelism
+
+- Kafka partitions by account ID: all events for one account stay ordered on one partition, so velocity features computed from the stream are coherent per account, and the stream processor's keyed state needs no cross-partition coordination.
+- The scoring service itself is stateless — all state lives in the feature store and the decision log — so it scales horizontally behind a load balancer. At 20,000 transactions/sec with, say, 30 ms of average service time, you need on the order of 600 concurrent in-flight slots; size the fleet for peak plus a failed availability zone, not for average.
+- The feature store is sharded by the same account key, with the hottest keys (a major merchant's settlement account, a popular shared device fingerprint) watched explicitly: a single hot key is bounded by one shard, and the mitigation is key splitting for counters or short-TTL local caching of read-mostly reputation features, with the staleness risk named.
+- Model inference parallelises trivially across requests and batches poorly at this latency — do not batch inference requests to improve throughput if it spends the latency budget to do it. Throughput comes from replicas, not from making individual decisions wait for company.
+- The offline pipeline partitions by transaction date and account range, so point-in-time feature rebuilds and label joins run as parallel batch slices and can be re-run for a single day when a label file is corrected.
+
+## 8. Storage strategy
+
+- **Online feature store:** only what the decision needs, in Redis, with TTLs matched to each feature's meaning — velocity windows expire in minutes to hours, reputation features in days to weeks. Keeping the online store small is a latency feature, not just a cost feature.
+- **Decision log:** every decision, retained for years per financial-record policy, partitioned by date. It is append-only; corrections (a late label, a reversed decision) are new rows joined by transaction ID, never edits.
+- **Raw transaction archive:** all transaction and outcome events in the lake as Parquet, partitioned by event date — the replayable source for feature rebuilds and investigations.
+- **Offline feature tables:** point-in-time feature snapshots per training example, versioned alongside the model that trained on them, so any model version can be re-evaluated against exactly the features it would have seen.
+- **Model and rules registry:** every model artifact, feature-definition version and ruleset version stored immutably, with the serving config history — because "what decided this transaction" must be answerable months later, during a dispute.
+
+## 9. Deduplication and idempotency, with a worked example
+
+Retries here are not hypothetical: the payments API times out, the merchant retries, a network blip replays a request. If each retry were scored independently, one purchase could produce two decision records, two velocity increments and, in the worst case, two different decisions — approve the first, block the retry — which is both a customer-facing absurdity and an audit failure. The defence is the transaction ID as an idempotency key, checked before scoring and enforced again at write time.
+
+```python
+# Score a transaction at most once: retries return the first decision.
+def score(txn, features_store, rules, model, decision_log):
+    # 1. Fast path: this transaction was already decided.
+    existing = decision_log.get(txn.id)
+    if existing:
+        metrics.inc("duplicate_scoring_request")
+        return existing.decision            # same answer, no re-scoring
+
+    features = features_store.fetch_pipelined(txn)   # one round trip
+    fired = rules.evaluate(txn, features)            # hard blocks first
+    if fired.hard_block:
+        decision = Decision("block", reasons=fired.reasons)
+    else:
+        score_value = model.score(features)          # pinned live version
+        decision = policy.decide(score_value, fired, txn.segment)
+
+    # 2. Conditional write: only the first writer's decision stands.
+    stored = decision_log.insert_if_absent(
+        txn_id=txn.id,
+        decision=decision,
+        model_version=model.version,
+        ruleset_version=rules.version,
+        feature_snapshot_ref=features.snapshot_ref,
+        score=decision.score,
+    )
+    if stored is None:                     # lost a race with a retry
+        return decision_log.get(txn.id).decision
+    return decision
+```
+
+And the velocity side effect gets the same treatment — a retried transaction must not count twice towards the very counters used to catch fraud:
+
+```sql
+-- Count each transaction once in the velocity feature, even on replay.
+INSERT INTO velocity_events (txn_id, account_id, event_ts, amount)
+VALUES ($1, $2, $3, $4)
+ON CONFLICT (txn_id) DO NOTHING;
+-- Velocity is a COUNT/SUM over this table (or a stream state keyed
+-- the same way), so a duplicate insert changes nothing.
+```
+
+Worked example: a merchant's checkout sends an authorisation; the scoring service decides approve in 41 ms, but the response is lost to a network reset. The merchant retries with the same transaction ID. Step 1 finds the recorded decision and returns approve immediately — no second feature fetch, no second model call, no second velocity increment, and the decision log still holds exactly one row, which the eventual outcome label will join to cleanly. Two rules make this work. First, the transaction ID is created **once, by the payments layer, at the first attempt** — if a retry minted a fresh ID, dedup would be blind, so retries must be required to reuse it (and a genuinely new purchase gets a new ID, which is correct: it is a new transaction). Second, the decision is written **before** the response is considered delivered, with the conditional insert as the race-breaker, so a crash between deciding and responding causes a retry that returns the stored decision rather than a re-score.
+
+## 10. Retry, failure handling, checkpointing and recovery
+
+- **Fallback policy, decided in advance, per segment:** if the model call times out, fall back to rules-only scoring with tightened thresholds (rules alone catch the known-bad cheaply). If the feature store is unavailable, apply the segment policy: low-value, established-account transactions fail open with rules-only scoring and an alert; high-value or new-device transactions fail closed into challenge or review, not silent approval. Every fallback decision is flagged in the decision log, so its outcomes can be measured separately afterwards — an unmeasured fallback is an unpriced risk.
+- **Deadlines, not just timeouts:** the scoring service carries one end-to-end deadline and per-step budgets (features, rules, model). When the deadline is exhausted it returns the fallback decision rather than overrunning into the payments timeout, because a fast fallback beats a slow perfect answer that the caller has already abandoned.
+- **Stream processor crash:** the feature pipeline restarts from its last checkpoint (Kafka offsets plus window state together); velocity features are rebuilt from the checkpoint, and any gap is visible as a feature-freshness metric dipping — which itself can trigger a temporary tightening of thresholds until freshness recovers.
+- **Poison events** (malformed transaction or outcome records): route to a dead-letter topic after a small number of attempts, with the raw payload and error; a bad label file must never stall the feature stream.
+- **Model rollback:** serving config pins the live version; rollback is a config flip to the previous artifact, effective in seconds, rehearsed like a deployment. A bad model is an incident with a known, fast reversal — not a redeploy.
+- **Decision log unavailable:** this is the one dependency that must not fail open silently. If the decision cannot be recorded, the safe behaviour for most segments is to challenge or review rather than approve unrecorded — a decision you cannot prove you made is a liability, and the interviewer is listening for whether you noticed.
+
+## 11. Monitoring and observability
+
+- **Latency, per step and end to end:** feature fetch, rules, model, total — as histograms with p50, p99 and p99.9 against the 100 ms budget. An average latency graph hides exactly the tail this system is contracted on.
+- **Decision mix:** approve, challenge, review and block rates, overall and per segment and per model version. A block-rate jump after a deploy is a rollback signal; a block-rate jump with no deploy is an attack or a data problem, and either way it pages.
+- **Budget tracking:** realised false-positive rate (from review verdicts and good-customer disputes) and fraud catch rate (from labels), tracked against the stated budgets with the honest caveat that labels lag by days — so short-term proxies (review overturn rate) are monitored alongside.
+- **Feature health:** store freshness (seconds since last update per key class), missing-feature rate, and online/offline parity divergence from the comparison job.
+- **Model health:** score distribution drift, feature distribution drift, and shadow-model divergence — how often the candidate model would have decided differently from the live one.
+- Structured logs and traces carry the transaction ID end to end, so one disputed decision can be reconstructed completely: features, rules, model version, score, decision, latency.
+
+## 12. Security
+
+- Card data never enters this system in raw form: scoring works on tokens and network-provided identifiers, keeping the service out of the heaviest PCI scope and ensuring a feature-store breach does not become a card breach.
+- Feature data is personal and behavioural data: encrypt in transit and at rest, restrict feature-store and decision-log access to named services, and log reads of the decision log — it is a favourite target for attackers probing what triggers a block.
+- **Adversarial awareness:** fraudsters probe the system, so the API must not leak which rule fired to the caller; externally, a block is a generic decline, while the detailed reasons stay in the internal decision log. Rate-limit and authenticate every internal caller, and treat sudden probing patterns (many small amounts, rotating devices) as a signal the features should capture.
+- Ruleset and model changes are privileged, audited operations with two-person approval for hard-block lists — an attacker or a careless edit that blocks a whole segment is an availability incident caused from inside.
+- Retention and erasure obligations apply to behavioural profiles too: feature and decision data carry retention policies, and subject-erasure requests are handled by deleting or anonymising the person's features and identifiers while keeping the minimum decision record financial regulation requires — name that tension rather than pretending it away.
+
+## 13. Scalability, the 10x question, and cost
+
+**At 10x (200,000 transactions/sec):** the decision path scales by adding stateless scoring replicas and feature-store shards — the architecture holds. What breaks first is not throughput but the tail: p99 latency degrades under hot keys, a single availability zone loss during peak, and model inference cost if the ensemble grows heavier. Answers: keep features precomputed and the online store sharded by account; run active-active across zones with the latency budget measured per zone; and treat any proposed new feature or model as a latency purchase that must be justified — every feature added to the online path spends budget that cannot be spent twice. The offline side scales as ordinary batch: more partitions, longer windows, larger training sets.
+
+**Cost levers:** inference compute at peak dominates, so model size is a cost decision as much as an accuracy one; the online store holds only decision-grade features, with everything else in cheap lake storage; manual review is the most expensive component per transaction, so routing precision (sending review only what humans can actually change) is a cost control, not just an operations nicety. And the governing economic frame: the system's cost is justified against fraud losses prevented minus good revenue wrongly blocked — a senior answer keeps both terms in view, because optimising either alone bankrupts the other.
+
+## 14. Trade-offs, stated honestly
+
+| Choice | You gain | You pay |
+|---|---|---|
+| Precomputed features over decision-time queries | The 100 ms p99 budget is achievable at all | Features are only as fresh as the stream pipeline; a lagging pipeline silently degrades decision quality until freshness monitoring catches it |
+| Rules plus model, not model alone | Hard blocks are guaranteed, decisions are explainable, known attacks are caught on day one without training data | Two systems to version, test and keep consistent; rules rot as fraud moves, and someone must own pruning them |
+| Fail open for low-risk segments when dependencies degrade | Checkout keeps converting during a feature-store incident | You accept unpriced fraud exposure for the duration, bounded only by segment caps and how fast you notice |
+| Recording the full feature snapshot per decision | Any decision is explainable, replayable and joinable to late labels | Real storage and write cost at 20,000 decisions/sec, and a sensitive store that must be secured and retained carefully |
+| Shared feature definitions for online and offline | No training/serving skew by construction; parity is checkable | One definition must serve two execution engines; some features are genuinely hard to compute identically in both, and those need explicit approximation and monitoring |
+
+<Callout type="warn">
+Say this sentence in the interview: "This design does not deliver exactly-once delivery — no design over retrying payment clients can. It delivers at-least-once delivery of transaction events with idempotent decision-making, which gives exactly-once *effects*: one transaction, one decision record, one velocity increment." Conflating delivery with effects is the most common senior-level slip in this problem.
+</Callout>
+
+**Delivery semantics, precisely.** At-most-once (never retry) would lose transactions and outcome labels — unacceptable when a lost label is a fraud you never learn from and a lost decision record is an audit hole. At-least-once plus the transaction-ID claim in Section 9 is the sweet spot: retries from merchants, replays from Kafka and restarts of the feature pipeline all converge to one decision and one count. Exactly-once delivery end to end is not on offer, because the merchant, the networks and the card schemes are outside your transactional control. What you can honestly promise is exactly-once *effects* inside your own stores, plus reproducibility: given the recorded feature snapshot and the pinned model and ruleset versions, any decision can be re-derived exactly.
+
+## 15. Interviewer follow-up Q&As
+
+1. **"Your p99 is 100 ms. Break the budget down for me."** — Roughly: a few milliseconds of network and service overhead, 5–10 ms for one pipelined feature fetch, 1–5 ms for rules, 10–30 ms for ensemble inference, a few milliseconds for the conditional decision write, and the rest held as headroom for jitter and zone variance. The exact numbers matter less than showing the budget exists, each step is measured against it, and a deadline enforces it.
+2. **"The feature store goes down at peak. What happens in the next sixty seconds?"** — Circuit breakers trip, the per-segment fallback engages: rules-only scoring, fail open for low-value established accounts within caps, fail into challenge or review for high-value or new-device transactions, every fallback flagged in the decision log, and an alert fires immediately. Revenue dips in the challenged segments; fraud exposure is bounded and measured afterwards from the flagged decisions.
+3. **"How do you know the model is still any good, when labels take weeks?"** — Layered signals: review verdicts and overturn rates within hours, score and feature drift continuously, shadow comparisons against candidate models, and the lagging chargeback truth when it lands. You steer day to day by the fast proxies and validate monthly by the slow truth, and you say plainly that the slow truth is the only unbiased one.
+4. **"A fraud ring starts testing stolen cards at 03:00. How does the system react before any human wakes up?"** — Velocity features see the burst in seconds: per-card, per-device and per-IP counters spike, velocity rules fire, thresholds effectively tighten for the attacked patterns, and block-rate monitoring pages the on-call because the decision mix moved. The model helps, but the honest answer is that fresh features and dumb rules catch the burst; the model catches the subtle stuff.
+5. **"Why not just block everything the model scores above 0.5?"** — Because the score is not a probability until it is calibrated, and 0.5 is not a policy. Thresholds come from the cost asymmetry per segment and the false-positive budget: at the stated budget, the block threshold sits where the marginal fraud saved equals the marginal good revenue lost, with the challenge band absorbing the uncertainty in between.
+6. **"Explain training/serving skew with a concrete example from this system."** — Offline, "transactions in the last hour" is computed from event timestamps over complete history. Online, a naive implementation counts from arrival timestamps in a stream that lags during peaks. During an attack — exactly when the feature matters — the two disagree, and the model sees values unlike anything it trained on. Shared definitions, event-time semantics in both engines, and the parity job exist to prevent and detect exactly this.
+7. **"Point-in-time correctness — what leaks if you get it wrong?"** — If a training example's features are computed using data from after the transaction (the classic leak: a feature that incorporates the chargeback flag itself, or an aggregate updated by the outcome), offline evaluation looks spectacular and production performance collapses. The defence is as-of joins: every feature for a training example is computed strictly from data available at that transaction's timestamp.
+8. **"Manual review can only handle 0.5 percent of volume. Your model wants to send 3 percent. What do you do?"** — Review capacity is a hard constraint in the decision policy, not an overflow valve. The routing threshold moves so expected review volume fits staffed capacity, the next band gets challenged (step-up verification) instead, and the overflow policy is explicit and measured — never a silent queue that ages into automatic approval.
+9. **"You ship a new model and the block rate doubles in an hour. Walk me through it."** — The decision-mix alarm fires; the canary analysis shows the divergence is the new version, not an attack (attack patterns would concentrate in segments and features, a bad model spreads evenly); rollback is a config flip to the previous pinned version within minutes; the doubled-block decisions are all in the log with the bad version stamped, so affected merchants and customers can be identified and remediated.
+10. **"Where does this design break first at ten times the volume?"** — The tail, not the mean: hot keys in the feature store, inference cost if the ensemble grows, and cross-zone latency variance eating the p99 budget. The structural answer stays the same — stateless scorers, sharded precomputed features — but the operational answer is that latency headroom, not throughput, is the resource you run out of.
+
+## 16. Interview-ready spoken answer
+
+> "First, the requirements I'd pin down: a decision in under 100 milliseconds at p99, 20,000 transactions a second at peak, a false-positive budget well under one percent of good transactions, and labels that arrive days later. The clarifications that matter most are how much of the 100 milliseconds is actually mine, what actions besides approve and block exist — challenge and review change the economics completely — and the fallback policy per segment when a dependency is down.
+>
+> The bottleneck is latency, not throughput, so the architecture follows one rule: nothing expensive happens at decision time. A stateless scoring service fetches a small set of precomputed features from Redis in one pipelined call, runs deterministic rules, then a versioned gradient-boosted ensemble, applies per-segment thresholds, writes the decision once, and answers. Everything heavy — feature computation, training, analysis — lives off that path.
+>
+> The data flow off the path is what makes the path smart. Every transaction streams through Kafka into a stream processor that keeps velocity and reputation features seconds-fresh in the online store. The same feature definitions run in batch over the lake to build training data with point-in-time-correct joins, so the model trains on the same features it will see live. Chargebacks and review verdicts arrive days later, join to the recorded decisions by transaction ID, and become the next training set.
+>
+> On reliability: merchants retry, so delivery is at-least-once. The transaction ID is the idempotency key — checked before scoring, enforced by a conditional insert in the decision log — so one transaction gets exactly one decision and counts once in its own velocity features. Exactly-once effects, not exactly-once delivery.
+>
+> On failure, the policy is decided in advance, per segment: model timeout means rules-only scoring, feature-store outage means fail open for small established accounts and fail into challenge for high-value ones, and every fallback decision is flagged so we can price it afterwards.
+>
+> Scaling is replicas and shards until the tail latency and hot keys bite, and the honest constraint is that every new feature or bigger model spends latency budget that has to be justified.
+>
+> The main trade-off I'd flag: I'm running a system whose ground truth arrives weeks late, so I'm steering by proxies — review overturns, drift, decision mix — and I have to hold the false-positive budget and the fraud budget in the same hand, because optimising either one alone destroys the other."
+
+## 17. Mock interview mode
+
+**Five hard follow-ups, with expected answers**
+
+1. **"Your offline evaluation says the new model is 20 percent better. Production gets worse. Give me three causes."** — Expected: training/serving skew (a feature computed differently online), label leakage inflating the offline number (a feature that peeks at the outcome), and label bias (the model only ever sees outcomes for transactions the old policy let through or sent to review, so the evaluation set is not the production population). All three are named, structural, and have named defences in the design.
+2. **"An attacker figures out that transactions under 10 dollars are never challenged. Quantify and fix."** — Expected: recognise the probing problem — decline reasons are never leaked externally for exactly this reason — then quantify exposure as per-account and per-device velocity caps under the threshold (the caps, not the amount, bound the loss), and fix by randomising a small sample of low-value transactions into challenge so the boundary is not learnable, plus velocity rules that aggregate across amounts.
+3. **"The business wants the false-positive rate halved this quarter, fraud losses unchanged. Is that possible and how would you try?"** — Expected: not by moving a threshold — that trades one budget against the other directly. The real levers are better features (fresher velocity, better device signals), a wider challenge band (step-up instead of block converts false blocks into friction, not losses), and better labels (review verdict quality). A candidate who just moves the threshold has not understood the problem.
+4. **"Prove a specific blocked transaction from last month was decided correctly."** — Expected: pull the decision log row — feature snapshot, rules fired, model and ruleset versions, score, thresholds for its segment — and re-derive the decision by replaying those pinned versions against the snapshot. If any of those four artefacts is missing, the honest answer is that the system cannot prove it, which is why all four are recorded.
+5. **"Kafka, which feeds your features, falls 10 minutes behind at peak. What is the state of your decisions?"** — Expected: velocity features go stale in a measurable way — the freshness metric shows it — so attack detection degrades while ordinary scoring continues on slightly old aggregates. The designed response: freshness-aware policy (tighten thresholds or widen the challenge band while freshness is beyond a bound), catch-up is safe because feature computation is idempotent per transaction ID, and the incident is visible in decision-mix and freshness dashboards, not discovered via fraud losses next month.
+
+**Common candidate mistakes**
+
+- Putting database joins or feature computation on the decision path and hoping the latency budget survives.
+- One global threshold, with no per-segment costs and no challenge option between approve and block.
+- Claiming exactly-once delivery across merchant retries and Kafka replays.
+- Training features computed differently from serving features, with no parity check.
+- No fallback policy — the design simply assumes the model and the feature store are always up.
+- Ignoring label delay and bias, and quoting offline accuracy as if it were production truth.
+- Routing to manual review with no regard for staffed review capacity.
+
+**What a senior candidate mentions unprompted**
+
+- The latency budget broken into per-step budgets with an enforcing deadline.
+- Fail-open versus fail-closed as a priced, per-segment policy, decided before the incident.
+- Point-in-time correctness and label leakage by name.
+- Shadow mode and canary for model rollouts, with rollback as a config flip.
+- Decision-mix monitoring: a block-rate spike paged like an outage.
+- Review capacity as a hard constraint inside the decision policy.
+
+**Scoring rubric (out of 10)**
+
+| Score | What it looks like |
+|---|---|
+| 9–10 | Latency budget decomposed and enforced, features precomputed with online/offline parity and point-in-time correctness, rules plus model with per-segment thresholds and a challenge band, per-segment fallback policy, delayed and biased labels handled honestly, delivery semantics stated precisely |
+| 7–8 | Sound online path and feature store, model versioning present, but label delay, skew or fallback behaviour is hand-wavy |
+| 5–6 | Components named (Redis, Kafka, a model) but the latency budget is asserted rather than engineered; one global threshold |
+| 3–4 | Decision-time database queries, no feature store, no decision log, review queue with no capacity limit |
+| 0–2 | Claims exactly-once delivery, promises real-time labels, or proposes blocking on an uncalibrated score with no false-positive budget |
+
+Sources: [Apache Kafka documentation — delivery semantics and design](https://kafka.apache.org/documentation/) · [Apache Flink documentation — event time, windows and checkpointing](https://flink.apache.org/) · [Feast feature store documentation — point-in-time correctness and online/offline stores](https://docs.feast.dev/)

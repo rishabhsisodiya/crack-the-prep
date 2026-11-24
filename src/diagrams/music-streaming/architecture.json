@@ -1,0 +1,137 @@
+{
+  "meta": {
+    "output": ".archify/build/music-streaming/architecture.html",
+    "title": "Music Streaming (Spotify) \u2014 Small Files, Prefetch, Play Events as Financial Records",
+    "quality_profile": "showcase"
+  },
+  "components": [
+    {
+      "id": "app",
+      "label": "Client App",
+      "sublabel": "local cache + prefetch",
+      "type": "external"
+    },
+    {
+      "id": "playback",
+      "label": "Playback Service",
+      "sublabel": "license, signed URL",
+      "type": "backend"
+    },
+    {
+      "id": "cdn",
+      "label": "CDN",
+      "sublabel": "encrypted audio files",
+      "type": "cloud"
+    },
+    {
+      "id": "obj",
+      "label": "Object Storage",
+      "sublabel": "transcoded tracks",
+      "type": "database"
+    },
+    {
+      "id": "events",
+      "label": "Event Pipeline (Kafka)",
+      "sublabel": "durable play events",
+      "type": "backend"
+    },
+    {
+      "id": "royalty",
+      "label": "Royalty & Reporting",
+      "sublabel": "batch, exact counts",
+      "type": "backend"
+    },
+    {
+      "id": "reco",
+      "label": "Recommendation Features",
+      "sublabel": "from listening history",
+      "type": "backend"
+    },
+    {
+      "id": "playlist",
+      "label": "Playlist Service",
+      "sublabel": "user + editorial playlists",
+      "type": "backend"
+    },
+    {
+      "id": "pdb",
+      "label": "Playlists DB",
+      "sublabel": "Cassandra-style",
+      "type": "database"
+    }
+  ],
+  "connections": [
+    {
+      "id": "app-pb",
+      "from": "app",
+      "to": "playback"
+    },
+    {
+      "id": "app-cdn",
+      "from": "app",
+      "to": "cdn"
+    },
+    {
+      "id": "cdn-obj",
+      "from": "cdn",
+      "to": "obj"
+    },
+    {
+      "id": "app-ev",
+      "from": "app",
+      "to": "events",
+      "label": "play events"
+    },
+    {
+      "id": "ev-roy",
+      "from": "events",
+      "to": "royalty"
+    },
+    {
+      "id": "ev-rec",
+      "from": "events",
+      "to": "reco"
+    },
+    {
+      "id": "app-pl",
+      "from": "app",
+      "to": "playlist"
+    },
+    {
+      "id": "pl-pdb",
+      "from": "playlist",
+      "to": "pdb"
+    }
+  ],
+  "cards": [
+    {
+      "title": "Instant playback",
+      "dot": "cyan",
+      "items": [
+        "Files are small (~3.5 MB a track) \u2014 fetch whole in a few range requests and prefetch the next queued track",
+        "Local cache of recent and frequent tracks makes skipping feel instant"
+      ]
+    },
+    {
+      "title": "Play events are money",
+      "dot": "emerald",
+      "items": [
+        "A stream counts after a minimum listen (commonly 30 seconds); events carry ids for dedup and are stored durably",
+        "Batch jobs produce the authoritative royalty counts, with fraud detection before payouts"
+      ]
+    },
+    {
+      "title": "Offline & long tail",
+      "dot": "rose",
+      "items": [
+        "Downloads are encrypted, tied to account and device, and need a periodic check-in (e.g. every 30 days)",
+        "Popular tracks stay hot at the edge; long-tail misses fall through tiered caching to origin"
+      ]
+    }
+  ],
+  "diagram_type": "architecture",
+  "layout": {
+    "mode": "auto"
+  },
+  "schema_version": 1
+}

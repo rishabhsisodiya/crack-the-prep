@@ -1,0 +1,268 @@
+---
+title: "Scenario — Erasing One User from Everywhere, Provably"
+track: "system-design"
+kind: "notes"
+order: 77
+slug: "scenario-gdpr-erasure"
+updated: 2026-11-24
+description: "A scenario-based interview problem: honour a GDPR right-to-erasure request for one user across OLTP databases, Kafka, a data lake, a warehouse, search indexes and backups — within 30 days, with audit proof it actually happened."
+---
+
+import Callout from '../../components/Callout.astro';
+import ArchDiagram from '../../components/ArchDiagram.astro';
+
+Part of the [system design](/prep/system-design) series. This is a **scenario** page: you get the problem the way an interviewer would state it, then a full worked solution. **Level 3 — Lead/Architect engineer.**
+
+> **Original practice scenario** — written for interview preparation; not a question from any specific company's interview.
+
+## 1. The problem statement
+
+Here is how the interviewer puts it. Read it the way you would in the room — nothing in this section is the solution.
+
+> "A user has exercised their right to erasure — the GDPR 'right to be forgotten'. They want every trace of their personal data gone, and our privacy team has to be able to *prove* to a regulator that it happened.
+>
+> The problem is where their data lives. There are the obvious places: the accounts database, orders, support tickets. But the same user's data has also flowed into our event streams, our data lake, the analytics warehouse, the search index that powers 'find your past orders', derived features and aggregates — and every backup and snapshot we have taken for the last year.
+>
+> The legal clock is **30 days** from a verified request. Some data we are legally required to keep — tax records on invoices, for example — and some data is genuinely anonymous aggregates that no longer identify anyone.
+>
+> Design the system that takes one erasure request and erases that user from everywhere, completely, within the deadline — and produces the evidence."
+
+**Functional requirements**
+
+- Accept a verified erasure request for one user and erase (or irreversibly anonymise) their personal data in every system that holds it.
+- Cover at minimum: OLTP databases, event streams (Kafka), the data lake, the warehouse, and the search index.
+- Handle backups and snapshots honestly — they cannot simply be edited in place.
+- Respect legal-retention exceptions: data under a retention obligation is restricted and scheduled for deletion when the obligation expires, not silently kept forever.
+- Produce an auditable, per-system record that the erasure happened.
+
+**Non-functional requirements**
+
+- Complete within the 30-day SLA, with visibility long before day 30 if a system is stuck.
+- Erasure must survive retries and partial failures: a crash halfway must not leave the case in an unknown state.
+- Re-running an erasure step must be safe — erasing twice is the same as erasing once.
+- The proof record itself must not become a new store of the user's personal data.
+- Normal product behaviour must not resurrect the user: caches, replicas, read models and in-flight events all count.
+
+## 2. Clarifying questions to ask first
+
+Ask these before drawing anything. Each one changes the design.
+
+| Question | Why it matters |
+|---|---|
+| How is a user identified across systems — one global `user_id`, or different keys per service? | Erasure is a fan-out problem. If every store keys personal data by the same `user_id` (or has a mapping to it), the fan-out is mechanical. If not, identity resolution is the hardest part of the project and you must say so. |
+| What exactly counts as personal data here, and what is under legal retention? | Invoices usually must be kept for tax law for years. The design needs a per-category policy — erase, anonymise, or retain-restricted-until-date — not one blanket delete. Getting this wrong in either direction is a compliance failure. |
+| Are events in Kafka keyed by user, and are the topics compacted or append-only with retention? | A compacted topic keyed by `user_id` can forget via tombstones. An append-only topic cannot forget until retention expires — which may be inside or outside the 30-day window, and that decides whether you need crypto-shredding. |
+| How is data encrypted — one shared key, or per-user (or per-tenant) keys anywhere? | Per-user keys make crypto-shredding possible: destroy the key and every copy, including backups, becomes unreadable ciphertext. Without them, backups are a much harder conversation. |
+| How are backups taken, how long are they kept, and are restores tested? | If backup retention is 35 days, "the data leaves backups when they expire" can fit inside a documented policy. If backups live for a year, you need restore-time erasure or key destruction — name which. |
+| Does the lake/warehouse use a table format with row deletes (Delta Lake, Iceberg), or append-only files? | Row-level deletes plus file rewrites/compaction actually remove data. Append-only Parquet means the "delete" is a filter at read time, and the bytes are still there — a regulator will not accept that as erasure. |
+| What proof does the regulator/DPO actually need? | Usually: a per-system completion record with timestamps, signed or tamper-evident, retained for a defined period. The shape of the proof decides the audit-ledger design — and it must store the minimum (a case ID and a hashed identifier), not the data that was erased. |
+| Can the user still have in-flight activity — open orders, running sessions, events already in a queue? | Erasure racing live writes is how users resurrect. You need an account-freeze / tombstone-first step so new writes stop or are themselves caught by the erasure. |
+
+<Callout type="tip">
+The single highest-value clarification here is the identity map: which systems hold this user's data, under which key. Erasure systems fail in the real world not because deletes are hard, but because one forgotten read model, export bucket, or feature store was never in the inventory. Say that out loud — the data inventory *is* the design's foundation.
+</Callout>
+
+## 3. The solution, in plain language first
+
+The simple version: one verified request opens a **case**. The case first freezes the account and plants a tombstone so nothing new gets written. Then a coordinator fans the case out — one task per system that holds the user — and each system erases in the way that actually works for that kind of storage: row deletes in databases, tombstones plus compaction in Kafka, row deletes plus file rewrites in the lake, document deletes in the search index. Backups are handled by policy and by destroying the user's encryption key, so even copies you cannot edit stop being readable. Every system reports back a signed receipt; the case closes only when every receipt is in, a verification scan finds nothing left, and the receipts — not the data — are what you keep as proof.
+
+Why a coordinator and a case, rather than "each team deletes when asked"? Because the requirement is not "we tried everywhere", it is "provably everywhere, within 30 days". That needs one place that knows the full inventory, tracks each store separately, retries what fails, escalates what stalls, and can answer "what is the state of case 1234?" at any moment.
+
+## 4. Architecture
+
+<ArchDiagram src="scenario-gdpr-erasure/architecture" caption="GDPR erasure architecture: intake and orchestrator fan one case out to per-store workers covering OLTP, Kafka, lake, warehouse, search and backups, with key destruction and an audit proof ledger" />
+
+**Component by component**
+
+- **Erasure intake API.** Verifies identity (an erasure request is itself an attack vector — a forged request deletes a victim's account), checks for legal holds, opens the case, and starts the 30-day clock. The clock and its deadline are data, not a calendar reminder in someone's inbox.
+- **Erasure orchestrator.** Owns the case state machine: `received → frozen → fanning-out → per-store in progress → verifying → closed` (or `escalated`). It knows the data inventory — the list of stores and the worker responsible for each — and drives each store's task to completion with retries and deadlines well inside the SLA (for example, every store done by day 10, escalation at day 14).
+- **Erasure registry.** The case database: case state, the per-store task list, attempts, and receipts. This is the system's memory; the orchestrator can crash and resume from it.
+- **Erasure topic (Kafka).** The durable fan-out channel. Commands are published per store; a store that is down or deploying simply consumes late. Publishing the command is not the erasure — the receipt is.
+- **Key service / KMS.** Holds the per-user data-encryption key (DEK) where the design uses envelope encryption per user. Destroying that key is **crypto-shredding**: every ciphertext copy of that user's data — in backups, snapshots, replicas, forgotten exports — becomes permanently unreadable, including copies the fan-out missed.
+- **Per-store erasure workers.** One handler per store type, each idempotent, each speaking that store's real deletion mechanism (below), and each returning a signed receipt: store, case ID, rows/records affected, mechanism used, timestamp.
+- **The stores.** OLTP databases; Kafka data topics; the data lake (Delta Lake / Apache Iceberg); the warehouse; the search index; backups and snapshots.
+- **Audit proof ledger.** Append-only, tamper-evident storage of receipts and case events. It stores case IDs and a salted hash of the user identifier — enough to prove *this* case completed, without itself becoming a personal-data store that would need erasing.
+- **Monitoring and SLA alerts.** Case-age dashboards, per-store completion rates, escalation alerts as a case approaches its deadline, and the post-erasure verification scans.
+
+## 5. End-to-end data flow
+
+1. The request arrives and identity is verified. A case opens; the 30-day deadline is recorded.
+2. **Freeze first.** The account is disabled and an erasure tombstone is written to the identity service. Every write path checks (or is keyed off) that tombstone, so new events, orders and profile updates for this user stop — or are routed to a quarantine that the erasure will also sweep.
+3. The orchestrator creates one task per store in the inventory and publishes each store's command to the erasure topic. In parallel, it asks the KMS to schedule destruction of the user's DEK (with whatever key-destruction delay the KMS enforces, tracked as a task like any other).
+4. Each worker erases in its store's native way (Section 8) and writes a signed receipt to the audit ledger, updating its task in the registry.
+5. Stores with retention exceptions (say, invoice tax records) return a different receipt: *restricted* — data minimised to the legally required fields, access-blocked, with a scheduled deletion date when the retention expires. That future date creates a follow-up task now, not a hope later.
+6. When all receipts are in, a **verification pass** runs: targeted scans/queries per store for the user key (and the key's known aliases) must return zero personal data outside the recorded exceptions. Anything found reopens that store's task.
+7. The case closes. The user (and, on request, the regulator) gets a completion certificate generated from the audit ledger: what was erased, where, when, by what mechanism, and what was retained under which legal basis until which date.
+
+## 6. Technology choices, and why
+
+| Decision | Choice | Why | Alternative considered |
+|---|---|---|---|
+| Coordination | A dedicated orchestrator service with a case state machine in a relational DB | The requirement is tracked, resumable, provable completion across ~10 systems over days — that is a workflow with state, not a script | A cron script or a runbook — no per-store state, no escalation, no proof; it is how erasures silently half-happen |
+| Fan-out channel | Kafka topic for erasure commands | Durable, replayable, decouples the orchestrator from stores that are down or slow; the same mechanism retries for days without babysitting | Direct synchronous calls to every store — one slow store blocks the case; an orchestrator crash mid-fan-out loses track of who was told |
+| Lake table format | Delta Lake or Apache Iceberg | Row-level deletes (MERGE / DELETE) plus compaction/vacuum that physically rewrites files, so erased rows stop existing, not just stop appearing | Append-only Parquet with a read-time filter — the bytes remain; that is suppression, not erasure |
+| Stream forgetting | Log compaction with tombstones, keyed by `user_id` where the topic carries per-user state | A tombstone plus compaction is Kafka's native forgetting mechanism for keyed state | Waiting for retention to expire — acceptable only if retention is provably shorter than the SLA and documented as the mechanism |
+| Backup strategy | Per-user envelope encryption + key destruction (crypto-shredding), plus backup-expiry policy and erase-on-restore | You cannot edit a backup in place; making its contents unreadable is the recognised way to erase inside immutable media | Editing backups in place (breaks their integrity and restorability) or ignoring backups (the most common real-world audit finding) |
+| Proof store | Append-only ledger (e.g. a hash-chained log or a ledger database) with signed receipts | Proof must be tamper-evident and must outlive the case; hash-chaining makes silent edits detectable | Rows in the same OLTP database an admin can update — a regulator will ask who could have altered the record, and "any DBA" is a bad answer |
+
+**Delete vs anonymise.** Not every store needs the same verb. Operational databases usually delete rows. Analytics often only needs the data to stop being *personal*: replacing the user key with an irreversible, per-user-salted hash (and dropping the salt with the key) can keep aggregate statistics lawful while removing identifiability. The design must decide per store, with the DPO — and record which verb was used on the receipt.
+
+## 7. Partitioning and parallelism
+
+- Erasure is low-volume, high-fan-out work: a handful of cases a day, each touching ~10 stores, each store's delete touching anywhere from one row to millions of events. Parallelism is **per store and per case**, not global throughput.
+- Within a big store, parallelise by the store's own sharding: per-shard delete tasks in the OLTP fleet; per-partition tombstone writes in Kafka; per-partition (date/user-hash bucket) delete-and-rewrite jobs in the lake. The registry tracks these as sub-tasks so progress is visible, not binary.
+- The orchestrator runs cases concurrently but rate-limits per store: an erasure job must never become a self-inflicted denial of service on the production database. Lake rewrites in particular are scheduled and throttled — they are the expensive part.
+- Ordering constraint that matters: freeze/tombstone **before** fan-out, and verification **after** all receipts. Within the fan-out, stores are independent and order does not matter.
+
+## 8. Storage strategy — how each store actually forgets
+
+- **OLTP databases:** hard-delete rows keyed by `user_id`; where foreign keys or history matter, delete the personal fields and keep a non-identifying stub only if a retention rule demands it. Sweep the easy-to-forget copies too: read replicas (deletes propagate), caches (explicit invalidation), and materialised views (rebuild).
+- **Kafka:** for keyed state topics, publish a tombstone (key with a null value) and let log compaction remove the prior values. For append-only event topics, personal payloads should have been encrypted with the per-user key from the start — crypto-shredding covers them — and retention bounds how long ciphertext remains. If neither applies, say so honestly: that topic is a design debt the erasure system must flag, not hide.
+- **Data lake (Delta/Iceberg):** run the row delete, then **rewrite the files**: Delta `VACUUM` past a short retention, Iceberg snapshot expiry plus orphan-file cleanup. Until the rewrite, deleted rows still sit in old snapshots — time travel is a feature that directly fights erasure, so snapshot retention for personal-data tables must be shorter than the SLA.
+- **Warehouse:** delete from the curated tables *and* the staging/landing tables that fed them, then rebuild affected aggregates. Aggregates that included the user are recomputed without them; genuinely anonymous aggregates (large-cohort statistics that cannot single the user out) may remain, with the reasoning recorded.
+- **Search index:** delete documents by `user_id`, and force a merge/expunge so deleted documents leave the segments — a delete flag in a segment is not yet erasure of the bytes.
+- **Backups and snapshots:** three mechanisms together — (1) crypto-shredding makes backup contents unreadable immediately; (2) backups expire on their normal rotation, bounded and documented; (3) any restore performed before expiry replays the erasure registry first — the restored system checks the tombstone list and re-erases before going live. Mechanism (3) is the one teams forget, and it is the one that resurrects users.
+- **The erasure system's own data:** the registry and audit ledger store case IDs, store names, counts, timestamps and a salted hash of the identifier — with the salt destroyed at case closure, even that hash becomes unlinkable. Proof without a new privacy problem.
+
+## 9. Deduplication and idempotency, with a worked example
+
+Erasure commands are delivered **at-least-once**: the orchestrator retries, Kafka redelivers, workers restart. So every erasure operation must be idempotent — running it twice, or ten times, converges to the same erased state. Deletion is naturally close to idempotent ("delete where user_id = X" twice is fine), and the places it breaks are the edges: receipts counted twice, retention follow-ups scheduled twice, verification racing a retry. The fix is the usual one — a unique claim per (case, store) and conditional writes:
+
+```sql
+-- Claim this store's task for this case exactly once.
+-- A redelivered command finds the claim and resumes / no-ops instead of re-erasing blindly.
+INSERT INTO erasure_tasks (case_id, store, status, attempts)
+VALUES ($1, $2, 'in_progress', 1)
+ON CONFLICT (case_id, store) DO UPDATE
+  SET attempts = erasure_tasks.attempts + 1
+RETURNING status;
+```
+
+```python
+# Per-store worker: erase idempotently, receipt exactly once.
+def erase_user(case_id, store, user_key):
+    task = registry.claim(case_id, store)          # unique (case_id, store)
+    if task.status == "receipt_issued":
+        return task.receipt                          # duplicate delivery: no-op
+    result = store.delete_where_user(user_key)       # safe to re-run: deletes 0 rows the 2nd time
+    receipt = sign(case_id=case_id, store=store.name,
+                   affected=result.affected, mechanism=store.mechanism,
+                   at=now())
+    audit_ledger.append_once(receipt, key=(case_id, store.name))  # unique key dedups receipts
+    registry.mark_done(case_id, store, receipt_id=receipt.id)
+```
+
+Two rules make this work. First, the receipt is written with a unique key on `(case_id, store)`, so a retry can duplicate the *work* but never the *proof*. Second, "affected = 0 rows" on a re-run is a success, not an error — the worker distinguishes "nothing left to erase" from "erasure failed", and only the second retries and escalates.
+
+## 10. Retry, failure handling, checkpointing and recovery
+
+- **Per-store retry:** exponential backoff over hours, then days — the SLA is 30 days, so the retry budget is generous; what matters is that a stuck store escalates to a human at day ~10–14, not that it retries forever silently.
+- **Orchestrator crash:** case and task state live in the registry, not in memory. A restarted orchestrator resumes every open case exactly where the receipts say it stopped.
+- **Partial completion is a normal state,** displayed as such: 9 of 11 stores done, lake rewrite at 60%, backup key destruction pending KMS delay. The design treats "partially erased" as a first-class, visible status — because legally and operationally, it is the only honest one mid-case.
+- **Key-destruction delay:** KMS key deletion typically has a waiting period (days). That is a tracked task with its own deadline; the case cannot close until the key is confirmed destroyed, even if every store receipt is in.
+- **Verification failure:** a scan finding residual data reopens the store's task automatically and keeps the case open; two consecutive verification failures escalate to the store's owning team with the case attached.
+- **Restore drill:** backups are restore-tested on a schedule, and the drill includes the erase-on-restore step — an untested restore path is assumed broken.
+
+## 11. Monitoring and observability
+
+- **Case ageing:** number of open cases by age bucket; any case crossing 50% of its SLA unclosed pages the privacy engineering on-call. The SLA breach must be visible at day 15, not discovered at day 31.
+- **Per-store completion rate and duration:** which store is habitually slowest (in most real systems: the lake rewrite, or a legacy service nobody owns). That ranking is the roadmap for inventory cleanup.
+- **Verification scan results:** residual-hit count per store per case; any non-zero hit is an alert, not a log line.
+- **Tombstone/resurrection checks:** canary queries — after closure, periodic scans for the erased key across stores for a defined window, catching late-arriving events that landed after the fan-out.
+- **Audit-ledger integrity:** periodic hash-chain verification, so the proof itself is continuously proven.
+
+## 12. Security
+
+- **Intake is an attack surface:** a forged erasure request is an account-deletion attack. Strong identity verification before a case opens, step-up authentication, and a cooling-off/notification step to the account's contact points.
+- **Least privilege per worker:** each store worker holds credentials that can delete only its own store's data for the case's user key — the erasure system is, by design, a machine that can delete anything, so its blast radius must be engineered down: scoped credentials, case-bound commands, full audit of every action it takes.
+- **The audit ledger is append-only** with restricted write access (workers append receipts; nobody updates), and read access limited to privacy/legal roles.
+- **No personal data in the erasure pipeline itself:** commands carry the user key reference, not the user's data; logs record case IDs and counts, never payloads. An erasure system that copies personal data into its own logs has just created store #12 to erase.
+
+## 13. Scalability, the 10x question, and cost
+
+**At 10x** (say, a regulatory change or a viral privacy moment takes you from 5 to 50 cases a day, or one case is a data-heavy power user with 100x the median footprint): the architecture does not change. The orchestrator and registry scale trivially at these volumes. The pressure lands on the stores: lake file rewrites and warehouse rebuilds are the expensive operations, so they get a work queue with per-store concurrency limits and scheduling into low-traffic windows. The design decision that saves you is that erasure cost is proportional to the user's footprint, not to table size — deletes and rewrites must be partition-pruned by date/user-hash bucket, never full-table scans.
+
+**Cost levers:** snapshot/time-travel retention on personal-data tables kept short (storage *and* erasure cost both fall); per-user encryption applied only where personal data actually lives, not blanket; verification scans targeted by user key rather than full scans; backup retention set by policy discussion with legal, because every extra month of backups is a month added to the honest erasure story.
+
+## 14. Trade-offs, stated honestly
+
+| Choice | You gain | You pay |
+|---|---|---|
+| Crypto-shredding via per-user keys | Backups, snapshots and missed copies become erasable; the strongest answer to "everywhere" | Key management per user from day one; it is a retrofit nightmare if data was not encrypted this way — and the design must admit which legacy data it does not cover |
+| Hard delete in OLTP vs anonymise-in-place | Delete is unambiguous and provable | Foreign keys, audit history and financial records may legally require the anonymised-stub approach instead — per-category policy is unavoidable complexity |
+| Short lake snapshot retention | Erasure completes inside the SLA; deleted rows physically leave | You give up long time-travel/debugging history on personal-data tables |
+| Central orchestrator + inventory | Provable, trackable, escalatable completion | The inventory must be maintained forever; a new service that skips registration silently breaks the guarantee — so inventory checks belong in service onboarding/CI, not in a wiki |
+| Retain-restricted for legal holds | Complies with both tax law and GDPR (erasure has explicit legal-obligation exceptions) | "Erased" becomes "erased except these records until this date" — the certificate must say exactly that, and the follow-up deletion must actually fire years later |
+
+<Callout type="warn">
+Say this sentence in the interview: "This design does not deliver exactly-once delivery of erasure commands — no design over a network that retries can. It delivers at-least-once delivery of commands with idempotent delete operations and exactly-once *receipts*, which gives exactly-once *effects*: the user ends up erased once, provably, even though a delete may physically run twice." Conflating delivery with effects is the most common senior-level slip in this problem.
+</Callout>
+
+**Delivery semantics, precisely.** At-most-once commands (fire and forget) would silently lose a store's erasure — the worst failure mode here, because the case would look closed. At-least-once plus idempotent deletes plus deduplicated receipts is the sweet spot. And be precise about the end state too: the honest guarantee is "erased from all live systems, unreadable in all immutable copies, with retained exceptions enumerated" — claiming the bytes provably vanished from every backup tape ever written is a claim no honest design can make, and interviewers at this level are listening for whether you know that.
+
+## 15. Interviewer follow-up Q&As
+
+1. **"Backups. You can't edit them. So is the user actually erased, or not?"** — Three-part answer: their data in backups is encrypted under a per-user key that has been destroyed, so it is unreadable ciphertext; backups expire on a bounded rotation; and any restore replays the erasure registry before serving traffic. If the data predates per-user encryption, say so and name the compensating controls (expiry + erase-on-restore) rather than bluffing.
+2. **"A user is erased on Monday. On Tuesday an old queued event for them lands. What happens?"** — The tombstone check catches it: consumers and write paths consult the erasure registry (or a propagated tombstone) and drop/quarantine writes for erased keys. Post-closure canary scans catch anything that slipped through, and the case reopens automatically.
+3. **"Legal says invoices must be kept for 7 years. The user says delete everything. Who wins?"** — Both, partially: GDPR's right has an explicit exception for legal obligations. The invoice is minimised to the required fields, access-restricted, excluded from all product use, and scheduled for deletion when the 7 years expire — and the completion certificate states this plainly instead of claiming full erasure.
+4. **"How do you *prove* erasure to a regulator — what do you actually hand them?"** — The audit ledger extract for the case: per-store signed receipts (store, mechanism, records affected, timestamp), the verification scan results, the key-destruction confirmation, and the retention-exception list with legal bases and expiry dates. Proof is a generated report from tamper-evident records, not a screenshot of someone running DELETE.
+5. **"There's a derived ML feature store and a recommendations model trained on this user. Erased?"** — The feature store is a store: it's in the inventory and gets a delete like any other. The trained model is the honest hard case: if the model can memorise individuals (small cohorts, LLMs fine-tuned on user data), you may need retraining or machine-unlearning techniques; for large aggregate models the standard position is that weights are not personal data, but you state the reasoning and the DPO decides. Naming this nuance is the senior answer.
+6. **"Your lake delete ran, but a query still finds the user. Why?"** — Old snapshots. The DELETE created a new snapshot; time travel still sees the old files until snapshot expiry and file cleanup run. Erasure completion for the lake means delete **plus** rewrite **plus** snapshot expiry — all three, tracked as sub-tasks.
+7. **"What stops an attacker from erasing someone else's account with a forged request?"** — Identity verification proportional to the harm: authenticated session plus step-up verification, notification to existing contact points, cooling-off period for the destructive steps, and human review for anomalies. Erasure intake is treated as a high-risk flow, like password reset — because it is one.
+8. **"A store team says their service 'doesn't store personal data'. Do you believe them?"** — No — verify. Logs, analytics events, support tooling and debug exports are where "we don't store it" goes to die. The inventory is built from data-flow evidence (schemas, event payloads, scans for the user key), and the verification scan covers claimed-empty stores too.
+9. **"The erasure is at day 29 and the warehouse rebuild keeps failing. What now?"** — This should have escalated at day 10–14 by design. Concretely: the case is already with the owning team and privacy lead; options are a targeted partition-level delete instead of the full rebuild, or documented risk acceptance by the DPO with a remediation date. What you never do is close the case on a promise.
+10. **"After all this, what does the user actually receive?"** — A completion confirmation within the deadline: what was erased and from which categories of system, what was retained under which legal obligation and until when, and the date their encryption key was destroyed. Specific enough to be meaningful, without listing internal system names that mean nothing to them.
+
+## 16. Interview-ready spoken answer
+
+> "First, the requirements I'd pin down: one verified user, every system that holds their personal data, a hard 30-day clock, legal-retention exceptions, and proof a regulator will accept. The clarifications that matter most are the identity map — which stores, under which key — whether data is encrypted per user, and what proof is actually required, because those three decide most of the design.
+>
+> The bottleneck isn't delete throughput, it's completeness and provability across a dozen different kinds of storage, some of which can't be edited at all. So the architecture is a case-based orchestrator: an intake API verifies identity and opens a case, the account is frozen and tombstoned first so nothing new gets written, and then the orchestrator fans out one task per store over a durable Kafka topic to per-store workers, tracking everything in a registry.
+>
+> The data flow per store uses that store's real forgetting mechanism. Row deletes in the OLTP databases, tombstones plus compaction in Kafka, row deletes plus file rewrite and snapshot expiry in the Delta or Iceberg lake, document deletes plus segment merges in search, and aggregates rebuilt in the warehouse. Every worker returns a signed receipt to an append-only audit ledger, and the case only closes when a verification scan independently finds nothing left.
+>
+> On reliability: commands are at-least-once, deletes are idempotent, and receipts are deduplicated on case-plus-store, so retries are safe and partial completion is a visible state, not a silent one. Stuck stores escalate at the halfway point of the SLA, not at the deadline.
+>
+> Scaling is mostly about the expensive stores: partition-pruned deletes and scheduled lake rewrites keep cost proportional to the user's footprint, and per-store rate limits stop an erasure from becoming a production incident.
+>
+> The trade-offs I'd flag honestly: backups can't be edited, so the design leans on crypto-shredding — destroying the user's encryption key makes every immutable copy unreadable — plus bounded backup expiry and erase-on-restore. And 'erased' has an asterisk the design states out loud: records under legal retention are restricted and scheduled for deletion when the obligation expires. The system gives exactly-once effects and exactly-once proof, not exactly-once delivery — that distinction is the design."
+
+## 17. Mock interview mode
+
+**Five hard follow-ups, with expected answers**
+
+1. **"Your inventory missed a system — an old exports bucket full of CSVs. A regulator finds the user there. What failed, and what changes?"** — Expected: the inventory process failed, not the delete mechanics. The fix is structural: inventory built from data-flow scanning and enforced at service onboarding, periodic key-discovery scans across storage (including buckets and exports), and canary erasure drills — run a synthetic user through the whole product, then erase them and scan *everywhere* for the residue. Crypto-shredding also limits the blast radius if the CSVs were encrypted.
+2. **"Per-user keys sound great. We have 40 million users and a monolith that predates them. Now what?"** — Expected: honest scoping. Full per-user envelope encryption is a migration programme, not an interview answer. Pragmatic path: per-user keys for new data and high-risk stores first; for legacy data, rely on bounded backup expiry plus erase-on-restore, documented as the mechanism; never claim crypto-shredding coverage you don't have.
+3. **"Prove the audit ledger itself can't be quietly edited by an admin covering up a missed erasure."** — Expected: append-only storage with hash-chaining (each receipt includes the previous receipt's hash), receipts signed by the store workers' keys, ledger writes separated from case administration, and periodic external anchoring/verification. An admin editing history breaks the chain detectably.
+4. **"Erasure completes. A month later the data team restores a 3-week-old warehouse snapshot for an unrelated incident. Walk me through what happens."** — Expected: the restore runbook checks the erasure registry for all cases closed since the snapshot date and replays those erasures (and re-checks key destruction) before the warehouse serves queries. If that step isn't in the restore path, the user has just been un-erased — which is why erase-on-restore is a tested drill, not a wiki page.
+5. **"The DPO asks: 'for case 1234, is the user erased?' Give me the exact answer your system produces."** — Expected: not a yes/no — a per-store report: erased (mechanism, date, receipt) for each live store; key destroyed (date, KMS confirmation); backups unreadable and expiring by a date; exceptions listed with legal basis and scheduled deletion dates; verification scan result. Precision is the product.
+
+**Common candidate mistakes**
+
+- Designing only for the main database and forgetting streams, lake, warehouse, search, caches, exports and backups.
+- Claiming backups can be "edited" or simply ignoring them.
+- Closing the case when commands were *sent* rather than when receipts and verification confirm completion.
+- Storing the erased user's personal data inside the proof/audit system.
+- No freeze/tombstone step, so live writes resurrect the user during the 30 days.
+- Promising absolute erasure with no mention of legal-retention exceptions.
+
+**What a senior candidate mentions unprompted**
+
+- The data inventory as the real problem; deletion mechanics as the easy part.
+- Crypto-shredding, and honest scoping of where it does and doesn't apply.
+- Snapshot/time-travel retention fighting lake erasure.
+- Erase-on-restore as the resurrection path everyone forgets.
+- Identity verification at intake as a security control, not a formality.
+- The audit ledger's own data-minimisation (hashes, not personal data).
+
+**Scoring rubric (out of 10)**
+
+| Score | What it looks like |
+|---|---|
+| 9–10 | Case/orchestrator design with a real inventory, per-store forgetting mechanisms all correct (including compaction, file rewrite, snapshot expiry), backups handled via crypto-shredding + expiry + erase-on-restore, retention exceptions and proof ledger precise, delivery semantics stated correctly |
+| 7–8 | Sound fan-out and per-store deletes, but backups hand-waved or verification/proof thin |
+| 5–6 | "Delete from every service" with a list of stores, but no orchestration state, no receipts, no resurrection handling |
+| 3–4 | A DELETE against the main database plus vague mentions of "and also the warehouse" |
+| 0–2 | Claims backups can be edited in place, or that sending delete requests equals provable erasure |
+
+Sources: [GDPR Article 17 — Right to erasure (GDPR text)](https://gdpr-info.eu/art-17-gdpr/) · [Apache Kafka documentation — log compaction](https://kafka.apache.org/documentation/) · [Delta Lake documentation — DELETE and VACUUM](https://docs.delta.io/) · [Apache Iceberg documentation — row-level deletes and snapshot expiration](https://iceberg.apache.org/docs/latest/) · [AWS KMS documentation — deleting keys and the waiting period](https://docs.aws.amazon.com/kms/latest/developerguide/deleting-keys.html)

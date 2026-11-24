@@ -1,0 +1,175 @@
+{
+  "cards": [
+    {
+      "dot": "cyan",
+      "items": [
+        "Front queues for priority, back queues per-host for politeness",
+        "Round-robin across hosts so one domain cannot monopolise workers"
+      ],
+      "title": "Frontier"
+    },
+    {
+      "dot": "emerald",
+      "items": [
+        "Normalise + hash, Bloom filter pre-check backed by a KV store",
+        "Content fingerprints (SimHash/MinHash) catch near-duplicates"
+      ],
+      "title": "Dedupe"
+    },
+    {
+      "dot": "rose",
+      "items": [
+        "Worker crash is cheap: its URL is re-leased after a timeout",
+        "Frontier state is checkpointed \u2014 it is the hard-to-lose piece"
+      ],
+      "title": "Failure"
+    }
+  ],
+  "components": [
+    {
+      "id": "seed",
+      "label": "Seed URLs",
+      "sublabel": "starting points",
+      "type": "external"
+    },
+    {
+      "id": "frontier",
+      "label": "URL Frontier",
+      "sublabel": "priority + politeness queues",
+      "type": "database"
+    },
+    {
+      "id": "scheduler",
+      "label": "Scheduler",
+      "sublabel": "respects per-host rate",
+      "type": "backend"
+    },
+    {
+      "id": "workers",
+      "label": "Fetch Workers",
+      "sublabel": "stateless HTTP clients",
+      "type": "backend"
+    },
+    {
+      "id": "dns",
+      "label": "DNS Resolver Cache",
+      "sublabel": "shared, TTL-capped",
+      "type": "cloud"
+    },
+    {
+      "id": "fetch",
+      "label": "HTTP Fetch",
+      "sublabel": "fetch page",
+      "type": "backend"
+    },
+    {
+      "id": "robots",
+      "label": "robots.txt Check",
+      "sublabel": "allowed?",
+      "type": "security"
+    },
+    {
+      "id": "store",
+      "label": "Content Store",
+      "sublabel": "for indexer / pipeline",
+      "type": "database"
+    },
+    {
+      "id": "parse",
+      "label": "Link Extractor",
+      "sublabel": "extract new links",
+      "type": "backend"
+    },
+    {
+      "id": "dedupe",
+      "label": "Dedupe Check",
+      "sublabel": "seen URL fingerprint?",
+      "type": "backend"
+    },
+    {
+      "id": "drop",
+      "label": "Drop",
+      "sublabel": "disallowed or already seen",
+      "type": "external"
+    }
+  ],
+  "connections": [
+    {
+      "from": "seed",
+      "id": "seed-frontier",
+      "to": "frontier"
+    },
+    {
+      "from": "frontier",
+      "id": "frontier-sched",
+      "to": "scheduler"
+    },
+    {
+      "from": "scheduler",
+      "id": "sched-workers",
+      "label": "per-host rate",
+      "to": "workers"
+    },
+    {
+      "from": "workers",
+      "id": "workers-dns",
+      "to": "dns"
+    },
+    {
+      "from": "workers",
+      "id": "workers-fetch",
+      "to": "fetch"
+    },
+    {
+      "from": "fetch",
+      "id": "fetch-robots",
+      "to": "robots"
+    },
+    {
+      "from": "robots",
+      "id": "robots-store",
+      "label": "yes: store",
+      "to": "store"
+    },
+    {
+      "from": "robots",
+      "id": "robots-drop",
+      "label": "no",
+      "to": "drop",
+      "variant": "dashed"
+    },
+    {
+      "from": "fetch",
+      "id": "fetch-parse",
+      "to": "parse"
+    },
+    {
+      "from": "parse",
+      "id": "parse-dedupe",
+      "to": "dedupe"
+    },
+    {
+      "from": "dedupe",
+      "id": "dedupe-frontier",
+      "label": "new: enqueue",
+      "to": "frontier"
+    },
+    {
+      "from": "dedupe",
+      "id": "dedupe-drop",
+      "label": "seen",
+      "to": "drop",
+      "variant": "dashed"
+    }
+  ],
+  "diagram_type": "architecture",
+  "layout": {
+    "mode": "auto"
+  },
+  "meta": {
+    "output": ".archify/build/web-crawler/architecture.html",
+    "quality_profile": "showcase",
+    "title": "Web Crawler \u2014 Frontier-Centric Crawl Loop"
+  },
+  "schema_version": 1
+}

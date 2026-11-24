@@ -10,6 +10,7 @@ description: "Designing a flash sale (Big Billion Days, 11.11, limited drops) â€
 
 import Callout from '../../components/Callout.astro';
 import Mermaid from '../../components/Mermaid.astro';
+import ArchDiagram from '../../components/ArchDiagram.astro';
 
 Part of the [system design](/prep/system-design) series. See the [framework](/prep/system-design) and [building blocks](/prep/system-design/building-blocks) first if you haven't. The no-oversell basics are in worked problem 3 of the [framework page](/prep/system-design); this page is what changes when the traffic is 100Ã— normal for ten minutes. Related: [Ticket Booking](/prep/system-design/ticket-booking), [Rate Limiter](/prep/system-design/rate-limiter).
 
@@ -32,7 +33,8 @@ Part of the [system design](/prep/system-design) series. See the [framework](/pr
 
 Think of it as a funnel with a filter at every layer.
 
-<Mermaid caption="Each layer rejects most of the remaining traffic before the next, more expensive layer" code={`flowchart TD
+<ArchDiagram src="flash-sale/architecture" caption="Each layer rejects most of the remaining traffic before the next, more expensive layer">
+<Mermaid code={`flowchart TD
   U[10M users] --> CDN[CDN: static product page,<br/>countdown, sale assets]
   CDN --> GW[Gateway: rate limit per user/IP,<br/>bot checks, sale token]
   GW --> SOLD{Local sold-out flag?}
@@ -44,6 +46,7 @@ Think of it as a funnel with a filter at every layer.
   ORD --> DB[(Orders DB)]
   ORD --> PAY[Payment]
 `} />
+</ArchDiagram>
 
 ## 3. Layer by layer
 

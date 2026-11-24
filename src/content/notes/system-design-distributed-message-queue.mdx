@@ -10,6 +10,7 @@ description: "Designing a Kafka-style distributed log — partitioning and order
 
 import Callout from '../../components/Callout.astro';
 import Mermaid from '../../components/Mermaid.astro';
+import ArchDiagram from '../../components/ArchDiagram.astro';
 
 Part of the [system design](/prep/system-design) series. See the [framework](/prep/system-design) and [building blocks](/prep/system-design/building-blocks) first if you haven't.
 
@@ -29,7 +30,8 @@ Part of the [system design](/prep/system-design) series. See the [framework](/pr
 
 ## 2. Where it sits / high-level architecture
 
-<Mermaid caption="Topic split into ordered partitions, each replicated across brokers" code={`flowchart TD
+<ArchDiagram src="distributed-message-queue/architecture" caption="Topic split into ordered partitions, each replicated across brokers">
+<Mermaid code={`flowchart TD
   P1[Producer] -->|key hash -> partition| B1[Broker 1 - Partition 0 leader]
   P1 --> B2[Broker 2 - Partition 1 leader]
   B1 -->|replicate| B3[Broker 3 - Partition 0 follower]
@@ -41,6 +43,7 @@ Part of the [system design](/prep/system-design) series. See the [framework](/pr
   CTRL -.-> B2
   CTRL -.-> B3
 `} />
+</ArchDiagram>
 
 - A **topic** is a logical stream split into **partitions**, each an append-only, ordered log stored on disk — the partition, not the topic, is the unit of parallelism, ordering, and storage.
 - Each partition has one **leader broker** taking all reads/writes for it, and a set of **follower** replicas that continuously fetch and replay the leader's log for durability.

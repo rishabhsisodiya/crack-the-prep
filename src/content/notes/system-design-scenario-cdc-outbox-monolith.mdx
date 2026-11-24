@@ -1,0 +1,334 @@
+---
+title: "Scenario — Getting Events Out of a Monolith Without Downtime"
+track: "system-design"
+kind: "notes"
+order: 69
+slug: "scenario-cdc-outbox-monolith"
+updated: 2026-11-24
+description: "A scenario-based interview problem: publish domain events from a Postgres-backed monolith to Kafka with zero downtime and no rewrite, using the transactional outbox pattern and Debezium CDC."
+---
+
+import Callout from '../../components/Callout.astro';
+import ArchDiagram from '../../components/ArchDiagram.astro';
+
+Part of the [system design](/prep/system-design) series. This is a **scenario** page: you get the problem the way an interviewer would state it, then a full worked solution. **Level 2 — Senior engineer.**
+
+> **Original practice scenario** — written for interview preparation; not a question from any specific company's interview.
+
+## 1. The problem statement
+
+Here is how the interviewer puts it. Read it the way you would in the room — nothing in this section is the solution.
+
+> "We have a monolith. It is a single deployable backed by Postgres, and it handles orders, payments and inventory. It works, it makes money, and we are not rewriting it.
+>
+> New services are being built around it — a notifications service, a search index, an analytics pipeline, and an inventory read model — and they all need to know when things happen in the monolith: **an order was placed, a payment was captured, inventory changed**. Today they poll our tables or call our APIs, and that is slow, coupled, and starting to hurt.
+>
+> We want the monolith to publish domain events to **Kafka** so the new services can react in near real time. The catch: **zero downtime, no big-bang rewrite, and no lost events**. If an order commits in Postgres, the event about it must eventually reach Kafka. If the order rolls back, no event must ever appear.
+>
+> Design how we get events out of this monolith, reliably."
+
+**Functional requirements**
+
+- Publish domain events — `OrderPlaced`, `PaymentCaptured`, `InventoryChanged`, and similar — from the monolith to Kafka.
+- An event must be published if and only if the business change that caused it committed.
+- Preserve ordering for events belonging to the same order, payment or product.
+- Allow a brand-new consumer to start from existing state, not only from future events.
+- Roll out with zero downtime and no rewrite of the monolith's core flows.
+
+**Non-functional requirements**
+
+- No lost events and no phantom events (events for rolled-back transactions).
+- Duplicates on Kafka are acceptable only if downstream consumers can handle them safely.
+- Publication lag should be seconds in the normal case, and visible when it is not.
+- The monolith's request latency and database load must not materially regress.
+- Event schemas will evolve; old consumers must not break when a new field appears.
+
+## 2. Clarifying questions to ask first
+
+Ask these before drawing anything. Each one changes the design.
+
+| Question | Why it matters |
+|---|---|
+| What is the write volume — orders per second at peak, and how many events per transaction? | A few events per second can be published by a simple poller. Thousands per second justify CDC and careful partitioning. |
+| How strong is the ordering requirement — per order only, or global? | Per-aggregate ordering is achievable with partitioning. Global ordering would force a single partition and cap throughput — push back if it is not really needed. |
+| Can we change the monolith's code and schema at all, or must this be purely external? | The outbox needs one schema addition and a small change at each write site. If even that is forbidden, you are left with CDC on the business tables themselves, which couples events to table shape. |
+| Can we enable logical replication on Postgres, and who owns that change? | Debezium needs `wal_level = logical` and a replication slot. That is an operations change with a restart or failover implication in some setups — surface it early. |
+| What delivery promise do consumers actually need — and what do they do with an event? | If a consumer sends an email, a duplicate is embarrassing. If it charges a card, a duplicate is money. That decides how much idempotency machinery each consumer needs. |
+| How should a new consumer catch up — does it need full history, or current state plus new events? | Full-history replay only works if events were captured from the start. Otherwise the answer is snapshot plus stream catch-up, designed below. |
+| How long must events be retained, and are any of them regulated or personal data? | Retention drives Kafka storage and outbox cleanup, and personal data in events raises deletion and access-control questions a pure throughput design ignores. |
+| Is Kafka already operated here, and is a connector platform (Kafka Connect) available? | Debezium normally runs as a Kafka Connect connector. If there is no Connect cluster, someone has to run one — or embed Debezium, or fall back to polling. |
+
+<Callout type="tip">
+The single highest-value clarification here is "if and only if it committed". That one sentence rules out the obvious first idea — write to the database and then publish to Kafka in application code — and it is the entire problem. Say that out loud, and name the failure before you propose anything.
+</Callout>
+
+## 3. The solution, in plain language first
+
+The simple version: stop trying to write to two systems at once. When the monolith changes an order, it writes **two rows in its own database, in the same transaction**: the order row, and an "outbox" row that says "an `OrderPlaced` event needs to be published". Postgres either commits both or neither — that is what a transaction is for. Afterwards, a separate reader watches for new outbox rows and copies them onto Kafka. That reader is Debezium, which tails the Postgres write-ahead log (CDC — change data capture) rather than polling the table.
+
+Why this works: the hard problem was never "how do I publish to Kafka". It was "how do I make the database commit and the Kafka publish atomic, when they are two different systems with no shared transaction". The outbox sidesteps it — you make the *intent to publish* part of the one transaction you already have, and then you relay that intent at least once, with consumers that can safely receive it twice.
+
+## 4. Architecture
+
+<ArchDiagram src="scenario-cdc-outbox-monolith/architecture" caption="Transactional outbox architecture: monolith writes business and outbox rows in one Postgres transaction, Debezium CDC relays them to Kafka partitioned by aggregate, and idempotent consumers build downstream stores" />
+
+**Component by component**
+
+- **Clients and new services.** The callers and the reason this exists. New services stop polling the monolith's tables and instead subscribe to events — but they never write to the monolith's database.
+- **Monolith app.** The existing application, changed as little as possible: wherever it already writes a business change that others care about, it now also inserts an outbox row inside the same transaction. No Kafka client, no broker dependency, no new failure mode on the request path.
+- **Postgres + outbox table.** The system of record, plus one new table. The outbox row carries the event ID, the aggregate it belongs to, the event type, a per-aggregate sequence number, and the JSON payload. Because it lives in the same database and transaction as the business data, it inherits Postgres's atomicity for free.
+- **Debezium CDC.** A Kafka Connect connector that tails the Postgres write-ahead log (WAL) via logical decoding. It sees each committed outbox insert exactly as committed, routes it to a Kafka topic (Debezium's outbox event router does this), and needs no polling loop and no "published" flag updates from the application.
+- **Kafka.** The durable event log for the new services. Partitioned by `aggregate_id`, so every event for one order lands on one partition in order. Retention is set deliberately (days to weeks, or compacted for state-like topics), because new consumers and replays depend on it.
+- **Downstream consumers (inventory, notifications/search, analytics).** Independent consumer groups, each reading at its own pace. Each one is idempotent: it records the `event_id` it has applied and ignores a redelivery, so Kafka's at-least-once delivery becomes exactly-once *effects* in its own store.
+- **Downstream stores.** Read models, the search index, warehouse tables — whatever each consumer owns. They are rebuildable: snapshot plus replay can reconstruct them, which is what makes consumer bugs recoverable instead of fatal.
+- **Monitoring.** Outbox depth and age of the oldest unpublished row, Debezium's CDC lag and replication-slot health, Kafka consumer lag per group, and dead-letter counts. In this design, lag *is* the reliability story, so it is monitored first-class.
+
+## 5. End-to-end data flow
+
+1. A request arrives: a customer places an order. The monolith begins a Postgres transaction.
+2. Inside that one transaction it inserts/updates the `orders` (and `order_items`, `inventory`) rows **and** inserts one row into `outbox` describing the event: `{ event_id, aggregate_type: 'order', aggregate_id, seq, type: 'OrderPlaced', payload }`.
+3. The transaction commits. Both rows exist, or — if anything failed — neither does. There is no state where the order exists but the event intent does not.
+4. Debezium, tailing the WAL, sees the committed outbox insert. Its outbox router reads the row's aggregate and type fields and produces a Kafka record: key = `aggregate_id`, value = the event payload, headers carry `event_id` and the event type.
+5. Kafka appends the record to the partition for that `aggregate_id`. Events for the same order stay in sequence-number order on that partition.
+6. Each consumer group reads the event independently. Before applying any effect, the consumer checks/records the `event_id` in its own store in the same transaction as the effect (see §9). A redelivery is recognised and skipped.
+7. The consumer commits its Kafka offset only after its local transaction commits. A crash between the two causes a redelivery — which step 6 makes harmless.
+8. Separately, published outbox rows are cleaned up on a schedule (see §8), and lag metrics at each hop — outbox age, CDC lag, consumer lag — tell you the pipeline is actually flowing, not just up.
+
+## 6. Technology choices, and why
+
+| Decision | Choice | Why | Alternative considered |
+|---|---|---|---|
+| Atomicity mechanism | Transactional outbox table in Postgres | Makes "commit ⇒ event" true using the transaction the monolith already has; no distributed transaction, no broker on the request path | Dual-write in application code — broken, see §9; two-phase commit / XA across Postgres and Kafka — operationally painful and not really available end to end |
+| Outbox relay | Debezium CDC on the outbox table (Kafka Connect) | Reads committed changes from the WAL: low lag (sub-second to seconds), no polling load on the database, no missed rows between polls, ordering preserved from commit order | Polling publisher — simpler, no replication setup; compared in detail below |
+| Event transport | Kafka, keyed by `aggregate_id` | Durable, replayable, per-key ordering, independent consumer groups per new service | A queue (RabbitMQ/SQS) — fine for work distribution, poor for replay and for a late-joining consumer that needs history |
+| Event format | JSON (or Avro/Protobuf) with a schema registry and compatibility checks | JSON is debuggable and matches the outbox payload column; a registry enforces the additive-change rules in §7/§8 tooling rather than by convention | Serialising the database row directly — couples every consumer to your table layout and leaks internal columns |
+| Consumer dedup store | Unique constraint on `event_id` in the consumer's own database | The dedup check and the effect commit in one local transaction — no extra infrastructure, no race | An in-memory seen-set or a Redis check separated from the effect write — the check and the effect can split across a crash |
+
+**CDC vs polling publisher.** Both relay the same outbox table; they differ in how they notice new rows. A **polling publisher** runs `SELECT ... WHERE published_at IS NULL ORDER BY created_at LIMIT N` every, say, 100–500 ms, publishes, then marks rows published. It is simple, needs no replication permissions, and is a perfectly good answer at low volume or where logical replication is politically impossible. Its costs: polling load on the primary, lag floored by the poll interval, an extra update (or delete) per row, and a subtle trap — a naive poller can read a row whose transaction has not committed yet under some isolation setups, or miss ordering across concurrent transactions. **Debezium CDC** reads the WAL after commit, so lag is lower, there is no query load and no published-flag write, and commit order is the natural order. Its costs: `wal_level = logical`, a replication slot to operate (an unconsumed slot retains WAL and can fill the disk — monitor it), a Kafka Connect cluster to run, and a slightly scarier operational story. Senior answer: CDC for the real design, polling named as the credible fallback, with the trade-off stated — not CDC recited as dogma.
+
+**Batch vs streaming.** Publication here is streaming: one outbox row becomes one Kafka record, in near real time, because consumers are reacting to events. Batching appears only at the edges, where it belongs — Debezium/Kafka producers batch records for throughput (invisible to correctness), cleanup deletes published outbox rows in batches, and a backfill (§10) is a batch snapshot followed by a streaming catch-up. Do not batch the *semantics*: holding events to publish them in bulk every minute would buy nothing and spend the near-real-time requirement.
+
+## 7. Partitioning and parallelism
+
+- **Partition key is `aggregate_id`** — the order ID for order events, the payment ID for payment events, the product/SKU for inventory events. All events for one aggregate go to one partition, so a consumer sees them in order and can apply them without cross-partition coordination.
+- **Per-aggregate sequence numbers.** Partitioning gives order *within a partition as produced*, but be explicit anyway: the monolith assigns a monotonically increasing `seq` per aggregate when it writes the outbox row. Consumers can detect a gap or a reordering instead of silently applying `PaymentCaptured` before `OrderPlaced`.
+- **No global ordering — on purpose.** Events for different orders interleave freely. Any consumer that claims to need global order actually needs to be redesigned, because global order means one partition and one-threaded consumption.
+- **Parallelism ceiling = partition count.** Consumers scale by adding instances up to the number of partitions. Choose partition count for peak aggregate cardinality (hundreds of thousands of orders ⇒ dozens of partitions is comfortable), remembering partitions can be added but not removed.
+- **Hot aggregate problem:** one very active product (a flash-sale SKU) concentrates inventory events on one partition. Mitigations: keep inventory events small and the consumer's apply cheap, or model high-churn inventory as periodic state snapshots rather than one event per unit change. Name it; do not pretend partitioning removes it.
+- **Debezium itself is single-threaded per table/slot in effect** — it reads one WAL stream in commit order. That is a feature for ordering, and at monolith write rates it is rarely the bottleneck; the relay parallelises again at Kafka.
+
+## 8. Storage strategy
+
+- **The outbox table is a queue, not an archive.** Rows are deleted (or moved to a short-lived archive table) after Debezium has published them and a safety window — say a few days — has passed. An outbox that only grows will eventually bloat the primary's hottest database; cleanup is part of the design, not housekeeping to invent later.
+- **Cleanup safely:** delete in small batches, off-peak if needed, keyed on `created_at` and a "published before" watermark, never in the request transaction. With CDC there is no `published_at` flag written by the app — use Debezium's progress (or a periodic marker based on the WAL position / a conservative time window) plus the safety lag, so you never delete a row CDC has not yet read. The replication slot itself must be monitored: if Debezium stalls, Postgres retains WAL for the slot and disk fills — alert on slot lag in bytes.
+- **Kafka retention** is the replay horizon: days to weeks for event topics, longer (or log compaction) for state-like topics such as current inventory per SKU. State clearly that a consumer needing data older than retention must backfill from a snapshot (§10), not from Kafka.
+- **Payloads in the outbox are JSONB**, sized like the event, not like the row: include what a consumer needs to react without calling back into the monolith, and no more — every extra field is a coupling and a potential personal-data leak.
+- **Indexes:** an index supporting the relay/cleanup access pattern (`created_at`, and the primary key on `event_id`); avoid over-indexing a high-insert table.
+
+## 9. Deduplication and idempotency, with a worked example
+
+Start with why the obvious approach is broken. **Dual-write** means the application code does this:
+
+```
+save order to Postgres   →   publish OrderPlaced to Kafka
+```
+
+There is no transaction spanning those two systems, so both orders of failure exist. Crash (or a Kafka timeout) **after** the database commit but **before** the publish: the order exists, the event is lost forever, and no retry knows it should happen. Reverse the order — publish, then save — and a database rollback leaves a **phantom event** for an order that does not exist. Add a retry around the publish and a timeout becomes ambiguous — did Kafka store it or not? — so the retry can create a **duplicate**. Lost, phantom, or duplicate: dual-write gives you a choice of failure, not correctness. This is the single most important paragraph in the interview.
+
+The outbox removes the dual-write. The business write and the event write are **one local transaction**:
+
+```sql
+-- ONE Postgres transaction: the order and its event commit or roll back together.
+BEGIN;
+
+INSERT INTO orders (id, customer_id, total_paise, status, created_at)
+VALUES ($1, $2, $3, 'PLACED', now());
+
+UPDATE inventory SET reserved = reserved + $4 WHERE sku = $5;
+
+INSERT INTO outbox (
+  event_id, aggregate_type, aggregate_id, seq, event_type, payload, created_at
+) VALUES (
+  gen_random_uuid(),          -- event_id: created once, here, never regenerated
+  'order', $1,                -- aggregate: this order
+  (SELECT COALESCE(MAX(seq), 0) + 1 FROM outbox_seq WHERE aggregate_id = $1),
+  'OrderPlaced',
+  jsonb_build_object(
+    'orderId', $1, 'customerId', $2, 'totalPaise', $3, 'schemaVersion', 1
+  ),
+  now()
+);
+
+COMMIT;  -- either everything above exists, or nothing does
+```
+
+(In a real schema the per-aggregate `seq` usually comes from a sequence column on the aggregate's own row or a dedicated counter row updated in the same transaction — the point to state is that it is assigned inside the transaction, monotonically per aggregate.)
+
+The relay then reads that committed row. With Debezium there is no polling query in your code — the connector tails the WAL and its outbox router produces the record — but the read it performs is conceptually this, and it is also exactly what a polling fallback would run:
+
+```sql
+-- What the relay consumes (Debezium: via the WAL, after commit — never before).
+-- Polling fallback equivalent:
+SELECT event_id, aggregate_type, aggregate_id, seq, event_type, payload
+FROM outbox
+WHERE created_at > :last_seen_watermark
+ORDER BY created_at
+LIMIT 500;
+-- Kafka record: key = aggregate_id, value = payload,
+-- headers: event_id, event_type. Then advance the watermark / let CDC
+-- confirm the WAL position. A crash here re-relays the row: a duplicate
+-- on Kafka is possible, and that is expected — see the consumer below.
+```
+
+So delivery from outbox to Kafka, and from Kafka to consumers, is **at-least-once**. The last piece is a consumer that turns a duplicate delivery into no duplicate *effect*, by recording the `event_id` in the same transaction as the effect:
+
+```js
+// Downstream consumer: idempotent apply — event_id unique constraint does the dedup.
+async function onOrderPlaced(event, db) {
+  await db.transaction(async (tx) => {
+    // Conditional insert: if this event_id was already applied, insert nothing.
+    const inserted = await tx.query(
+      `INSERT INTO processed_events (event_id, event_type, processed_at)
+       VALUES ($1, $2, now())
+       ON CONFLICT (event_id) DO NOTHING
+       RETURNING event_id`,
+      [event.event_id, event.type]
+    );
+    if (inserted.rows.length === 0) {
+      return; // duplicate delivery — already applied, safe to skip and ack
+    }
+    // The actual effect, in the SAME transaction as the dedup record:
+    await tx.query(
+      `INSERT INTO inventory_read_model (order_id, sku, reserved)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (order_id, sku) DO UPDATE SET reserved = EXCLUDED.reserved`,
+      [event.payload.orderId, event.payload.sku, event.payload.quantity]
+    );
+  });
+  // Commit the Kafka offset only AFTER the transaction above commits.
+  await consumer.commitOffset(event.offset);
+}
+```
+
+Three rules make this work. First, `event_id` is generated **once**, in the outbox transaction — never regenerated by the relay or on retry, or dedup is blind. Second, the dedup record and the effect are in **one consumer-side transaction**, so there is no crash window between "marked seen" and "applied". Third, offsets commit **after** the effect, so a crash causes redelivery (handled) rather than loss.
+
+## 10. Retry, failure handling, checkpointing and recovery
+
+- **Monolith write path:** no new retry semantics. If the transaction fails, the request fails as it always did, and no outbox row exists. The request path never touches Kafka, so a Kafka outage cannot take down checkout — say this explicitly; it is one of the design's best properties.
+- **Debezium / Connect failure:** the connector restarts from its last confirmed WAL position. Rows between that position and the crash are re-read and re-published — duplicates on Kafka, absorbed by consumer idempotency. Monitor the replication slot while it is down: retained WAL grows.
+- **Kafka unavailable:** Debezium pauses/retries; outbox rows accumulate in Postgres. Nothing is lost; lag grows and alerts. The operational limit is outbox/WAL disk, which is why lag has a paging threshold, not just a graph.
+- **Consumer crash:** restart from the last committed offset; the in-flight event is redelivered; the `processed_events` check makes the second apply a no-op.
+- **Poison events** (a payload no consumer can apply — a bug, a schema surprise): retry a bounded number of times with backoff, then route to a **dead-letter topic** with the original event and the error, and alert on DLQ growth. Never let one bad event block a partition forever, and never silently drop it either.
+- **Backfilling a brand-new consumer (snapshot + stream catch-up):** a consumer built six months later cannot replay what Kafka has already aged out, and the early events may not exist at all. The standard answer: (1) note the current stream position — a Kafka offset per partition, or a high-water `seq`/timestamp; (2) take a **consistent snapshot** of the relevant monolith state (a Postgres snapshot export / `pg_dump` in a repeatable-read transaction, or Debezium's snapshotting mode, which does exactly this and records the WAL position it corresponds to); (3) load the snapshot into the consumer's store; (4) start consuming the stream **from the noted position**, applying events idempotently on top of the snapshot. Events that overlap the snapshot are deduped by `event_id` / superseded by `seq`, so the seam between snapshot and stream is safe. This is also the recovery procedure for a consumer whose store is corrupted: rebuild, do not hand-patch.
+- **Schema/deploy recovery:** because the outbox is just a table, rolling back the application deploy does not strand events — rows written by the new version are still relayed; rows are only a problem if a rollback removes the code that *writes* them while callers expect events, which is a release-notes item, not a data-loss event.
+
+## 11. Monitoring and observability
+
+- **Age of the oldest unpublished outbox row** — the single best health signal for the whole pipeline. If it is seconds, events are flowing. Alert on age, not just row count.
+- **Debezium CDC lag** (WAL position behind the primary) and **replication slot retained bytes** — the disk-fill early warning.
+- **Kafka consumer lag per group, in time** — each new service's freshness, separately visible.
+- **Duplicate rate at consumers** — some duplicates are normal (restarts); a sudden jump means a relay or consumer is crash-looping.
+- **DLQ rate** and poison-event count.
+- **End-to-end latency**: business commit timestamp (in the outbox row) to consumer apply, sampled — this is the number the business actually feels.
+- Structured logs carry `event_id` and `aggregate_id` at every hop, so one event can be traced from the monolith transaction to each consumer's apply.
+
+## 12. Security
+
+- **Least privilege:** Debezium gets a dedicated replication user that can read the outbox (and the WAL) — not a superuser for application traffic, and not write access to business tables. The monolith's app user can insert into `outbox` but consumers never connect to the monolith's database at all.
+- **Kafka access control:** per-topic ACLs — the relay may produce to the event topics, each consumer group may read only the topics it needs. A notifications service has no business reading payment payloads it does not need.
+- **Data minimisation in payloads:** events carry what consumers need, not a copy of the row. Card data never goes in an event, full stop; personal data that must appear is inventoried, because it now lives in Kafka, in consumer stores, and in backups of both — and a deletion request has to be able to find it.
+- **Encryption** in transit (TLS to Postgres, to Kafka, between Connect and brokers) and at rest; secrets for the connector and consumers live in the platform's secret store, not in connector config files in git.
+- **Auditability:** the outbox (before cleanup) and Kafka together give a reconstructable record of what was published and when — keep the archive window aligned with whatever audit actually requires.
+
+## 13. Scalability, the 10x question, and cost
+
+**At 10x write volume:** the request path barely notices — an extra indexed insert per transaction is cheap next to the business writes it accompanies. The pressure points move downstream: Debezium's single WAL stream (usually still fine; Postgres WAL rates are high, but measure it), Kafka partition count and consumer parallelism (add partitions and instances), and the outbox cleanup keeping pace so the table stays small and hot. If one aggregate class dominates (inventory events for a few SKUs), that is the hot-partition conversation from §7, not a reason to redesign.
+
+**What breaks first, honestly:** operational, not architectural — an unmonitored replication slot during a long Debezium outage filling the primary's disk is the classic self-inflicted incident in this design, ahead of any throughput limit.
+
+**Cost levers:** outbox rows are deleted, not kept — storage cost stays flat. Kafka retention is the main recurring cost: size it to the real replay need (days, not "forever, just in case"), and use snapshots for older reconstruction. Debezium/Connect is a small, fixed cluster cost. Compare all of that with the alternative being replaced — consumers polling the monolith's primary all day — which was already costing database load with worse results.
+
+## 14. Trade-offs, stated honestly
+
+| Choice | You gain | You pay |
+|---|---|---|
+| Outbox over dual-write | Atomic "commit ⇒ event" with no distributed transaction | An extra table, a relay to operate, and eventual (not immediate) publication — events are near-real-time, not synchronous |
+| CDC (Debezium) over polling | Low lag, no poll load, commit-order reading | Logical-replication setup, a Connect cluster, and a replication slot that can hurt you if unmonitored |
+| At-least-once delivery + idempotent consumers | No lost events; simple, retry-friendly relay | Every consumer must implement dedup correctly, forever; duplicates are handled, never prevented |
+| Events carry their own payload | Consumers never call back into the monolith | Payload design is now an API contract — versioning discipline (§7/§15) is mandatory, and data is duplicated into Kafka and consumer stores |
+| Partition by aggregate | Per-aggregate ordering and clean parallel consumption | No global ordering; a hot aggregate is bounded by one partition |
+
+<Callout type="warn">
+Say this sentence in the interview: "This design does not deliver exactly-once delivery — the relay can republish after a crash and Kafka consumers can be redelivered to. It delivers at-least-once delivery with idempotent consumers, which gives exactly-once *effects* in the downstream stores." Claiming exactly-once delivery for a Postgres-to-Kafka pipeline is the fastest way to lose a senior interviewer.
+</Callout>
+
+**Delivery semantics, precisely.** *At-most-once* would mean publishing without retry — a Debezium restart or a consumer crash could silently drop an `OrderPlaced`, which breaks the core promise. *At-least-once* is what this design actually provides at every hop: the outbox guarantees the intent survives, the relay retries from the WAL, and consumers commit offsets only after applying. *"Exactly-once delivery"* end to end — each event physically delivered one time across crashes and retries spanning Postgres, a connector, a broker and a consumer — is not a thing any of these components can promise jointly. What is achievable, and what this design claims, is **exactly-once effects**: a given `event_id` changes each downstream store as if it had been delivered exactly once, because the dedup record and the effect commit atomically. Kafka's own exactly-once semantics, where mentioned, are a narrower guarantee about Kafka-internal produce/consume transactions — useful, but not the end-to-end claim.
+
+## 15. Interviewer follow-up Q&As
+
+1. **"Why not just publish to Kafka in the same code that saves the order?"** — That is dual-write: no shared transaction, so a crash between the two writes loses the event, reversing the order can publish a phantom for a rolled-back order, and a retried publish can duplicate. The outbox makes the event part of the one transaction that exists. (§9 works this in full.)
+2. **"Debezium or a polling publisher — which, and why?"** — Debezium for the real system: it reads committed changes from the WAL, so lag is low, there is no polling load or published-flag write, and order follows commit order. Polling is the credible fallback if logical replication or running Connect is not allowed — simpler, at the cost of poll-interval lag and primary query load.
+3. **"How do you guarantee ordering?"** — Per aggregate only, and deliberately: Kafka key = `aggregate_id` puts one order's events on one partition in order, and a per-aggregate `seq` written in the outbox transaction lets consumers detect gaps. Global ordering is explicitly not offered — it would serialise the whole system.
+4. **"A consumer joins six months from now. How does it get order history?"** — Snapshot plus stream catch-up: snapshot the monolith state consistently at a known WAL/stream position, load it, then consume from that position with idempotent applies covering the seam. (§10.)
+5. **"The outbox table grows forever. What stops that?"** — It is treated as a queue: rows are deleted in batches after publication plus a safety window, cleanup is monitored like any other part of the pipeline, and Kafka — not the outbox — is the retained record. An ever-growing outbox is an operations failure, not a design property.
+6. **"You need to add a field to `OrderPlaced`. What breaks?"** — Nothing, if the change is additive: add the field, old consumers ignore it, new consumers may read it. Removing or renaming a field, or changing a type or a meaning, is a breaking change — that gets a new event version/type and a migration window where both are published. Enforce compatibility with a schema registry rather than by hope.
+7. **"An old consumer cannot understand version 2 of an event. How do you run both?"** — Upcasting/downcasting at the edges: consumers (or a thin translation layer) upcast a v1 payload to the current internal shape with a pure function (`upcastV1toV2` fills the new field with its documented default), so business logic only ever sees one version. Events are stored and published in their original version; translation happens on read, never by rewriting history.
+8. **"Debezium is down for three hours. Walk me through it."** — The monolith is unaffected — checkout never touches Kafka. Outbox rows and retained WAL accumulate; lag alerts fire on oldest-outbox-row age and slot bytes. On recovery Debezium resumes from its last WAL position and republishes the gap; consumers see a burst and possibly duplicates, both handled. The thing you watch with real fear is primary disk from WAL retention.
+9. **"How do you test this before it carries production traffic?"** — Shadow it: write outbox rows and run the relay to a staging topic while consumers still use the old polling path, compare event stream against table state (counts per aggregate per hour, sampled payload diffs), then cut consumers over one at a time. Zero-downtime rollout is: add table → deploy code that writes outbox rows (nothing reads them yet) → start CDC → onboard consumers individually → retire polling per consumer.
+10. **"What is the first thing that pages you at 3 a.m. in this design?"** — Oldest unpublished outbox row age climbing — which means the relay is stuck — or replication-slot disk growth on the primary. Both are in §11 precisely because they are this architecture's characteristic failures, ahead of Kafka itself.
+
+## 16. Interview-ready spoken answer
+
+> "First, the requirements I'd pin down: the monolith stays, downtime is zero, and the promise that matters is 'if it committed in Postgres, the event reaches Kafka — and if it rolled back, it never does'. I'd also confirm ordering is per order or per payment, not global, and ask whether we can enable logical replication, because that decides one component later.
+>
+> The bottleneck isn't throughput, it's atomicity. The naive design — save to the database, then publish to Kafka in the same code — is a dual-write, and it loses events on a crash, publishes phantoms on a rollback, and duplicates on a retry. So step one of my design is removing that second write from the request path entirely.
+>
+> The architecture is the transactional outbox. In the same Postgres transaction that places the order, the monolith also inserts an outbox row — event ID, aggregate ID, a per-aggregate sequence number, type, and JSON payload. Commit means both exist; rollback means neither does. Then Debezium tails the write-ahead log, sees committed outbox rows, and publishes them to Kafka, partitioned by aggregate ID. I chose CDC over a polling publisher for lower lag and no query load on the primary, and I'd name polling as the fallback if logical replication isn't available.
+>
+> The data flow after that is ordinary, deliberately: each new service consumes from Kafka in its own consumer group, at its own pace, with no calls back into the monolith and no access to its database.
+>
+> On reliability and duplicates: delivery is at-least-once at every hop, and I won't pretend otherwise. So every consumer is idempotent — it inserts the event ID into a processed-events table with a unique constraint, in the same transaction as the effect it's applying, and commits its Kafka offset only after that. A redelivery becomes a no-op. That gives exactly-once effects downstream, which is the claim I'll actually defend. Poison events go to a dead-letter topic instead of blocking a partition.
+>
+> For scale and change: consumers scale to the partition count, the outbox is cleaned up like a queue so it never grows unbounded, a brand-new consumer backfills from a consistent snapshot and then catches up on the stream, and schema changes stay additive — breaking changes get a new version and upcasters on the read side, never a rewrite of published events.
+>
+> The trade-offs I'd flag honestly: publication is near-real-time, not synchronous; I'm operating a connector and a replication slot, and an unmonitored slot filling the primary's disk is this design's classic incident; and every consumer team owns a dedup obligation forever. In exchange, the monolith's checkout path gains no new dependency and no new failure mode — which, for a system that makes money and can't go down, is the property I'd optimise for first."
+
+## 17. Mock interview mode
+
+**Five hard follow-ups, with expected answers**
+
+1. **"Your relay published the event, then crashed before recording that it did. Kafka now has it twice. Defend your design."** — Expected: that is at-least-once working as designed, not a bug. The consumer's `processed_events` unique constraint makes the second delivery a no-op because the dedup record and the effect committed together. The candidate should be able to walk the exact crash window on both the relay and the consumer side.
+2. **"Two transactions update the same order concurrently. What order do its events arrive in?"** — Expected: commit order, as read from the WAL and preserved by partitioning on `aggregate_id`; the per-aggregate `seq` — assigned inside the transaction from the aggregate's own counter — lets the consumer verify that order and detect a gap rather than trusting arrival alone. Bonus: naming that sequence assignment under concurrency needs the counter update to serialise on the aggregate row.
+3. **"Why not skip the outbox and run Debezium directly on the `orders` table?"** — Expected: you can, and it is the fallback if code changes are forbidden — but then your "events" are row changes: they leak table shape, fire on every internal update (including ones that are not domain events), carry no domain intent or curated payload, and make schema refactors into consumer-breaking events. The outbox is where a database change becomes a deliberate, versioned domain event.
+4. **"The business asks for an event to also trigger synchronously before the API responds. What do you say?"** — Expected: no — that reintroduces coupling to Kafka's availability on the request path, the thing this design exists to remove. Offer the honest alternatives: the response returns after the database commit (the event is then guaranteed, within seconds), or, if a specific flow truly needs a synchronous reaction, that reaction belongs inside the monolith transaction, not in a downstream consumer.
+5. **"Prove no events were lost last Tuesday."** — Expected: reconciliation, not vibes: per-aggregate event counts and sequence continuity (gaps in `seq` are detectable), oldest-outbox-row age history, CDC lag history, and consumer-side counts of applied `event_id`s versus Kafka topic counts for the window. "Postgres and Kafka are both durable" is not proof.
+
+**Common candidate mistakes**
+
+- Proposing dual-write and not seeing the crash window until prompted.
+- Claiming exactly-once delivery between Postgres and Kafka.
+- Running CDC directly off business tables with no discussion of coupling or domain intent.
+- Forgetting outbox cleanup — designing a table that grows forever on the primary.
+- No backfill story: assuming every consumer exists from day one and Kafka retention is infinite.
+- Treating schema evolution as someone else's problem; renaming a field in v2 without a versioning answer.
+
+**What a senior candidate mentions unprompted**
+
+- The "if and only if it committed" framing, before any component is named.
+- Replication slot / WAL retention risk, with its monitoring.
+- Per-aggregate sequence numbers, not just "Kafka preserves order".
+- Snapshot plus stream catch-up for a late-joining consumer, with the idempotent seam.
+- Additive-only schema changes, upcasters, and a registry enforcing compatibility.
+- Rollout as a sequence — table, writers, relay, consumers one at a time — with a shadow/compare step.
+
+**Scoring rubric (out of 10)**
+
+| Score | What it looks like |
+|---|---|
+| 9–10 | Dual-write failure named unprompted, outbox + CDC with the polling trade-off stated, per-aggregate ordering with sequence numbers, idempotent consumers with the transactional dedup example, backfill and schema versioning covered, delivery semantics stated precisely |
+| 7–8 | Correct outbox design and idempotent consumers, but backfill, cleanup or schema evolution is thin |
+| 5–6 | Outbox named but the relay, ordering or consumer dedup is hand-wavy; "Kafka handles duplicates" asserted rather than designed |
+| 3–4 | Dual-write proposed, or CDC on business tables with no coupling discussion; no recovery story |
+| 0–2 | Claims exactly-once delivery, or proposes a distributed transaction / synchronous publish on the request path |
+
+Sources: [Debezium documentation — outbox event router and Postgres connector](https://debezium.io/documentation/) · [microservices.io — Transactional outbox pattern, Chris Richardson](https://microservices.io/patterns/data/transactional-outbox.html) · [Martin Fowler — what do you mean by "event-driven"? / event patterns](https://martinfowler.com/articles/201701-event-driven.html)

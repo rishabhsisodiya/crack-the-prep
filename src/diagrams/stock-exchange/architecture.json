@@ -1,0 +1,169 @@
+{
+  "meta": {
+    "title": "Stock Exchange \u2014 One Sequencer, Single-Threaded Matching",
+    "output": ".archify/build/stock-exchange/architecture.html",
+    "quality_profile": "showcase"
+  },
+  "components": [
+    {
+      "id": "t1",
+      "type": "external",
+      "label": "Trader Client",
+      "sublabel": "orders"
+    },
+    {
+      "id": "t2",
+      "type": "external",
+      "label": "Trader Client",
+      "sublabel": "orders"
+    },
+    {
+      "id": "gw1",
+      "type": "cloud",
+      "label": "Gateway",
+      "sublabel": "validates + forwards"
+    },
+    {
+      "id": "gw2",
+      "type": "cloud",
+      "label": "Gateway",
+      "sublabel": "validates + forwards"
+    },
+    {
+      "id": "seq",
+      "type": "backend",
+      "label": "Sequencer",
+      "sublabel": "monotonic sequence no."
+    },
+    {
+      "id": "wal",
+      "type": "database",
+      "label": "Write-Ahead Log",
+      "sublabel": "durable order stream"
+    },
+    {
+      "id": "me",
+      "type": "backend",
+      "label": "Matching Engine",
+      "sublabel": "single thread per instrument",
+      "tag": "hot path"
+    },
+    {
+      "id": "ob",
+      "type": "database",
+      "label": "In-Memory Order Book",
+      "sublabel": "per instrument"
+    },
+    {
+      "id": "pub",
+      "type": "messagebus",
+      "label": "Market Data Publisher",
+      "sublabel": "trade events"
+    },
+    {
+      "id": "set",
+      "type": "backend",
+      "label": "Settlement / Clearing",
+      "sublabel": "post-trade pipeline"
+    },
+    {
+      "id": "md",
+      "type": "external",
+      "label": "Subscriber Feeds",
+      "sublabel": "market data consumers"
+    }
+  ],
+  "connections": [
+    {
+      "id": "t1-g1",
+      "from": "t1",
+      "to": "gw1",
+      "label": "order"
+    },
+    {
+      "id": "t2-g2",
+      "from": "t2",
+      "to": "gw2",
+      "label": "order"
+    },
+    {
+      "id": "g1-s",
+      "from": "gw1",
+      "to": "seq",
+      "label": "order"
+    },
+    {
+      "id": "g2-s",
+      "from": "gw2",
+      "to": "seq",
+      "label": "order"
+    },
+    {
+      "id": "s-w",
+      "from": "seq",
+      "to": "wal",
+      "label": "append before matching"
+    },
+    {
+      "id": "s-m",
+      "from": "seq",
+      "to": "me",
+      "label": "sequenced orders",
+      "variant": "emphasis"
+    },
+    {
+      "id": "m-o",
+      "from": "me",
+      "to": "ob",
+      "label": "match against book"
+    },
+    {
+      "id": "m-p",
+      "from": "me",
+      "to": "pub",
+      "label": "trade",
+      "variant": "emphasis"
+    },
+    {
+      "id": "m-st",
+      "from": "me",
+      "to": "set",
+      "label": "trade"
+    },
+    {
+      "id": "p-md",
+      "from": "pub",
+      "to": "md",
+      "label": "publish feeds"
+    },
+    {
+      "id": "w-m",
+      "from": "wal",
+      "to": "me",
+      "label": "replay on crash",
+      "variant": "dashed"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Determinism",
+      "items": [
+        "Every order gets a monotonic sequence number before matching \u2014 the whole market is one ordered stream",
+        "A single thread per instrument matches against the in-memory book: no locks, no races"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Recovery",
+      "items": [
+        "Orders are written to the WAL before matching, so a crash replays the log and rebuilds the book exactly"
+      ]
+    }
+  ],
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "layout": {
+    "mode": "auto"
+  }
+}

@@ -1,0 +1,257 @@
+---
+title: "Scenario — Distributed Telemetry Ingestion at 100K Events/Second"
+track: "system-design"
+kind: "notes"
+order: 60
+slug: "scenario-telemetry-ingestion"
+updated: 2026-11-24
+description: "A scenario-based interview problem: ingest telemetry from a fleet of connected devices at 80-100K events/sec with 3x spikes, offline replay, duplicates and late data, feeding both sub-30s alerting and a warehouse."
+---
+
+import Callout from '../../components/Callout.astro';
+import Mermaid from '../../components/Mermaid.astro';
+import ArchDiagram from '../../components/ArchDiagram.astro';
+
+Part of the [system design](/prep/system-design) series. This is a **scenario** page: you get the problem the way an interviewer would state it, then a full worked solution. **Level 2 — Senior engineer.**
+
+> **Original practice scenario** — written for interview preparation; not a question from any specific company's interview.
+
+## 1. The problem statement
+
+Here is how the interviewer puts it. Read it the way you would in the room — nothing in this section is the solution.
+
+> "We run a fleet platform. Around 40,000 connected devices — delivery vehicles, industrial machines, smart meters — each send telemetry (location, temperature, vibration, battery, error codes) every second or so. That is **80,000–100,000 events per second** sustained, and when a region comes back online after an outage we see **spikes of 3x** for a few minutes.
+>
+> Devices lose connectivity constantly. While offline they buffer events on the device, and when they reconnect they **replay the buffer** — so events arrive late, sometimes by hours, and the same event can be delivered twice if the device retried before an acknowledgement came back.
+>
+> Two consumers need this data. Operations needs **real-time alerts** — for example 'this machine's temperature crossed the safe limit' — within **30 seconds** of the event happening. The analytics team needs the same data in a **warehouse** for daily and weekly reporting, and they need those reports to be correct, including the late-arriving data.
+>
+> Design the ingestion and processing system."
+
+**Functional requirements**
+
+- Ingest telemetry from ~40,000 devices at 80–100K events/sec, absorbing 3x bursts.
+- Accept replayed (late and duplicated) events from devices that were offline.
+- Raise threshold/rule alerts within 30 seconds of event time for online devices.
+- Land complete, deduplicated data in a warehouse for reporting.
+
+**Non-functional requirements**
+
+- No silent data loss: a device that buffered data offline must be able to get it in.
+- Duplicates must not double-count in reports or fire double alerts.
+- Late data must correct the analytics numbers, even hours later.
+- The system must survive a processing-node crash without losing or double-processing.
+- Cost matters: you cannot keep 100K events/sec in hot storage forever.
+
+## 2. Clarifying questions to ask first
+
+Ask these before drawing anything. Each one changes the design.
+
+| Question | Why it matters |
+|---|---|
+| Does every event carry a unique ID and a device timestamp, or only a server receive time? | Dedup and late-data handling are only possible if the device stamps an `event_id` and its own event time. If not, your first design decision is to add them. |
+| How long can a device be offline — minutes, or days? | That sets the dedup window and the lateness allowance. A 7-day replay window is a very different (and pricier) design than a 1-hour one. |
+| Is the 30-second alert SLA measured from event time or from arrival time? | From event time is impossible for an offline device. Usually the SLA is from arrival for live devices, and alerts on replayed data are suppressed or marked stale. |
+| What does an alert actually do — page a human, or write a row? | Paging a human on replayed, hours-old data is an operational disaster. It decides whether the replay path bypasses alerting. |
+| Do reports need to be exactly right, or approximately right? | Exact reports need a replayable raw log and reprocessing. Approximate reports let you use cheaper streaming aggregates only. |
+| What is the event size and retention requirement? | 100K/sec at ~500 bytes is ~4.3 TB/day. That drives the storage tiering and cost conversation. |
+| Which cloud / stack are we on — Kafka already, or greenfield? | Interviewers accept Kafka + a stream processor as the standard answer, but naming the managed equivalent (Kinesis, Pub/Sub) shows you know the shape, not just one vendor. |
+
+<Callout type="tip">
+The single highest-value clarification here is the event ID plus device timestamp. Almost every hard part of this problem — duplicates, late data, replay — becomes tractable the moment events are self-identifying and self-timestamped, and painful when they are not. Say that out loud.
+</Callout>
+
+## 3. The solution, in plain language first
+
+The simple version: devices talk to gateways, gateways hand events to a durable log (Kafka), and everything downstream reads from that log. One stream job cleans the data — throws away duplicates, puts late events in their correct time bucket — and feeds two readers: a fast alerting path and a warehouse path. The raw events are also archived untouched, so any number can be rebuilt later by replaying the archive.
+
+Why a log in the middle? Because at 100K/sec with 3x spikes, the thing that saves you is a buffer that can absorb the burst and let consumers catch up at their own pace. That is the whole trick. Everything else is details about correctness.
+
+## 4. Architecture
+
+<ArchDiagram src="scenario-telemetry-ingestion/architecture" caption="Distributed telemetry ingestion architecture" />
+
+The same topology in Mermaid, for quick reference:
+
+
+**Component by component**
+
+- **Devices and edge gateways.** Devices send over MQTT (lightweight, built for flaky links) or HTTPS. Gateways authenticate the device, batch events, and — critically — buffer locally if the cloud side is unreachable, then replay. The device stamps each event with a UUID `event_id` and its own clock time at creation. That stamp never changes on retry.
+- **Ingestion API.** Stateless and horizontally scaled. It does cheap checks only: is this device authenticated, is the payload schema-valid, is this device within its quota? Then it writes to Kafka and acks. It does **not** process, aggregate, or write to a database — that is what keeps ingestion fast under a spike.
+- **Kafka.** The durable, replayable buffer. Partition by `device_id`, so all events for one device stay in order on one partition. Retention of a few days on the hot topic; the long-term copy lives in the lake.
+- **Stream job (Flink or Kafka Streams / Spark Structured Streaming).** The brain. It deduplicates on `event_id`, assigns events to event-time windows using watermarks, computes aggregates, and routes alert-worthy conditions onward. Checkpointed state is what makes crash recovery safe.
+- **Alerting engine.** Consumes the cleaned stream, evaluates rules (thresholds, absence-of-signal, rate of change), and fires alerts. It only alerts on events that are fresh (arrived close to their event time); replayed history updates reports, not pagers.
+- **Hot store (ClickHouse or Pinot).** Recent aggregates for dashboards — last hours/days, fast OLAP queries.
+- **Data lake + warehouse.** Every raw event is archived to object storage straight from Kafka, then loaded/compacted into warehouse tables (partitioned by event date) for reporting. This is the correctable, replayable source of truth.
+
+## 5. End-to-end data flow
+
+1. Device creates an event: `{ event_id, device_id, ts (device clock), type, payload }`, stores it in its local outbox until acked.
+2. Gateway receives a batch, forwards to the ingestion API; the API validates and produces to Kafka keyed by `device_id`; the gateway acks the device, which clears its outbox.
+3. The stream job consumes. For each event it checks the dedup state for that `event_id`. First sighting: process it. Second sighting: drop it and count it (a rising duplicate rate is itself a health signal).
+4. The job places the event in its event-time window. A watermark — "I believe I have seen everything up to time T" — decides when a window is complete. Events arriving after the watermark but within the allowed lateness (say 2 hours for stream aggregates) still update the window; later than that, they go to a late-events side output.
+5. Alert rules evaluate on the fresh stream. Aggregates are upserted into the hot store.
+6. In parallel, a sink archives raw events to the lake. A batch job (hourly/daily) merges raw events — including the very late ones — into warehouse tables, using the same dedup key, so the reported numbers converge to correct.
+
+## 6. Technology choices, and why
+
+| Decision | Choice | Why | Alternative considered |
+|---|---|---|---|
+| Transport from devices | MQTT via gateways | Tiny overhead, designed for intermittent links, built-in last-will and session handling | Raw HTTPS per event — fine at low scale, chatty and battery-hungry here |
+| Buffer / log | Kafka | Durable, replayable, partitioned ordering per key, huge ecosystem | Kinesis / Pub/Sub — equally valid managed equivalents; RabbitMQ is a queue, not a replayable log, and replay is a hard requirement here |
+| Stream processing | Flink (or Spark Structured Streaming) | Event-time windows, watermarks, checkpointed keyed state for dedup out of the box | Hand-rolled Kafka consumers — you end up re-implementing checkpointing and state recovery, badly, at 2 a.m. |
+| Hot serving | ClickHouse / Pinot | Columnar OLAP, built for dashboard aggregations over billions of rows | Postgres — right answer at 1K/sec, wrong answer at this volume for analytic scans |
+| Archive + warehouse | Object storage (Parquet) + warehouse (BigQuery / Snowflake / Spark + Iceberg) | Cheap, immutable, replayable; Parquet by date/device makes reprocessing selective | Keeping everything in Kafka — retention cost explodes |
+
+**Batch vs streaming.** This system is streaming-first with a batch correction layer — a pragmatic lambda/kappa hybrid. Streaming gives the 30-second alerts and live dashboards. Batch over the raw archive gives correctness: it is how late and replayed data ends up counted exactly once in the reports that people make decisions from. Pure streaming alone cannot promise that; pure batch alone cannot alert in 30 seconds.
+
+## 7. Partitioning and parallelism
+
+- Kafka partitions by `device_id`: per-device ordering for free, and the stream job's keyed state (dedup set, per-device aggregates) needs no cross-partition coordination.
+- Partition count is the parallelism ceiling. At 100K/sec, ~100–200 partitions is a sane starting point (roughly 500–1,000 events/sec per partition, well within a consumer's comfort), and you can raise partition count as volume grows — knowing you cannot easily lower it.
+- **Hot device problem:** one malfunctioning device flooding events can overload a single partition. Mitigate at the gateway with per-device quotas, and in Kafka by salting only if a single key genuinely exceeds one partition's throughput (rare for telemetry; name it, do not over-engineer it).
+- The stream job scales by adding parallel instances up to the partition count; state is sharded by key, so scaling is close to linear.
+
+## 8. Storage strategy
+
+- **Kafka hot retention:** 3–7 days — enough to replay after a consumer bug, cheap enough to afford.
+- **Raw archive:** Parquet files in object storage, partitioned by event date, retained per policy (90 days hot-ish, then colder tiers). ~4.3 TB/day at 500-byte events, compressed Parquet cuts that substantially.
+- **Hot store:** rolling 7–30 days of aggregates for dashboards.
+- **Warehouse:** curated, deduplicated tables — the reporting source of truth, correctable by reprocessing the archive for any date range.
+
+## 9. Deduplication and idempotency, with a worked example
+
+Delivery here is **at-least-once** at every hop: gateways retry, Kafka consumers replay after crashes. So duplicates are not an edge case, they are the steady state. The defence is idempotent processing keyed on the device-generated `event_id`.
+
+In the stream job, dedup is keyed state with a TTL matching the maximum replay window (for example 7 days). The same idea in plain code — this is the shape to write on a whiteboard:
+
+```python
+# Stream consumer: process each event_id at most once.
+def on_event(event, state, sink):
+    if state.seen(event.event_id):        # duplicate delivery or device replay
+        metrics.inc("duplicate_dropped")
+        return                            # safe: no double alert, no double count
+    process(event, sink)                  # aggregate / alert / write
+    state.mark_seen(event.event_id, ttl_days=7)
+    state.commit_offset(event.offset)     # only after processing succeeds
+```
+
+And when the sink is a database rather than a stream state store, the equivalent is a **conditional write** — let the unique constraint do the dedup:
+
+```sql
+-- Idempotent insert: the second delivery of the same event is a no-op.
+INSERT INTO telemetry_events (event_id, device_id, event_ts, metric, value)
+VALUES ($1, $2, $3, $4, $5)
+ON CONFLICT (event_id) DO NOTHING;
+```
+
+Two rules make this work. First, the `event_id` is created **once, on the device, at event creation** — never regenerated on retry, or dedup is blind. Second, mark-as-seen / offset-commit happens **after** successful processing, so a crash mid-event causes a redelivery (which dedup then handles) rather than a loss.
+
+## 10. Retry, failure handling, checkpointing and recovery
+
+- **Device/gateway retry:** exponential backoff with jitter; the local outbox is durable, so a dead gateway does not lose data, it delays it.
+- **Consumer crash:** the stream job restarts from its last checkpoint (Kafka offsets + state snapshot together). Events after the checkpoint are replayed; dedup absorbs the overlap. This is exactly why checkpointed state beats "commit the offset and hope".
+- **Poison events** (schema-broken payloads): after a small number of attempts, route to a dead-letter topic with the raw payload and the error, and alert if the DLQ rate spikes. Never let one bad event stall a partition.
+- **Downstream unavailable** (hot store down): the job pauses that sink and buffers in Kafka — consumers simply fall behind rather than dropping data. Lag becomes your visible, alertable symptom.
+- **Kafka broker loss:** replication factor 3 with `min.insync.replicas=2`; a single broker loss is a non-event.
+
+## 11. Monitoring and observability
+
+- **Consumer lag** per consumer group — the single most important metric; alert on lag age (time), not just count.
+- **End-to-end alert latency**: event arrival to alert fired, against the 30-second budget.
+- **Duplicate rate and late-event rate**: a sudden jump usually means a gateway or device-firmware problem upstream.
+- **DLQ rate**, ingestion 4xx/5xx rate, per-device event rate (a silent device is a signal too — absence detection).
+- Structured logs carry `event_id` and `device_id` end to end, so one event can be traced across every hop.
+
+## 12. Security
+
+- Per-device identity: mTLS or per-device keys issued at provisioning; a compromised device can only impersonate itself, and can be revoked individually.
+- Gateways and the ingestion API authenticate every batch; payloads are schema-validated before they reach Kafka, so malformed or hostile payloads die at the edge.
+- Encryption in transit everywhere, at rest in Kafka/lake/warehouse; warehouse access via role-based permissions, with raw telemetry (which can be location data) restricted to the few roles that need it.
+
+## 13. Scalability, the 10x question, and cost
+
+**At 10x (1M events/sec):** the architecture does not change, the numbers do. More Kafka partitions and brokers, more stream-job parallelism, gateway tier scaled out. The things that break first are not the log — they are the hot store's write rate and the dedup state's size (10x devices × 7-day TTL). Answers: aggregate before the hot store (pre-aggregate per minute in the stream job, which the design already does), and shard/TTL the dedup state per device rather than keeping one global set. Alerting rules must also be sharded by device key, which the partitioning already gives you.
+
+**Cost levers:** Parquet compression and storage tiering for the archive; short Kafka retention; aggregates (not raw events) in the expensive hot store; sampling is acceptable for some low-value metrics but never silently — name which streams are sampled and which are not.
+
+## 14. Trade-offs, stated honestly
+
+| Choice | You gain | You pay |
+|---|---|---|
+| At-least-once delivery + dedup | No loss, simple producers | You must build and pay for dedup state; duplicates are handled, not prevented |
+| Streaming aggregates + batch correction | Fast dashboards and eventually-exact reports | Two paths to keep consistent; reports are "correct as of the last batch merge" |
+| Watermarks with allowed lateness | Windows close on time, most late data still counts | Data later than the allowance needs the batch path; picking the bound is a judgement call |
+| Partition by device | Per-device ordering, clean keyed state | A single hot device is bounded by one partition's throughput |
+
+<Callout type="warn">
+Say this sentence in the interview: "This design does not deliver exactly-once delivery — no design over a network that retries can. It delivers at-least-once delivery with idempotent processing, which gives exactly-once *effects* in the aggregates and the warehouse." Conflating delivery with effects is the most common senior-level slip in this problem.
+</Callout>
+
+**Delivery semantics, precisely.** At-most-once (fire and forget) would lose buffered telemetry on any hiccup — unacceptable here. At-least-once plus dedup is the sweet spot. "Exactly-once" in tools like Flink/Kafka refers to exactly-once *state updates within that system's checkpoints and transactional sinks* — a real and useful guarantee, but narrower than the end-to-end claim candidates often make for it.
+
+## 15. Interviewer follow-up Q&As
+
+1. **"A consumer crashes mid-batch. What happens?"** — It restarts from the last checkpoint; events since then are redelivered and the dedup state drops the ones already processed. No loss, no double count, some reprocessing cost.
+2. **"How do you prevent duplicate processing?"** — Device-generated `event_id`, checked against keyed dedup state (or a unique-constraint conditional insert) before any effect is applied.
+3. **"A device was offline for 6 hours and replays everything. What breaks?"** — Nothing structurally: the burst is absorbed by Kafka, aggregates update within the lateness window or via batch merge, and alerting suppresses stale replays so nobody gets paged for a 6-hour-old temperature spike.
+4. **"How do you handle backpressure when the warehouse sink slows down?"** — That sink's consumer lags in Kafka; the alerting path is a separate consumer group and is unaffected. Lag alarms fire; you scale or fix the sink, data waits safely.
+5. **"Why not write straight from the ingestion API into the warehouse?"** — The warehouse cannot absorb 100K writes/sec with 3x spikes, and coupling ingestion to it means a warehouse outage loses telemetry. The log decouples the rates.
+6. **"How do you guarantee data completeness — that nothing was silently dropped?"** — Per-device sequence numbers alongside timestamps: a gap in the sequence for a device is detectable, and the device can be asked to resend that range. Plus reconciliation counts: events received at the gateway vs events landed in the lake, per hour.
+7. **"The same event arrives with two different payloads. Which wins?"** — That is a device bug or tampering, not a retry — retries carry identical payloads. Keep the first, log and flag the conflict; never silently overwrite.
+8. **"How do you scale the alerting path independently?"** — It is its own consumer group on the cleaned stream, partitioned by the same device key, so rule evaluation scales with partitions and is unaffected by warehouse load.
+9. **"What if Kafka itself is down for 10 minutes?"** — Gateways buffer locally and replay; ingestion degrades to delayed, not lost. This is precisely why the buffer lives at the edge as well as in the log.
+10. **"Device clocks are wrong by minutes. Does event time still work?"** — Imperfectly. Use event time for windowing but sanity-bound it: events stamped implausibly far from arrival time are flagged, and gateways can stamp a corrected receive time. Name clock skew explicitly; interviewers are listening for it.
+11. **"How would you replay last Tuesday after a bug in the stream job?"** — Fix the job, reset its consumer group to last Tuesday's offsets (or reprocess the lake archive for that range), and let dedup/upserts make the corrected run safe to apply over the bad one.
+
+## 16. Interview-ready spoken answer
+
+> "First, the requirements I'd pin down: about 100K events a second with 3x spikes, devices that go offline and replay, alerts inside 30 seconds, and reports that have to be right. The clarifications that matter most are whether events carry a device-generated ID and timestamp — I'll assume they do, and if they don't, adding them is step one — and how stale an alert is allowed to be, because we should never page anyone on replayed history.
+>
+> The bottleneck is burst absorption and correctness under retries, not raw compute. So the architecture is: devices to gateways over MQTT, gateways to a stateless ingestion API that only validates and writes to Kafka, partitioned by device ID so each device's events stay ordered. Everything downstream reads from Kafka.
+>
+> The data flow splits after one cleaning step. A Flink job deduplicates on the event ID using checkpointed keyed state, windows by event time with watermarks, and feeds an alerting engine for the fresh stream and a hot store for dashboards. In parallel, raw events are archived to a data lake and merged into the warehouse by a batch job, which is how late data — even hours late — ends up counted correctly in reports.
+>
+> On reliability: delivery is at-least-once everywhere, so I don't pretend otherwise. Duplicates are expected and dropped by the dedup check; crashes recover from checkpoints and replay is safe because writes are idempotent. Poison events go to a dead-letter topic instead of stalling a partition.
+>
+> Scaling is mostly adding partitions and parallel consumers — the design is linear until the hot store's write rate and the dedup state size become the limits, and pre-aggregating before the hot store addresses the first of those.
+>
+> The main trade-off I'd flag: I'm running a streaming path that's fast but approximate, and a batch path that's slow but exact, and I'm choosing that complexity deliberately because the alert SLA and the reporting correctness pull in opposite directions. And the system gives exactly-once effects, not exactly-once delivery — that distinction is the design."
+
+## 17. Mock interview mode
+
+**Five hard follow-ups, with expected answers**
+
+1. **"Your dedup state has a 7-day TTL. A device replays on day 8. Now what?"** — Expected: the duplicate lands. Defence in depth: the warehouse merge also dedups on `event_id` with a unique constraint, so reports stay correct; the stream path may briefly double-count a dashboard aggregate until the batch merge corrects it. The real answer is sizing the TTL to the maximum credible offline period, which is why that was a clarifying question.
+2. **"Prove to me no events were lost yesterday."** — Expected: per-device sequence-gap detection plus count reconciliation at each hop (gateway-received vs Kafka-produced vs lake-landed), with alerts on mismatch. "Kafka is durable" alone is not proof.
+3. **"The alert SLA is breached every day at 09:00. Why?"** — Expected: look for the morning reconnect spike — 3x burst, consumer lag grows, alert latency is lag. Fixes: partition/parallelism headroom, alerting consumer prioritised, gateway-side jitter on reconnect.
+4. **"Why Flink over a simple consumer service?"** — Expected: event-time windows, watermarks, and checkpointed keyed state are the hard parts; Flink provides them as tested primitives. A hand-rolled consumer is a defensible answer only if you then describe re-implementing exactly those three things.
+5. **"A region's gateways all buffer for 2 hours, then replay at once. Walk me through it."** — Expected: Kafka absorbs it if ingress headroom exists; stream job sees massive lateness; alerts suppressed by freshness check; aggregates partially corrected in-stream, fully corrected by batch; the incident metric to watch is lag age and late-event rate.
+
+**Common candidate mistakes**
+
+- Designing for the average 100K/sec and forgetting the 3x replay spike.
+- Claiming "exactly-once delivery" from Kafka/Flink.
+- Alerting on replayed data.
+- No answer for how completeness is verified — only for how loss is "prevented".
+- Putting the database write inside the ingestion API.
+
+**What a senior candidate mentions unprompted**
+
+- Event ID + device timestamp as the foundation; sequence numbers for gap detection.
+- Watermarks and allowed lateness, with a side output for the very late.
+- Checkpointing semantics: offset and state committed together.
+- Consumer lag (in time) as the primary health metric.
+- Cost: retention and tiering numbers, not just component names.
+
+**Scoring rubric (out of 10)**
+
+| Score | What it looks like |
+|---|---|
+| 9–10 | Log-centric design, dedup + watermarks + checkpointing all correct, alert/report paths separated, delivery semantics stated precisely, 10x and cost addressed |
+| 7–8 | Sound pipeline, dedup present, but lateness or completeness-verification is hand-wavy |
+| 5–6 | Components named (Kafka, Spark) but responsibilities vague; duplicates treated as an afterthought |
+| 3–4 | Direct-to-database ingestion, no buffer, no recovery story |
+| 0–2 | Claims exactly-once delivery, no handling of replay or spikes |
+
+Sources: [Apache Kafka documentation — delivery semantics and design](https://kafka.apache.org/documentation/) · [Apache Flink documentation — event time, watermarks and checkpointing](https://flink.apache.org/) · [Streaming 101 — Tyler Akidau et al., on event time and watermarks](https://www.oreilly.com/radar/the-world-beyond-batch-streaming-101/)

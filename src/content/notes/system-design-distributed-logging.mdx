@@ -10,6 +10,7 @@ description: "Designing centralized logging (ELK / Loki / Datadog-style) — age
 
 import Callout from '../../components/Callout.astro';
 import Mermaid from '../../components/Mermaid.astro';
+import ArchDiagram from '../../components/ArchDiagram.astro';
 
 Part of the [system design](/prep/system-design) series. See the [framework](/prep/system-design) and [building blocks](/prep/system-design/building-blocks) first if you haven't. Sibling problem: [Metrics Monitoring & Alerting](/prep/system-design/metrics-monitoring-alerting) — metrics are numbers over time; logs are events with text. Indexing is covered in [Search Engine](/prep/system-design/search-engine).
 
@@ -29,7 +30,8 @@ Part of the [system design](/prep/system-design) series. See the [framework](/pr
 
 ## 2. High-level architecture
 
-<Mermaid caption="Agents ship to a buffer; indexers consume at their own pace; data ages through storage tiers" code={`flowchart LR
+<ArchDiagram src="distributed-logging/architecture" caption="Agents ship to a buffer; indexers consume at their own pace; data ages through storage tiers">
+<Mermaid code={`flowchart LR
   APP[App containers<br/>write JSON to stdout] --> AG[Node agent<br/>Fluent Bit / Vector / OTel Collector]
   AG -->|batched, compressed| K[(Kafka buffer)]
   K --> PR[Processors<br/>parse, redact PII, enrich, sample]
@@ -41,6 +43,7 @@ Part of the [system design](/prep/system-design) series. See the [framework](/pr
   Q -.->|rehydrate on demand| ARC
   PR --> AL[Alerting rules]
 `} />
+</ArchDiagram>
 
 - **Apps log structured JSON to stdout**; a per-node agent tails the files, adds metadata (service, pod, host, region) and ships in compressed batches. Apps never talk to the log backend directly.
 - **Kafka buffer** decouples producers from indexers. During an incident, log volume spikes 10× exactly when you need logs most — the buffer absorbs it instead of dropping data or crushing the indexers.

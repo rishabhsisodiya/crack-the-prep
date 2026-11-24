@@ -1,0 +1,161 @@
+{
+  "meta": {
+    "title": "Nested Comments \u2014 Thread Serving",
+    "output": ".archify/build/nested-comments/architecture.html",
+    "quality_profile": "showcase"
+  },
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "layout": {
+    "mode": "auto"
+  },
+  "components": [
+    {
+      "id": "reader",
+      "type": "external",
+      "label": "Reader",
+      "sublabel": "loads a thread"
+    },
+    {
+      "id": "threadsvc",
+      "type": "backend",
+      "label": "Thread Service",
+      "sublabel": "read path"
+    },
+    {
+      "id": "cache",
+      "type": "database",
+      "label": "Thread Cache",
+      "sublabel": "precomputed \u00b7 top N per sort"
+    },
+    {
+      "id": "db",
+      "type": "database",
+      "label": "Comments DB",
+      "sublabel": "partitioned by post_id"
+    },
+    {
+      "id": "writer",
+      "type": "external",
+      "label": "Writer",
+      "sublabel": "posts a comment"
+    },
+    {
+      "id": "commentsvc",
+      "type": "backend",
+      "label": "Comment Service",
+      "sublabel": "write path"
+    },
+    {
+      "id": "events",
+      "type": "backend",
+      "label": "Events",
+      "sublabel": "comment / vote events"
+    },
+    {
+      "id": "builder",
+      "type": "backend",
+      "label": "Thread Builder",
+      "sublabel": "re-sort \u00b7 refresh cache"
+    },
+    {
+      "id": "votes",
+      "type": "external",
+      "label": "Votes",
+      "sublabel": "upvote / downvote"
+    },
+    {
+      "id": "counter",
+      "type": "backend",
+      "label": "Vote Counter",
+      "sublabel": "batched counting"
+    }
+  ],
+  "connections": [
+    {
+      "id": "r-ts",
+      "from": "reader",
+      "to": "threadsvc",
+      "label": "load thread"
+    },
+    {
+      "id": "ts-tc",
+      "from": "threadsvc",
+      "to": "cache",
+      "label": "read cached tree"
+    },
+    {
+      "id": "tc-db",
+      "from": "cache",
+      "to": "db",
+      "label": "miss: load comments",
+      "variant": "dashed"
+    },
+    {
+      "id": "w-cs",
+      "from": "writer",
+      "to": "commentsvc",
+      "label": "write comment"
+    },
+    {
+      "id": "cs-db",
+      "from": "commentsvc",
+      "to": "db",
+      "label": "store comment"
+    },
+    {
+      "id": "cs-ev",
+      "from": "commentsvc",
+      "to": "events"
+    },
+    {
+      "id": "ev-tb",
+      "from": "events",
+      "to": "builder"
+    },
+    {
+      "id": "tb-tc",
+      "from": "builder",
+      "to": "cache",
+      "label": "refresh cache"
+    },
+    {
+      "id": "v-vc",
+      "from": "votes",
+      "to": "counter",
+      "label": "cast vote"
+    },
+    {
+      "id": "vc-db",
+      "from": "counter",
+      "to": "db",
+      "label": "update score"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "One-query thread load",
+      "items": [
+        "Comments partitioned by post_id; tree assembled in memory",
+        "Materialized path gives cheap subtree loads for 'load more replies'"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Cached rendered tree",
+      "items": [
+        "Top ~200 comments per post and sort order, cached and rebuilt async",
+        "Deep or low-score branches collapse into stubs"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Ranking",
+      "items": [
+        "Siblings sorted by Wilson lower bound for 'best' sort",
+        "Votes are batched, so score and ordering can lag by seconds"
+      ]
+    }
+  ]
+}

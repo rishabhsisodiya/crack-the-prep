@@ -1,0 +1,292 @@
+---
+title: "Scenario — Proving No Transaction Was Lost: Completeness and Reconciliation"
+track: "system-design"
+kind: "notes"
+order: 71
+slug: "scenario-finance-reconciliation"
+updated: 2026-11-24
+description: "A scenario-based interview problem: daily reconciliation of payment-processor settlement files against internal orders, proving completeness with record counts, control totals and checksums, with mismatches worked from a break queue."
+---
+
+import Callout from '../../components/Callout.astro';
+import ArchDiagram from '../../components/ArchDiagram.astro';
+
+Part of the [system design](/prep/system-design) series. This is a **scenario** page: you get the problem the way an interviewer would state it, then a full worked solution. **Level 1 — Mid-level engineer.**
+
+> **Original practice scenario** — written for interview preparation; not a question from any specific company's interview.
+
+## 1. The problem statement
+
+Here is how the interviewer puts it. Read it the way you would in the room — nothing in this section is the solution.
+
+> "We sell online and take payments through **three payment processors**. Every night, each processor sends us a **settlement file** for the day: one row per transaction they processed for us, with the amount, the currency, a processor reference, and our order reference.
+>
+> Separately, we have our own systems: an orders database, a payments record, and a finance ledger. At month-end, finance has to sign off that the money the processors say they settled is the money we actually recorded — and that **no transaction was lost** somewhere between the processor, our orders, and the ledger.
+>
+> Right now someone downloads the files and compares them in a spreadsheet. It is slow, it misses things, and when the numbers do not agree nobody can tell whether a transaction is missing, duplicated, or just different.
+>
+> Design the daily reconciliation system. It has to prove, for each day and each processor, that the file we received is complete, match its transactions against our internal records, and give the finance team a clear list of the things that did **not** match so they can investigate them. The month-end close has a hard deadline, so this cannot depend on one person finishing a spreadsheet on time."
+
+**Functional requirements**
+
+- Receive one settlement file per processor per day (three processors), in each processor's own format.
+- Prove each file is complete and untampered on arrival: the file that was sent is the file that was received.
+- Match every processor transaction against internal orders / payments, and every internal payment against the processor files.
+- Classify every mismatch — a **break** — by type, and present breaks in a queue that analysts can own, work, and resolve.
+- Produce a daily tie-out: do the processor totals, the internal totals, and the amounts actually settled agree?
+- Support a hard month-end close deadline: all days in the month reconciled, breaks explained or carried with approval.
+
+**Non-functional requirements**
+
+- No silent loss: if a file, a row, or a day is missing, the system must say so loudly — absence is a failure, not a pass.
+- Re-running a day's job must be safe: re-running after a partial failure must not double-count, double-match, or create duplicate breaks.
+- Every number in the final report must be traceable back to a specific file, row, and run — a full audit trail.
+- This is fundamentally a batch / file problem, not a scale problem. Volumes are a day's transactions in three files. Favour clear correctness over exotic technology.
+- Breaks must age visibly: an unresolved break gets more urgent, not less, as days pass.
+
+## 2. Clarifying questions to ask first
+
+Ask these before drawing anything. Each one changes the design.
+
+| Question | Why it matters |
+|---|---|
+| Does each processor file come with a manifest — record count, sum of amounts, and a checksum — or do we have to compute completeness some other way? | The manifest is your completeness proof. Without it you can only compare what arrived against what you expected, which is weaker. If there is no manifest, your first job is to request one or build the next-best check. |
+| What reference do we share with the processor? Is our order ID sent at payment time and returned in the file? | Matching is only reliable if there is a shared key. If the file returns only the processor's own reference, you need a mapping table from when the payment was created. |
+| What counts as the same amount — exact to the cent, or is there rounding, fees, and FX? | Processors often settle net of fees or convert currency. That decides whether amount matching is exact or needs a tolerance, and whether you match gross or net. |
+| Can a transaction appear in a later file — settled a day or two after the order? | If yes, a transaction unmatched today is not yet a break, it is pending. That changes break ageing: breaks should only be raised after the settlement window has passed. |
+| Is there a third source — the actual bank settlement — to tie against, or only processor vs internal? | Three-way tie-out (processor file vs internal ledger vs bank credit) is much stronger proof than two-way. It also catches a processor that reported a settlement the bank never received. |
+| What happens to a break — who owns it, how fast must it be resolved, and can month-end close proceed with open breaks? | This decides the break queue's workflow: ownership, ageing, escalation, and whether close needs a sign-off to carry breaks forward. |
+| How far back can we be asked to re-reconcile — a day, a month, a year? | That sets retention for raw files and staging data, and whether re-runs must work for old days, not just yesterday. |
+
+<Callout type="tip">
+The single highest-value clarification here is the manifest. Record count plus control total (the sum of amounts) plus a checksum turns "we think the file is complete" into "we can prove the file is complete". Say that out loud, and design the whole completeness story around it.
+</Callout>
+
+## 3. The solution, in plain language first
+
+The simple version: files land in one place and are checked before anything trusts them — does the checksum match, does the row count match the manifest, does the sum of the amounts match the manifest's control total? Only a file that passes all three checks is parsed, normalised into one common shape, and staged. Then a matching job compares the staged processor rows against our internal orders and payments in passes — first on the exact shared reference, then with a small tolerance on amount and date for what is left. Everything that matches is stored as a proven pair. Everything that does not becomes a break, typed and queued for a named analyst. At the end, three totals must agree — processor, internal, and bank — and that tie-out is the day's proof. If the job fails halfway, you just run it again: staging is scoped to the run and the final merge is written so a second run produces the same result, not double the result.
+
+Why so much ceremony around a file comparison? Because the hard part is not matching — matching is a join. The hard part is **proving a negative**: that nothing is missing. You cannot prove that by looking at what arrived. You prove it with independent counts and totals that were computed before the file reached you, and by checking in both directions — processor-to-internal *and* internal-to-processor.
+
+## 4. Architecture
+
+<ArchDiagram src="scenario-finance-reconciliation/architecture" caption="Finance reconciliation architecture" />
+
+**Component by component**
+
+- **Three payment processors.** Each sends one settlement file per day, in its own format (CSV, fixed-width, or XML), plus a manifest — ideally a separate small file or a header/trailer record carrying the file name, business date, record count, control total (sum of amounts), and a checksum (for example SHA-256) of the file contents.
+- **File landing (object storage) + manifest check.** Files land untouched in a raw bucket, named by processor and business date, and are never modified after landing — this is your evidence copy. On arrival the system verifies: checksum matches the manifest, row count matches, sum of amounts matches the control total. Any failure quarantines the file and raises an alert. A missing file is also detected here: by a cut-off time, the system knows which of the three expected files has not arrived.
+- **Validation and staging.** A parser per processor converts its format into one common staged shape: processor, business date, processor reference, our order reference, amount, currency, transaction type (sale, refund, chargeback). Rows that fail validation (bad amount, unknown currency, unparseable date) go to a reject list with the reason — they are never silently dropped. Staged rows are scoped to a **run** (see §9), so a re-run stages fresh rather than appending to a half-finished staging set.
+- **Reconciliation engine.** The batch job. It loads the day's staged processor rows and the day's internal orders/payments, runs the matching passes (§5), writes matched pairs, creates or updates breaks, and computes the tie-out. It is a plain scheduled batch job — a worker, a cron trigger, a relational database — not a streaming platform.
+- **Internal orders DB / ledger.** The internal side of the comparison: orders, payment records (including the processor reference captured when the payment was taken), refunds, and the finance ledger entries. The engine reads it; it does not write back to it except, where the business allows, to annotate a payment with its reconciliation status.
+- **Matched store.** One row per proven pair: processor row ↔ internal record, which pass matched it, in which run, and when. This is the evidence behind "these transactions are reconciled".
+- **Break queue.** One row per unmatched or mismatched item, with a type, an age, an owner, a status, and a full history. This is what analysts actually work from — not a spreadsheet, not an email.
+- **Control totals report.** The daily proof document: per processor, file count and control totals from the manifest vs totals computed from the staged rows vs totals of matched + breaks; and the three-way tie-out against the bank settlement. If every staged row is either matched or a break, and the totals tie, the day is complete — arithmetically, not by opinion.
+- **Ops dashboard and analysts.** The finance/ops team's view: today's tie-out status, the break queue sorted by age and value, month-end close progress (days reconciled out of days in month, open breaks by age).
+
+## 5. End-to-end data flow
+
+1. **Expectation.** At the start of the day the system creates an expectation: three files, one per processor, for business date D. An expectation that is never satisfied is itself an alert.
+2. **Landing.** A file arrives (SFTP, API upload, or bucket drop). It is stored raw, immutable, with its arrival timestamp.
+3. **Manifest validation.** Checksum of the received file vs manifest checksum; parsed row count vs manifest record count; sum of row amounts vs manifest control total. All three must pass. Fail = quarantine + alert, no further processing of that file.
+4. **Parsing and staging.** The processor-specific parser normalises rows into staging, scoped to run R for (processor, date). Validation rejects are recorded with reasons and counted — the staged count plus reject count must equal the manifest count.
+5. **Matching, pass 1 — exact.** Match staged rows to internal payments on the shared reference (our order reference / processor reference captured at payment time) with exact amount and currency. Most rows — typically the large majority — match here.
+6. **Matching, pass 2 — tolerance.** For what remains, match on reference with a small amount tolerance (fees, rounding) and/or a date tolerance (settled a day late). Every tolerance match records *why* it was allowed, so it can be audited and the tolerance can be tightened later if it hides real breaks.
+7. **Reverse check.** Now go the other direction: internal payments for the day with no processor row. A payment we recorded that the processor never settled is as much a break as the reverse.
+8. **Break creation.** Whatever is left, on either side, becomes a break with a type (§10/§11): missing internally, missing at processor, amount mismatch, or duplicate. Breaks are keyed so re-running does not create a second copy of the same break.
+9. **Three-way tie-out.** Compare: (a) processor file totals, (b) internal ledger totals for the day, (c) the bank settlement credit for the day, where available. Differences must be fully explained by the day's breaks and known items (fees, timing). Unexplained difference = the day does not close.
+10. **Report and close.** The control totals report is stored with the run ID. The day is marked reconciled only when the tie-out holds and every row is matched or a break. Month-end close is simply: every day in the month reconciled, breaks resolved or formally carried with sign-off.
+
+## 6. Technology choices, and why
+
+| Decision | Choice | Why | Alternative considered |
+|---|---|---|---|
+| File landing | Object storage (S3 / GCS / Azure Blob), one raw prefix per processor/date | Cheap, durable, immutable evidence copy; files are kept exactly as received for audit and re-runs | A shared network drive / SFTP server disk — no durability or audit story, and "which version of the file did we reconcile?" becomes unanswerable |
+| Processing shape | Scheduled batch job (for example a containerised worker on cron, Airflow, or a managed scheduler) | The input *is* a daily file. Batch matches the problem, is easy to re-run, and is easy to reason about | Streaming (Kafka / Flink) — solves a latency problem this system does not have, and makes re-runs and tie-outs harder, not easier |
+| Staging + matched + breaks store | Relational database (Postgres / MySQL) | Matching is joins; breaks are a transactional work queue; control totals are sums. This is exactly what a relational database is for | A data warehouse alone — fine for reporting, poor for a transactional break queue that analysts update all day |
+| Matching implementation | SQL set-based joins per pass, inside the batch job | Set-based matching over a day's rows is fast, readable, and testable; pass order is explicit in code | Row-by-row application code loops — slower, and the matching rules get buried in procedural code nobody can review |
+| Checksums | SHA-256 from the manifest, verified on landing | Proves the received file is byte-for-byte the sent file | File size or row count alone — a truncated or altered file can still pass a weak check; count + control total + checksum together are the proof |
+| Scheduling / deadline | Scheduler with alerting on missed cut-offs, plus a close dashboard | Month-end is a hard deadline; the system must chase missing files and ageing breaks before humans notice | A person remembering to run a script — that is the spreadsheet process being replaced |
+
+**Batch vs streaming.** Say this plainly in the interview: this is a batch problem. The source data is created once a day as a file, the consumers (finance, auditors) work to a daily and monthly rhythm, and correctness — re-runnable, provable, auditable — matters far more than latency. Streaming would add operational complexity and buy nothing: there is no user waiting for a sub-second answer. The one place near-real-time helps is alerting on a *missing or invalid file* early in the day, and a simple scheduled expectation check gives you that without a streaming platform. Choosing batch here is not a lack of ambition; it is matching the tool to the shape of the data.
+
+## 7. Partitioning and parallelism
+
+- The natural partition is **(processor, business date)**. Each processor-day is an independent unit of work: its own manifest, its own staging, its own run, its own tie-out. A failure in Processor B's file never blocks Processor A's reconciliation.
+- The three processor jobs for a day can run **in parallel** — they touch different staged data and different internal payment subsets (split by processor). Month-end catch-up (re-running several days) parallelises the same way, by day.
+- Within one processor-day, matching passes are set-based SQL over one day's rows — tens or hundreds of thousands of rows, not billions. A single database handles this comfortably; there is no need to shard.
+- The one ordering rule: passes run **in sequence within a run** (exact before tolerance), and only one run for a given (processor, date) may be in the matching phase at a time — enforced with a run lock / status flag, so two overlapping runs cannot interleave matches and breaks.
+- If volume genuinely grew 10x (see §13), the same partition key still works: more days and processors in parallel, and the matching SQL partitioned by date. The design scales by adding independent units, not by redesigning.
+
+## 8. Storage strategy
+
+- **Raw files: forever (per audit policy), immutable.** Object storage, one object per file as received, plus its manifest. Auditors and re-runs both depend on being able to go back to the exact bytes. This is cheap: three files a day.
+- **Staging: per run, short-lived.** Staged rows carry a `run_id`. Keep the current and previous few runs for debugging; older staging can be purged once the matched store and report for that day are final — staging is a working area, not a record.
+- **Matched store: long-lived.** One row per matched pair with the run and pass that matched it. This is part of the audit record.
+- **Break queue: long-lived, append-only history.** A break's current state (type, owner, status) plus a history table of every change: created, assigned, commented, resolved, reopened, carried at month-end, by whom and when.
+- **Reports: one stored report per (processor, date, run).** The control totals report that finance signed off is kept as generated — if a day is re-run later, a new report is stored, and the old one is superseded, never edited.
+- **Amounts are stored as integers in the smallest currency unit (paise / cents) or as exact decimals — never floats.** A reconciliation system that uses floating point will manufacture its own breaks out of rounding error.
+
+## 9. Deduplication and idempotency, with a worked example
+
+Files get re-sent. Jobs get re-run. An analyst will, at some point, upload the same file twice. The design treats all of that as normal:
+
+- **Same file twice:** the checksum is the identity. If a file arrives whose (processor, business date, checksum) already exists, it is recognised as a re-delivery of the same file, not a new file — it is logged and does not create a second staging set.
+- **Duplicate rows inside a file:** two rows with the same processor reference and amount are *not* automatically deduped — in payments, a genuine duplicate charge looks exactly like a file duplicate. Both rows are staged; one may match an internal record, and the other becomes a **duplicate break** for a human to judge. Never silently drop a money row.
+- **Re-running a day's job:** this is the central idempotency requirement. The pattern is *run-scoped staging plus an idempotent merge*:
+
+```python
+# Idempotent re-run pattern for one (processor, business_date).
+def reconcile(processor, business_date, file_checksum):
+    # 1. A run is identified by what it reconciles, not by when it started.
+    run_id = start_run(processor, business_date, file_checksum)  # unique per attempt
+
+    # 2. Stage into THIS run only. A crashed previous run's staging is ignored,
+    #    never appended to.
+    rows = parse_file(processor, business_date)          # from the immutable raw file
+    stage_rows(run_id, rows)                             # INSERT with run_id
+
+    # 3. Match from this run's staging.
+    matches, breaks = run_matching_passes(run_id)        # exact, then tolerance, then reverse
+
+    # 4. Merge results in ONE transaction, keyed on natural keys, so applying
+    #    the same results twice has the same effect as applying them once.
+    with transaction():
+        upsert_matches(matches)   # key: (processor, processor_reference, business_date)
+        upsert_breaks(breaks)     # key: (processor, business_date, break_key) — see below
+        write_report(run_id)      # control totals for this run
+        mark_run_complete(run_id)
+    # If the process dies before the transaction commits, nothing partial is
+    # visible. Re-running creates a new run and lands in exactly the same state.
+```
+
+And the database-level guard that makes the merge safe even if the code is run twice concurrently:
+
+```sql
+-- Idempotent break creation: the same break, from any number of re-runs,
+-- is one row. Resolution state set by an analyst is never overwritten.
+INSERT INTO breaks (processor, business_date, break_key, break_type, amount, status)
+VALUES ($1, $2, $3, $4, $5, 'OPEN')
+ON CONFLICT (processor, business_date, break_key) DO NOTHING;
+```
+
+Two rules make this work. First, every output has a **natural key** derived from the business data — processor + reference + date for a match, a deterministic `break_key` (for example the unmatched reference, or the internal payment ID) for a break — never a random ID generated per run, or each re-run invents "new" breaks. Second, a re-run **never resets analyst work**: if a break already exists and an analyst has owned, commented on, or resolved it, the re-run updates the evidence (amounts, run reference) but does not reopen or duplicate it unless the underlying item genuinely changed.
+
+## 10. Retry, failure handling, checkpointing and recovery
+
+- **Missing file:** the expectation check fires at the cut-off time (and again before the close deadline). Retry here means chasing the source: re-request from the processor / re-pull from the SFTP location, and escalate to a human if the second check still finds nothing. A day with a missing file is explicitly "not reconciled" — never skipped.
+- **Invalid file (checksum / count / control total mismatch):** quarantine, alert, request a re-send. Do not attempt to reconcile a file that failed validation "to see how much matches" — partial trust in a money file is how small errors become audit findings.
+- **Job crash mid-run:** nothing partial is visible, because results are merged in one transaction at the end (§9) and staging is run-scoped. Recovery is simply: run it again. That sentence — "recovery is re-run, and re-run is safe by design" — is the answer the interviewer is listening for.
+- **Checkpointing, in batch terms:** the run record is the checkpoint. It stores (processor, date, file checksum, stage reached, counts at each stage). A restarted job can report exactly where the previous attempt stopped, and an operator can see staged count vs manifest count vs matched + breaks count for every attempt.
+- **One bad row:** a validation reject does not fail the whole file — it is recorded with its reason and counted against the manifest total, so the file still ties out arithmetically (staged + rejected = manifest count). But a reject is always visible in the report; a day with rejects cannot be called clean until they are explained.
+- **Internal data not ready:** if the internal payments extract for the day is incomplete, the run should not start — check an internal readiness signal (for example the payments table's day-close flag) and wait/alert rather than manufacture thousands of false "missing internally" breaks.
+- **Month-end pressure:** if a run fails near the deadline, the fallback is still the same job re-run — there is no manual spreadsheet side-path, because a side-path would produce numbers with no audit trail.
+
+## 11. Monitoring and observability
+
+- **File expectation board:** for today, per processor — expected, arrived, validated, reconciled. A missing or invalid file is red by the morning cut-off, not discovered at month-end.
+- **Tie-out status per day:** processor total vs internal total vs bank total, and the unexplained difference. The unexplained difference is the single most important number in the system; alert if it is non-zero after a completed run.
+- **Break metrics:** breaks created today by type, open breaks by age bucket (0–1 days, 2–5, 6–30, over 30), breaks by owner, and total value at risk in open breaks. Ageing breaks are escalated automatically — for example unassigned after 1 day, manager-visible after 5, close-blocking after an agreed limit.
+- **Run history:** every run with its counts — manifest count, staged, rejected, matched by pass, breaks by type — so a number that changed between runs is explainable.
+- **Audit trail:** who uploaded or re-sent a file, who ran or re-ran a job, who owned, resolved, or carried each break, and who signed off each day and the month-end close. In a finance system, the audit trail is not a nice-to-have log; it is a product feature.
+- Structured logs carry `processor`, `business_date`, `run_id`, and the transaction reference end to end, so any single disputed transaction can be traced from raw file row to match or break in minutes.
+
+## 12. Security
+
+- **File integrity and authenticity:** files arrive over an authenticated channel (SFTP with keys, or signed API upload); the manifest checksum proves integrity after arrival. A file that cannot be attributed to the processor is not processed.
+- **Access control by role:** analysts can work breaks and add evidence; only finance approvers can resolve certain break types, carry breaks at month-end, and sign off a close. The person who resolves a break should not be the only person who can approve it, for high-value breaks — basic separation of duties.
+- **Immutability where it matters:** raw files and stored reports are write-once. Break history is append-only. Nobody — including an admin acting through the UI — edits history; corrections are new entries.
+- **Sensitive data:** settlement files contain payment references, not full card numbers — verify that, and if a processor ever sends more, mask it in staging and never show it on the dashboard. Encrypt files at rest and in transit.
+- **Audit access:** read access to the audit trail is itself restricted and logged; auditors get a read-only view.
+
+## 13. Scalability, the 10x question, and cost
+
+**At 10x:** be honest about what 10x means here — ten times the transactions per day, or thirty processors instead of three, or both. The architecture does not change. Files are still files; (processor, date) is still the unit of work, so more volume means more parallel jobs and bigger set-based joins, both of which a relational database absorbs for a long time at this shape of problem. The things that strain first are human, not technical: break volume. If 1% of transactions break, 10x transactions means 10x breaks for the same analyst team — so the scaling answer includes better matching (capturing the shared reference more reliably at payment time), tighter processor data quality, and break auto-resolution rules for proven-safe categories, with humans judging the rest.
+
+**What does not scale, and should not be built:** there is no case for streaming, sharding, or a distributed matching engine at any plausible multiple of a daily-file workload. Saying so, with the arithmetic, is a strength in a Level 1 interview.
+
+**Cost levers:** this system is cheap by design — object storage for files, one relational database, a scheduled batch worker. The real cost is analyst time on breaks, so the highest-value investment is reducing break rate at the source: a reliable shared reference on every payment, and a manifest on every file.
+
+## 14. Trade-offs, stated honestly
+
+| Choice | You gain | You pay |
+|---|---|---|
+| Batch (daily) instead of streaming | Simple, re-runnable, auditable; matches how the data actually arrives | Breaks are discovered the next day, not in real time — acceptable for settlement, wrong for fraud detection |
+| Strict manifest validation (fail the whole file) | Completeness is provable; no partial-trust reconciliation | One bad file blocks that processor-day until a re-send arrives, which can press on the close deadline |
+| Tolerance matching pass | Far fewer false breaks from fees and rounding | A tolerance can hide a real small discrepancy; every tolerance match must be logged and reviewable |
+| Duplicate rows become breaks, not auto-drops | A genuine duplicate charge is never silently erased | More breaks for analysts to judge, including some that are "only" file re-sends |
+| Natural keys + idempotent merge | Re-runs are safe and analyst work is never wiped | More design care up front: every output needs a deterministic key |
+
+<Callout type="warn">
+Say this sentence in the interview: "This design does not deliver exactly-once delivery — a processor can re-send a file and a job can be re-run, and no design can prevent that. It delivers at-least-once arrival with idempotent processing, which gives exactly-once *effects*: each transaction is counted once in the totals, matched once, and raised as a break at most once." Conflating delivery with effects is the most common slip in this problem.
+</Callout>
+
+**Delivery semantics, precisely.** At-most-once (process a file once, never retry, discard on failure) would lose transactions silently — unacceptable when the whole point is proving nothing was lost. At-least-once arrival (files can be re-sent, jobs can be re-run) plus idempotent processing is the sweet spot: duplicates are expected and absorbed by checksum identity, natural keys, and conditional writes. "Exactly-once" claims should always be pinned down to exactly-once *effects* in the matched store, the break queue, and the control totals — which is what finance actually needs, and the only version of the claim that is true.
+
+## 15. Interviewer follow-up Q&As
+
+1. **"How do you prove no transaction was lost?"** — In three independent ways: the manifest check proves the received file is the sent file (checksum, record count, control total); the arithmetic check proves every staged row ended as a match or a break (matched + breaks + rejects = manifest count, and the amounts sum the same way); and matching runs in both directions, so an internal payment with no processor row is found just as a processor row with no internal payment is.
+2. **"The job crashed halfway through yesterday's run. What happens when you re-run it?"** — Nothing partial was committed — results merge in one transaction at the end, and staging was scoped to the crashed run. The re-run stages fresh from the immutable raw file and produces the same matches, breaks, and totals, keyed on natural keys so nothing double-counts and no duplicate breaks appear.
+3. **"A processor sends the same file twice. What does the system do?"** — The checksum identifies it as the same file for the same processor and date. The second arrival is logged as a re-delivery and does not create a second staging set or a second run's worth of breaks.
+4. **"Processor total is ₹10,000 higher than your internal total. Walk me through finding why."** — Start from the tie-out, then drill into the breaks: the difference must be explained by the day's break list — amount-mismatch breaks sum one way, missing-internally breaks the other, plus known items like processor fees if we match gross vs net. If the breaks do not explain the difference, that itself is a bug signal: some row is neither matched nor a break, which the arithmetic check is designed to make impossible.
+5. **"Two rows in the file have the same reference and amount. Is one a duplicate?"** — Maybe — or it is a genuine duplicate charge, which finance must see. Both rows are staged; matching pairs one with the internal record and raises the other as a duplicate break for an analyst. The system never silently drops a money row.
+6. **"Amounts differ by a few paise on many rows. Breaks everywhere — what is wrong?"** — Probably a systematic cause, not thousands of individual errors: fee deduction, FX conversion, or rounding differences between the processor and internal systems. The fix is to understand it (match net vs gross consistently) and then encode it as an explicit, logged tolerance or a fee line in the tie-out — not to widen tolerance blindly until the breaks disappear.
+7. **"What is a break, and how do you stop the queue becoming a dumping ground?"** — A break is a typed, owned work item: missing internally, missing at processor, amount mismatch, or duplicate, each with an age and a value. Ageing and escalation are built in — unassigned breaks escalate, old breaks block or must be formally carried at close, and break rate by type is a reported metric, so a growing queue is visible management information, not a hidden pile.
+8. **"How does month-end close work, and what if breaks are still open?"** — Close requires every day in the month reconciled (tie-out holds) and every break either resolved or carried: a carried break has an owner, a reason, an expected resolution, and an approver's sign-off, and it appears on the next month's queue from day one. Close cannot silently ignore open breaks.
+9. **"Why not just use a streaming platform and reconcile in real time?"** — Because the input is a daily file and the decision rhythm is daily/monthly. Streaming would not make the file arrive sooner or the proof stronger; it would make re-runs, tie-outs, and audit harder. Batch is the honest fit for the data's shape.
+10. **"An auditor asks, a year later, how a specific transaction was reconciled. What can you show?"** — The raw file it arrived in (immutable, checksum-verified), the staged row, the run that processed it, the match it made (or the break it raised and how that break was resolved, by whom, with what evidence), and the day's signed-off control totals report. That chain, unbroken, is the audit trail.
+
+## 16. Interview-ready spoken answer
+
+> "First, the requirements I'd pin down: three processors each send a daily settlement file, we match it against our internal orders and payments, we have to *prove* completeness — not just find matches — and month-end close has a hard deadline. The clarifications that matter most are whether each file comes with a manifest, and whether we share a reference with the processor that comes back in the file. I'll assume both, and if either is missing, getting it is step one. And I'd say early: this is a batch and file problem, not a scale problem, so I'm optimising for correctness and audit, not throughput.
+>
+> The bottleneck is proving a negative — that nothing was lost. You can't prove that from the data that arrived; you prove it with independent totals computed before the file reached us. So the architecture is: files land untouched in object storage, and on arrival each one is verified against its manifest — checksum, record count, and control total, the sum of amounts. Only a file that passes is parsed by a processor-specific parser into a common staging shape, with rejects recorded and counted, never dropped.
+>
+> The data flow from there is a batch reconciliation run per processor per day. Matching happens in passes: exact on the shared reference and amount first, then a small, logged tolerance on amount and date for what's left. Then the reverse check — internal payments with no processor row. Everything left on either side becomes a break, typed as missing internally, missing at the processor, amount mismatch, or duplicate, in a queue with an owner and an ageing clock. The day finishes with a three-way tie-out: processor file totals, internal ledger totals, and the bank settlement must agree, with any difference fully explained by the breaks.
+>
+> On reliability and duplicates: files get re-sent and jobs get re-run, so I design for it. Staging is scoped to a run, results merge in one transaction, and every match and break is keyed on natural business keys with conditional writes — so re-running a day after a crash lands in exactly the same state, doesn't double-count, doesn't duplicate breaks, and never wipes out an analyst's work on an existing break.
+>
+> Scaling is mostly a non-issue technically — the unit of work is one processor-day, and those parallelise — and I'd name the real scaling limit honestly: it's break volume and analyst time, which you address by reducing breaks at the source with a reliable shared reference.
+>
+> The main trade-offs I'd flag: batch means breaks surface the next day, which is right for settlement and wrong for fraud; strict manifest validation can block a day on one bad file, and I accept that because partial trust in a money file is worse; and the system gives exactly-once effects, not exactly-once delivery — files can arrive twice, and the design absorbs that instead of pretending it can't happen."
+
+## 17. Mock interview mode
+
+**Five hard follow-ups, with expected answers**
+
+1. **"Your manifest check passes, counts and totals tie, and yet a transaction is still missing. How?"** — Expected: the manifest proves the *file* is complete, not that the processor generated the file correctly — a transaction the processor never put in the file is invisible to file-level checks. That is exactly why matching also runs in reverse (internal → processor) and why the bank tie-out exists: three independent sources make a silent omission very hard to hide. Naming the limit of your own proof is the senior move.
+2. **"Finance says close is in four hours and Processor C's file has failed its checksum twice. What do you do?"** — Expected: do not reconcile an invalid file to hit the deadline. Escalate the re-send with the processor, reconcile A and B fully, quantify exactly what C represents (expected value from internal records), and let finance make an explicit, signed decision to close with C carried as a known open item. The system's job is to make the gap precise and visible, not to paper over it.
+3. **"Break volume doubled this month. Where do you look first?"** — Expected: break down by type and by processor before touching the matching code. A spike in one type from one processor usually means something changed upstream — a file format tweak, a fee change, a reference that stopped being returned. Break analytics are an upstream data-quality monitor, not just a work queue.
+4. **"Why store amounts as integers or decimals — isn't a float fine at this scale?"** — Expected: reconciliation is the one system where float rounding *is* the bug: sums of thousands of float amounts drift by small amounts that look exactly like real discrepancies, manufacturing breaks and destroying trust in the tie-out. Exact arithmetic is non-negotiable in a system whose product is "the numbers agree".
+5. **"An analyst resolved a break as 'timing difference', and next month the same item is still unmatched. What went wrong?"** — Expected: timing breaks need an expiry — if the item has not appeared within the settlement window (say a few business days), the break should reopen automatically and escalate. A resolution type that can park an item forever is a hole in the process, and the system, not just the analyst, should catch it.
+
+**Common candidate mistakes**
+
+- Only matching in one direction (processor → internal) and never checking internal payments that the processor never settled.
+- Treating "the totals match" as proof by itself, without record counts, checksums, and per-row matched-or-break arithmetic.
+- Silently dropping duplicate rows or validation rejects.
+- Claiming exactly-once delivery for files and job runs.
+- Reaching for streaming / Kafka / a big-data stack for a three-files-a-day problem.
+- Designing the happy path (matching) in detail and the break queue — where humans spend their time — as an afterthought.
+- Using floating point for money.
+
+**What a senior candidate mentions unprompted**
+
+- The manifest — count, control total, checksum — as the foundation of the completeness proof.
+- The arithmetic identity: matched + breaks + rejects = manifest, for both counts and amounts.
+- Three-way tie-out including the bank settlement, not just processor vs internal.
+- Natural keys and run-scoped staging as the re-run safety story.
+- Break ageing, ownership, and month-end carry-with-sign-off as first-class design, not admin detail.
+- The limits of the proof: a file-level check cannot catch what the processor never put in the file.
+
+**Scoring rubric (out of 10)**
+
+| Score | What it looks like |
+|---|---|
+| 9–10 | Manifest-based completeness proof, two-direction matching in passes, three-way tie-out, idempotent re-runs with natural keys, break queue with ageing/ownership, delivery semantics stated precisely |
+| 7–8 | Sound matching and a break queue, but the completeness proof leans only on totals, or re-run safety is asserted rather than designed |
+| 5–6 | A file parser and a join; breaks are "the unmatched rows in a table" with no types, owners, or ageing; month-end not addressed |
+| 3–4 | Spreadsheet-with-a-scheduler thinking: no manifest validation, no audit trail, duplicates handled by deleting rows |
+| 0–2 | Claims exactly-once delivery, silently drops mismatches, or proposes a streaming platform with no batch tie-out at all |
+
+Sources: [PostgreSQL documentation — INSERT / ON CONFLICT and transaction isolation](https://www.postgresql.org/docs/) · [AWS documentation — Amazon S3 checksums and object integrity](https://docs.aws.amazon.com/AmazonS3/latest/userguide/checking-object-integrity.html) · [NIST FIPS 180-4 — Secure Hash Standard (SHA-256)](https://csrc.nist.gov/pubs/fips/180-4/upd1/final)

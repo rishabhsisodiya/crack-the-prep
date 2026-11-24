@@ -1,0 +1,173 @@
+{
+  "cards": [
+    {
+      "dot": "cyan",
+      "items": [
+        "Payment events arrive on Kafka at 20K txns/sec peak, keyed by account and card",
+        "Scoring path budget is under 100 ms p99 end to end, including feature fetch"
+      ],
+      "title": "Scoring Path"
+    },
+    {
+      "dot": "emerald",
+      "items": [
+        "Online feature store serves the same definitions the offline store trains on",
+        "Rules engine plus ML ensemble, with per-segment fail-open or fail-closed fallback"
+      ],
+      "title": "Features & Models"
+    },
+    {
+      "dot": "rose",
+      "items": [
+        "Labels arrive days later as chargebacks, so the feedback loop is delayed by design",
+        "At-least-once delivery plus idempotent decision records = effectively-once effects"
+      ],
+      "title": "Feedback Loop"
+    }
+  ],
+  "components": [
+    {
+      "id": "checkout",
+      "label": "Checkout / Payments API",
+      "sublabel": "authorisation requests",
+      "type": "external"
+    },
+    {
+      "id": "kafka",
+      "label": "Kafka",
+      "sublabel": "partition by account_id",
+      "type": "messagebus"
+    },
+    {
+      "id": "scoring",
+      "label": "Scoring Service",
+      "sublabel": "orchestrates decision <100 ms",
+      "type": "backend"
+    },
+    {
+      "id": "features",
+      "label": "Online Feature Store",
+      "sublabel": "Redis, point-in-time features",
+      "type": "database"
+    },
+    {
+      "id": "rules",
+      "label": "Rules Engine",
+      "sublabel": "hard blocks + velocity rules",
+      "type": "backend"
+    },
+    {
+      "id": "model",
+      "label": "ML Model Ensemble",
+      "sublabel": "versioned models, shadow mode",
+      "type": "backend"
+    },
+    {
+      "id": "dedup",
+      "label": "Dedup + Decision Log",
+      "sublabel": "idempotency key per txn",
+      "type": "backend"
+    },
+    {
+      "id": "offline",
+      "label": "Offline Store + Training",
+      "sublabel": "lake, labels, chargebacks",
+      "type": "database"
+    },
+    {
+      "id": "dest",
+      "label": "Downstream Actions",
+      "sublabel": "approve, step-up, review, block",
+      "type": "external"
+    },
+    {
+      "id": "monitor",
+      "label": "Monitoring",
+      "sublabel": "latency, drift, FP rate",
+      "type": "cloud"
+    }
+  ],
+  "connections": [
+    {
+      "from": "checkout",
+      "id": "co-kafka",
+      "label": "txn events",
+      "to": "kafka"
+    },
+    {
+      "from": "kafka",
+      "id": "kafka-score",
+      "label": "consume (async)",
+      "to": "scoring",
+      "variant": "dashed"
+    },
+    {
+      "from": "scoring",
+      "id": "score-feat",
+      "label": "fetch features",
+      "to": "features"
+    },
+    {
+      "from": "scoring",
+      "id": "score-rules",
+      "label": "evaluate rules",
+      "to": "rules"
+    },
+    {
+      "from": "scoring",
+      "id": "score-model",
+      "label": "score ensemble",
+      "to": "model"
+    },
+    {
+      "from": "scoring",
+      "id": "score-dedup",
+      "label": "write decision once",
+      "to": "dedup"
+    },
+    {
+      "from": "dedup",
+      "id": "dedup-dest",
+      "label": "decision",
+      "to": "dest"
+    },
+    {
+      "from": "kafka",
+      "id": "kafka-off",
+      "label": "archive + labels (async)",
+      "to": "offline",
+      "variant": "dashed"
+    },
+    {
+      "from": "offline",
+      "id": "off-feat",
+      "label": "publish features (async)",
+      "to": "features",
+      "variant": "dashed"
+    },
+    {
+      "from": "offline",
+      "id": "off-model",
+      "label": "deploy model version",
+      "to": "model",
+      "variant": "dashed"
+    },
+    {
+      "from": "scoring",
+      "id": "score-monitor",
+      "label": "latency + drift metrics",
+      "to": "monitor",
+      "variant": "dashed"
+    }
+  ],
+  "diagram_type": "architecture",
+  "layout": {
+    "mode": "auto"
+  },
+  "meta": {
+    "output": ".archify/build/scenario-realtime-fraud-detection/architecture.html",
+    "quality_profile": "showcase",
+    "title": "Real-Time Fraud Scoring in Under 100 ms"
+  },
+  "schema_version": 1
+}

@@ -1,0 +1,109 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "layout": {
+    "mode": "auto"
+  },
+  "meta": {
+    "title": "Offline-First App \u2014 Local Database Is the Source of Truth",
+    "output": ".archify/build/frontend-offline-first/architecture.html",
+    "quality_profile": "showcase"
+  },
+  "components": [
+    {
+      "id": "ui",
+      "type": "frontend",
+      "label": "UI Components",
+      "sublabel": "render from local data"
+    },
+    {
+      "id": "localdb",
+      "type": "database",
+      "label": "IndexedDB",
+      "sublabel": "entities + mutation queue"
+    },
+    {
+      "id": "sync",
+      "type": "backend",
+      "label": "Sync Engine",
+      "sublabel": "push + pull \u00b7 conflicts"
+    },
+    {
+      "id": "api",
+      "type": "backend",
+      "label": "Server API"
+    },
+    {
+      "id": "sw",
+      "type": "cloud",
+      "label": "Service Worker",
+      "sublabel": "app shell + asset cache"
+    }
+  ],
+  "connections": [
+    {
+      "id": "ui-ldb",
+      "from": "ui",
+      "to": "localdb",
+      "label": "read \u00b7 write (local first)",
+      "variant": "emphasis"
+    },
+    {
+      "id": "ldb-ui",
+      "from": "localdb",
+      "to": "ui",
+      "label": "live queries"
+    },
+    {
+      "id": "sync-ldb",
+      "from": "sync",
+      "to": "localdb",
+      "label": "apply pulled changes"
+    },
+    {
+      "id": "sync-api",
+      "from": "sync",
+      "to": "api",
+      "label": "push queued mutations"
+    },
+    {
+      "id": "api-sync",
+      "from": "api",
+      "to": "sync",
+      "label": "pull changes since cursor"
+    },
+    {
+      "id": "sw-ui",
+      "from": "sw",
+      "to": "ui",
+      "label": "serves HTML, JS, CSS offline",
+      "variant": "dashed"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Two caches, two jobs",
+      "items": [
+        "Service-worker cache holds the app shell and assets, so the app LOADS offline",
+        "IndexedDB holds the user's data and mutation queue, so the app WORKS offline"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Write local, sync later",
+      "items": [
+        "The UI reads and writes IndexedDB first; the network is an optimization, not a dependency",
+        "The sync engine pushes queued mutations and pulls changes since a cursor"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Conflicts are designed for",
+      "items": [
+        "The same item edited on two devices offline must merge or resolve explicitly",
+        "Local DB schemas are versioned and migrated on startup so app updates don't break data"
+      ]
+    }
+  ]
+}

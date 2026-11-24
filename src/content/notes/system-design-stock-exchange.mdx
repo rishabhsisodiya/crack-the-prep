@@ -10,6 +10,7 @@ description: "Designing a stock exchange's matching engine around a single-threa
 
 import Callout from '../../components/Callout.astro';
 import Mermaid from '../../components/Mermaid.astro';
+import ArchDiagram from '../../components/ArchDiagram.astro';
 
 Part of the [system design](/prep/system-design) series. See the [framework](/prep/system-design) and [building blocks](/prep/system-design/building-blocks) first if you haven't.
 
@@ -29,7 +30,8 @@ Part of the [system design](/prep/system-design) series. See the [framework](/pr
 
 ## 2. Where it sits / high-level architecture
 
-<Mermaid caption="Orders funnel through one sequencer into a single-threaded matching core per instrument" code={`flowchart LR
+<ArchDiagram src="stock-exchange/architecture" caption="Orders funnel through one sequencer into a single-threaded matching core per instrument">
+<Mermaid code={`flowchart LR
   T1[Trader client] -->|order| GW1[Gateway]
   T2[Trader client] -->|order| GW2[Gateway]
   GW1 --> SEQ[Sequencer<br/>assigns monotonic seq no.]
@@ -42,6 +44,7 @@ Part of the [system design](/prep/system-design) series. See the [framework](/pr
   PUB --> MD1[Subscriber feeds]
   WAL -. replay on crash .-> ME
 `} />
+</ArchDiagram>
 
 - The **sequencer** is the crux of the whole design: a single component that stamps every incoming order with a strictly increasing sequence number, fixing a total order of events for all time. This is what makes "same input sequence → same output trades" possible — determinism requires a single agreed-upon order, and a distributed, multi-writer system without one cannot guarantee it.
 - **One matching engine instance per instrument (or shard of instruments), single-threaded.** This looks like it throws away parallelism, but it removes the entire class of concurrency bugs (lock contention, race conditions on the book) from the hottest, correctness-critical path — parallelism instead comes from running many single-threaded engines, one per instrument, independently.

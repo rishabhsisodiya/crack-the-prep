@@ -1,0 +1,185 @@
+{
+  "meta": {
+    "output": ".archify/build/object-storage-s3/architecture.html",
+    "title": "S3-like Object Storage \u2014 Metadata / Data Split, Erasure Coding",
+    "quality_profile": "showcase"
+  },
+  "components": [
+    {
+      "id": "client",
+      "label": "Client",
+      "sublabel": "PUT / GET / DELETE objects",
+      "type": "external"
+    },
+    {
+      "id": "api",
+      "label": "API Layer",
+      "sublabel": "PUT / GET / DELETE \u00b7 versioning + ACLs",
+      "type": "backend"
+    },
+    {
+      "id": "meta",
+      "label": "Metadata Store",
+      "sublabel": "bucket/key \u2192 chunk locations",
+      "type": "database"
+    },
+    {
+      "id": "enc",
+      "label": "Erasure Encoder",
+      "sublabel": "split object into chunks",
+      "type": "backend"
+    },
+    {
+      "id": "place",
+      "label": "Placement Service",
+      "sublabel": "independent failure domains",
+      "type": "backend"
+    },
+    {
+      "id": "n1",
+      "label": "Storage Node 1",
+      "sublabel": "data / parity shard",
+      "type": "database"
+    },
+    {
+      "id": "n2",
+      "label": "Storage Node 2",
+      "sublabel": "data / parity shard",
+      "type": "database"
+    },
+    {
+      "id": "n3",
+      "label": "Storage Node 3",
+      "sublabel": "data / parity shard",
+      "type": "database"
+    },
+    {
+      "id": "n4",
+      "label": "Storage Node 4",
+      "sublabel": "data / parity shard",
+      "type": "database"
+    },
+    {
+      "id": "dec",
+      "label": "Erasure Decoder",
+      "sublabel": "fetch shards, reconstruct object",
+      "type": "backend"
+    },
+    {
+      "id": "bg",
+      "label": "Background Scrubber / Repair",
+      "sublabel": "checks + rebuilds lost shards",
+      "type": "cloud"
+    }
+  ],
+  "connections": [
+    {
+      "from": "client",
+      "id": "c-api",
+      "to": "api"
+    },
+    {
+      "from": "api",
+      "id": "api-meta",
+      "label": "lookup / register chunks",
+      "to": "meta"
+    },
+    {
+      "from": "api",
+      "id": "api-enc",
+      "label": "PUT: split into chunks",
+      "to": "enc"
+    },
+    {
+      "from": "enc",
+      "id": "enc-place",
+      "label": "N data + M parity shards",
+      "to": "place"
+    },
+    {
+      "from": "place",
+      "id": "place-n1",
+      "to": "n1"
+    },
+    {
+      "from": "place",
+      "id": "place-n2",
+      "to": "n2"
+    },
+    {
+      "from": "place",
+      "id": "place-n3",
+      "to": "n3"
+    },
+    {
+      "from": "place",
+      "id": "place-n4",
+      "to": "n4"
+    },
+    {
+      "from": "api",
+      "id": "api-dec",
+      "label": "GET: fetch shards, decode",
+      "to": "dec"
+    },
+    {
+      "from": "n1",
+      "id": "n1-dec",
+      "to": "dec"
+    },
+    {
+      "from": "n2",
+      "id": "n2-dec",
+      "to": "dec"
+    },
+    {
+      "from": "n3",
+      "id": "n3-dec",
+      "to": "dec"
+    },
+    {
+      "from": "bg",
+      "id": "bg-n1",
+      "label": "checks + rebuilds",
+      "to": "n1",
+      "variant": "dashed"
+    },
+    {
+      "from": "bg",
+      "id": "bg-n2",
+      "to": "n2",
+      "variant": "dashed"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Metadata / data split",
+      "items": [
+        "Metadata is small, fast and consistent \u2014 bucket/key to shard locations, size, version, ACLs",
+        "Data plane is where bytes live and durability cost dominates; the two scale independently"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Erasure coding",
+      "items": [
+        "Any N of N+M shards reconstruct the object \u2014 ~1.2\u20131.5x overhead vs 3x replication",
+        "Shards must sit in independent failure domains, or the durability math is false"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Repair loop",
+      "items": [
+        "A dead storage node is the designed-for case: scrubber detects, reconstructs and re-writes the shard",
+        "Without continuous repair, shard losses accumulate below the reconstruction threshold"
+      ]
+    }
+  ],
+  "diagram_type": "architecture",
+  "layout": {
+    "mode": "auto"
+  },
+  "schema_version": 1
+}

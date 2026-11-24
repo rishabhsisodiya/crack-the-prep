@@ -10,6 +10,7 @@ description: "Designing a chat client (WhatsApp Web / Slack / Messenger) — Web
 
 import Callout from '../../components/Callout.astro';
 import Mermaid from '../../components/Mermaid.astro';
+import ArchDiagram from '../../components/ArchDiagram.astro';
 
 Part of the [system design](/prep/system-design) series. Uses the [frontend framework](/prep/system-design/frontend-system-design). The server side is [Chat System](/prep/system-design/chat-system).
 
@@ -27,7 +28,8 @@ Part of the [system design](/prep/system-design) series. Uses the [frontend fram
 
 ## 2. Architecture
 
-<Mermaid caption="One connection manager per app feeds a normalized message store; an outbox handles sending" code={`flowchart TD
+<ArchDiagram src="frontend-chat-app/architecture" caption="One connection manager per app feeds a normalized message store; an outbox handles sending">
+<Mermaid code={`flowchart TD
   UI[ConversationList / MessageThread / Composer] --> ST[(Client store<br/>conversations, messages by id)]
   ST --> UI
   UI -->|send| OB[Outbox<br/>pending messages, IndexedDB]
@@ -37,6 +39,7 @@ Part of the [system design](/prep/system-design) series. Uses the [frontend fram
   SYNC[Sync service: fetch since cursor] --> ST
   SYNC --> API[REST: history, gaps]
 `} />
+</ArchDiagram>
 
 - **One WebSocket** per app (not per conversation), managed by a connection manager outside React components. Components subscribe to the store, not the socket.
 - **REST for history and catch-up**, WebSocket for live events.

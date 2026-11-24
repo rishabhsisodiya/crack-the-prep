@@ -1,0 +1,170 @@
+{
+  "cards": [
+    {
+      "dot": "cyan",
+      "items": [
+        "Resolve channel + preferences, check dedupe and per-user rate limits, then render and send",
+        "Millions per hour, bursty \u2014 queue absorbs a marketing send across channels and providers"
+      ],
+      "title": "Worker pipeline"
+    },
+    {
+      "dot": "emerald",
+      "items": [
+        "At-least-once queue + idempotent send on the dedupe key = effectively-once delivery",
+        "Retries use exponential backoff; after N attempts the event goes to the DLQ with an alert"
+      ],
+      "title": "Reliability"
+    },
+    {
+      "dot": "rose",
+      "items": [
+        "Circuit breaker on the primary provider's error rate flips traffic to a secondary, half-open probe recovers",
+        "Provider webhooks update delivery status; hard bounces are suppressed for future sends"
+      ],
+      "title": "Failover & tracking"
+    }
+  ],
+  "components": [
+    {
+      "id": "producers",
+      "label": "Producers",
+      "sublabel": "NotificationRequested event",
+      "type": "external"
+    },
+    {
+      "id": "queue",
+      "label": "Queue",
+      "sublabel": "at-least-once delivery",
+      "type": "messagebus"
+    },
+    {
+      "id": "worker",
+      "label": "Notification Worker",
+      "sublabel": "prefs \u00b7 dedupe \u00b7 limit \u00b7 render \u00b7 send",
+      "type": "backend"
+    },
+    {
+      "id": "prefs",
+      "label": "Preferences",
+      "sublabel": "opt-outs \u00b7 quiet hours",
+      "type": "database"
+    },
+    {
+      "id": "dedup",
+      "label": "Redis: Dedupe + Rate Limit",
+      "sublabel": "sent:{dedupeKey} \u00b7 token bucket",
+      "type": "database"
+    },
+    {
+      "id": "template",
+      "label": "Template Render",
+      "sublabel": "per channel",
+      "type": "backend"
+    },
+    {
+      "id": "primary",
+      "label": "Primary Provider",
+      "sublabel": "email / SMS / push",
+      "type": "cloud"
+    },
+    {
+      "id": "breaker",
+      "label": "Circuit Breaker",
+      "sublabel": "on primary error rate",
+      "type": "backend"
+    },
+    {
+      "id": "secondary",
+      "label": "Secondary Provider",
+      "sublabel": "failover channel provider",
+      "type": "cloud"
+    },
+    {
+      "id": "dlq",
+      "label": "Dead-Letter Queue",
+      "sublabel": "failed N times \u00b7 alert",
+      "type": "messagebus"
+    },
+    {
+      "id": "status",
+      "label": "Delivery Status",
+      "sublabel": "queued \u00b7 sent \u00b7 delivered \u00b7 bounced",
+      "type": "database"
+    }
+  ],
+  "connections": [
+    {
+      "from": "producers",
+      "id": "p-q",
+      "label": "publish event",
+      "to": "queue"
+    },
+    {
+      "from": "queue",
+      "id": "q-w",
+      "to": "worker"
+    },
+    {
+      "from": "worker",
+      "id": "w-pref",
+      "label": "channel + preferences",
+      "to": "prefs"
+    },
+    {
+      "from": "worker",
+      "id": "w-dedup",
+      "label": "dedupe + rate-limit check",
+      "to": "dedup"
+    },
+    {
+      "from": "worker",
+      "id": "w-tpl",
+      "label": "render template",
+      "to": "template"
+    },
+    {
+      "from": "worker",
+      "id": "w-p1",
+      "label": "send",
+      "to": "primary"
+    },
+    {
+      "from": "primary",
+      "id": "p1-cb",
+      "label": "error rate high",
+      "to": "breaker",
+      "variant": "dashed"
+    },
+    {
+      "from": "breaker",
+      "id": "cb-p2",
+      "label": "fail over",
+      "to": "secondary"
+    },
+    {
+      "from": "worker",
+      "id": "w-dlq",
+      "label": "failed N times",
+      "to": "dlq",
+      "variant": "dashed"
+    },
+    {
+      "from": "primary",
+      "id": "p1-stat",
+      "label": "webhook",
+      "to": "status",
+      "variant": "dashed"
+    }
+  ],
+  "diagram_type": "architecture",
+  "layout": {
+    "mode": "auto"
+  },
+  "meta": {
+    "output": ".archify/build/guide/notification.html",
+    "quality_profile": "showcase",
+    "title": "Notification Service \u2014 Queue-Driven, Provider Failover"
+  },
+  "schema_version": 1
+}

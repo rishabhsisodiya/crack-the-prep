@@ -1,0 +1,142 @@
+{
+  "meta": {
+    "title": "E-Commerce Checkout \u2014 No Oversell",
+    "output": ".archify/build/guide/checkout.html",
+    "quality_profile": "showcase"
+  },
+  "components": [
+    {
+      "id": "client",
+      "type": "external",
+      "label": "Client",
+      "sublabel": "browser / app"
+    },
+    {
+      "id": "cdn",
+      "type": "cloud",
+      "label": "CDN",
+      "sublabel": "cached product pages"
+    },
+    {
+      "id": "checkout",
+      "type": "backend",
+      "label": "Checkout Service",
+      "sublabel": "order pending \u2192 confirmed"
+    },
+    {
+      "id": "inventory",
+      "type": "database",
+      "label": "Inventory DB",
+      "sublabel": "source of truth"
+    },
+    {
+      "id": "hotsku",
+      "type": "database",
+      "label": "Redis",
+      "sublabel": "hot SKU counters"
+    },
+    {
+      "id": "payment",
+      "type": "external",
+      "label": "Payment Provider",
+      "sublabel": "charges the customer"
+    },
+    {
+      "id": "webhook",
+      "type": "backend",
+      "label": "Webhook Handler",
+      "sublabel": "idempotent \u00b7 dedupe on event id"
+    },
+    {
+      "id": "sweeper",
+      "type": "backend",
+      "label": "Reservation Sweeper",
+      "sublabel": "release expired \u00b7 reconcile"
+    }
+  ],
+  "connections": [
+    {
+      "id": "cl-cdn",
+      "from": "client",
+      "to": "cdn",
+      "label": "browse products"
+    },
+    {
+      "id": "cl-co",
+      "from": "client",
+      "to": "checkout",
+      "label": "begin checkout"
+    },
+    {
+      "id": "co-inv",
+      "from": "checkout",
+      "to": "inventory",
+      "label": "reserve: atomic conditional decrement",
+      "variant": "emphasis"
+    },
+    {
+      "id": "co-hot",
+      "from": "checkout",
+      "to": "hotsku",
+      "label": "flash sale: atomic decrement",
+      "variant": "dashed"
+    },
+    {
+      "id": "co-pay",
+      "from": "checkout",
+      "to": "payment",
+      "label": "charge"
+    },
+    {
+      "id": "pay-wh",
+      "from": "payment",
+      "to": "webhook",
+      "label": "webhook (retried)",
+      "variant": "dashed"
+    },
+    {
+      "id": "wh-inv",
+      "from": "webhook",
+      "to": "inventory",
+      "label": "confirm / release"
+    },
+    {
+      "id": "sw-inv",
+      "from": "sweeper",
+      "to": "inventory",
+      "label": "release expired + reconcile",
+      "variant": "dashed"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "No oversell",
+      "items": [
+        "Reservation decrements stock atomically: UPDATE \u2026 WHERE available >= qty",
+        "0 rows affected means out of stock \u2014 no app-level locks"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Flash sale",
+      "items": [
+        "Product pages served from CDN; only the buy action reaches origin",
+        "Hot SKU counters in Redis, reconciled back to the DB"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Payment safety",
+      "items": [
+        "Webhook handler dedupes on the provider event id",
+        "Sweeper releases expired reservations and polls for lost webhooks"
+      ]
+    }
+  ],
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "layout": {
+    "mode": "auto"
+  }
+}

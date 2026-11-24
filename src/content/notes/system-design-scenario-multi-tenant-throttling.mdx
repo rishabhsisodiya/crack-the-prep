@@ -1,0 +1,307 @@
+---
+title: "Scenario — One Noisy Tenant Is Killing Your API"
+track: "system-design"
+kind: "notes"
+order: 74
+slug: "scenario-multi-tenant-throttling"
+updated: 2026-11-24
+description: "A scenario-based interview problem: one tenant's batch job is starving a multi-tenant SaaS API — design per-tenant quotas and fairness with plan-based token buckets, 429s with rate-limit headers, noisy-neighbour isolation, and usage metering that feeds billing without double-counting."
+---
+
+import Callout from '../../components/Callout.astro';
+import ArchDiagram from '../../components/ArchDiagram.astro';
+
+Part of the [system design](/prep/system-design) series. This is a **scenario** page: you get the problem the way an interviewer would state it, then a full worked solution. **Level 1 — Mid-level engineer.**
+
+> **Original practice scenario** — written for interview preparation; not a question from any specific company's interview.
+
+## 1. The problem statement
+
+Here is how the interviewer puts it. Read it the way you would in the room — nothing in this section is the solution.
+
+> "We run a multi-tenant SaaS product — a few thousand business customers ('tenants') share one API. Tenants are on different plans: free, pro, and enterprise, and they pay different amounts.
+>
+> Last week one tenant's batch job went wrong — a script retrying in a tight loop, plus a big nightly import — and started consuming most of the API's capacity. Response times for **every other tenant** doubled, some started timing out, and support tickets poured in from customers who had done nothing wrong. The noisy tenant was on a mid-tier plan and had no idea they were causing it.
+>
+> Design the system that stops this: per-tenant limits and fairness, so one tenant can never starve the others, the limits match what each plan promises, and the usage numbers still feed billing accurately."
+
+**Functional requirements**
+
+- Enforce a per-tenant request quota that depends on the tenant's plan (free / pro / enterprise).
+- Allow short bursts above the sustained rate — real clients are bursty — without letting a burst become a flood.
+- When a tenant is over the limit, reject the excess with a clear, machine-readable response the client can act on.
+- Keep other tenants' latency unaffected while one tenant is being throttled.
+- Record each tenant's usage so monthly billing matches what they actually consumed.
+- Let support/ops raise, lower, or temporarily lift a tenant's limit without a code deploy.
+
+**Non-functional requirements**
+
+- The limit check itself must be fast — it sits on every request, so it cannot add meaningful latency.
+- The limit check must not become a single point of failure that takes the whole API down with it.
+- Limits must hold across many gateway/API instances, not just on one machine.
+- Fairness under load: when the system is saturated, capacity is shared by plan, not grabbed by whoever shouts loudest.
+- Metering must be accurate enough to bill from — a retried request must not be charged twice.
+
+## 2. Clarifying questions to ask first
+
+Ask these before drawing anything. Each one changes the design.
+
+| Question | Why it matters |
+|---|---|
+| What exactly are we limiting — requests per second, concurrent requests, or something heavier like compute/rows scanned? | A single requests/sec number is the simple answer; expensive endpoints may need "cost units" where one heavy call counts as ten cheap ones. |
+| What are the plan limits, and is a burst allowed? | The numbers come from the product/pricing side, not from you. Burst allowance is the difference between a limiter users love and one that breaks legitimate batchy clients. |
+| Is the limit per tenant, per API key, or per user inside a tenant? | Tenants often have many keys and users. Limiting per key lets one tenant multiply keys to multiply quota — usually the limit is per tenant, with optional per-key sub-limits. |
+| When a tenant is over the limit, do we reject immediately or queue/delay? | Rejecting (429) is simple and protects the system; queueing smooths bursts but adds latency and hides overload. Most APIs reject and tell the client when to retry. |
+| What happens when the limiter itself is down — let requests through, or block them? | This is the fail-open vs fail-closed decision, and the right answer differs for a cheap read and an expensive export. Getting it asked early wins points. |
+| How accurate must billing usage be — exact, or is a small, explainable error acceptable? | Exact billing pushes you toward a deduplicated metering pipeline; approximate usage stats can ride on counters. Never mix the two up. |
+| Are there different traffic types — interactive users vs batch jobs? | Batch traffic can be given a lower priority lane so a tenant's own import cannot starve that same tenant's interactive users. |
+
+<Callout type="tip">
+The highest-value clarification here is "what happens when the limiter is down?" Most candidates design only the happy path. Naming the fail-open vs fail-closed trade-off before the interviewer asks is what separates a mid-level answer from a senior-sounding one.
+</Callout>
+
+## 3. The solution, in plain language first
+
+The simple version: every request carries a tenant ID. Before the request is allowed to do any real work, a gateway asks one question — "does this tenant have a token left?" Each tenant has a bucket that refills at the rate their plan allows and holds a limited number of tokens for bursts. If a token is available, the request proceeds and one token is spent. If the bucket is empty, the request is rejected immediately with a `429` and a header saying when to retry — cheaply, before it touches any database or downstream service.
+
+Why does this fix the noisy neighbour? Because the runaway script can now only burn **its own** bucket. It gets 429s; everyone else's buckets, latency, and experience are untouched. And because every allowed request emits a usage event, the same mechanism that enforces the limit also produces the numbers billing needs.
+
+One sentence to anchor the whole design: **this is not really a rate limiter problem, it is a fairness problem** — a generic rate limiter protects a server from traffic; this design divides a shared resource between paying customers according to what each one bought.
+
+## 4. Architecture
+
+<ArchDiagram src="scenario-multi-tenant-throttling/architecture" caption="Multi-tenant throttling architecture" />
+
+**Component by component**
+
+- **Tenants.** Thousands of customers sharing one API. One of them — a batch job or runaway script — is generating far more traffic than its plan intends. The design must assume this will happen again, with a different tenant.
+- **API gateway.** The single entry point. It authenticates the request, resolves the tenant ID from the API key/token, and asks the limiter before routing anywhere. Rejection happens here, at the cheapest possible point.
+- **Per-tenant rate limiter (Redis token buckets).** For each tenant, a token bucket stored in Redis: capacity = burst allowance, refill rate = plan's sustained rate. The check-and-spend is one atomic Redis operation (a Lua script, §9), so ten gateway instances all see the same bucket. Plan limits come from the config service, not from code.
+- **429 response.** When the bucket is empty the gateway returns HTTP `429 Too Many Requests` with `Retry-After` and rate-limit headers (§5), so a well-behaved client backs off instead of hammering.
+- **API services, with per-tenant queues / bulkheads.** Passing the limiter is necessary but not sufficient — a tenant under its request limit can still send expensive requests. Downstream, work is split into per-tenant (or per-plan-tier) queues and thread/connection pools — a **bulkhead**, like watertight compartments in a ship — so one tenant's backlog cannot consume every worker. Interactive traffic gets its own lane, separate from batch traffic.
+- **Usage metering pipeline.** Every allowed request emits a small usage event (tenant, endpoint, units, request ID) onto a queue/stream. A consumer aggregates these into the billing store. This is asynchronous on purpose: metering must never slow down or break the request path.
+- **Billing / usage store.** Per-tenant aggregated usage per billing period — the numbers invoices are generated from. Billing reads from here, never from the live limiter counters.
+- **Admin / config service.** Holds the plan definitions (rate, burst, per-endpoint costs), per-tenant overrides (a support-granted temporary raise, a kill switch for an abusive tenant), and pushes changes to the limiter without a deploy.
+
+## 5. End-to-end data flow
+
+1. A request arrives at the gateway with an API key. The gateway authenticates it and resolves `tenant_id` and the tenant's plan.
+2. The gateway runs the atomic token-bucket check in Redis for that tenant (and endpoint cost — a heavy endpoint may cost 5 tokens). One round trip, typically under a millisecond inside the same network.
+3. **Token available:** the token is spent, the request is routed to the API services, and it lands in that tenant's (or tier's) queue/bulkhead. The response goes back with rate-limit headers showing the tenant's remaining budget.
+4. **Bucket empty:** the gateway immediately returns `429` with `Retry-After` (seconds until at least one token refills) and the same rate-limit headers. No downstream work happens at all.
+5. For every **allowed** request, the gateway/service emits a usage event carrying the unique request ID. The metering consumer aggregates events into per-tenant, per-period totals in the billing store, deduplicating on request ID.
+6. Separately, the admin/config service is the source of truth for plan limits and overrides; the limiter reads (and caches briefly) its configuration from there.
+7. At billing time, invoices are generated from the metering store's aggregates — reconciled against gateway logs if a tenant disputes a bill.
+
+**The headers matter.** A good 429 is a contract, not just an error:
+
+```http
+HTTP/1.1 429 Too Many Requests
+Retry-After: 12
+RateLimit-Limit: 100
+RateLimit-Remaining: 0
+RateLimit-Reset: 12
+Content-Type: application/json
+
+{ "error": "rate_limit_exceeded", "message": "Plan limit reached. Retry after 12 seconds." }
+```
+
+Successful responses carry the same `RateLimit-*` headers so clients can see the budget coming and slow down *before* they hit the wall.
+
+## 6. Technology choices, and why
+
+| Decision | Choice | Why | Alternative considered |
+|---|---|---|---|
+| Limiting algorithm | Token bucket per tenant | Allows controlled bursts (bucket capacity) with a hard sustained rate (refill) — matches how real clients behave | Fixed window counter — simple, but allows 2x the limit in a burst across a window boundary; sliding window log — accurate but stores a timestamp per request |
+| Where the buckets live | Redis, checked with a Lua script | One shared, atomic view across all gateway instances; sub-millisecond; refill computed from timestamps, no background job needed | In-memory per gateway instance — fast, but each instance has its own bucket, so the real limit becomes limit × instance count |
+| Where the check happens | API gateway, before routing | Rejection is cheapest at the edge; protects every downstream service with one mechanism | Middleware inside each service — repeated in every codebase, easy to forget in a new service |
+| Isolation downstream | Per-tier queues + bulkhead pools, weighted fair scheduling between them | The limiter caps rate; queues/bulkheads cap how much of the *workers* one tenant can occupy | One shared queue — the noisy tenant fills it and everyone's latency becomes queue-wait time |
+| Metering transport | Queue/stream (Kafka, SQS, Redis Stream) | Decouples billing accuracy from request latency; events can be replayed and re-aggregated | Writing a billing row synchronously per request — adds a database write to every request's critical path |
+| Plan configuration | Config/admin service with a short-lived cache in the gateway | Support can change a limit in seconds during an incident; cache keeps the hot path fast | Hard-coded limits per plan in code — every pricing change or incident override becomes a deploy |
+
+**Batch vs streaming, in this design.** The limit check is neither — it is a synchronous, per-request decision and must stay that way; a batch-computed limit is always stale. Metering is the opposite: it is a streaming pipeline (events in, aggregates continuously updated) with a batch reconciliation job at the end of the billing period that re-aggregates the raw events and compares totals. Streaming gives operations a live view of usage; the batch pass gives billing a number you can defend in a dispute.
+
+## 7. Partitioning and parallelism
+
+- **The bucket is per tenant** — that is the partition key. Tenant A's bucket is a single Redis key (`bucket:{tenant_id}`), so all of A's checks serialise on one key while different tenants never contend with each other. Redis handles this easily: a single node does ~100K+ simple ops/sec, and each check is one Lua call.
+- **Gateways scale horizontally** because they are stateless — the shared state lives in Redis, not in the gateway. Add gateways, the limit does not change. This is exactly why in-memory per-instance buckets are wrong here.
+- **Hot tenant:** the noisiest tenant's single key gets the most operations, but one key's traffic is bounded by that tenant's own request rate — even a runaway script is only thousands of checks/sec against one key, well within a single Redis node's ability. If a single tenant ever outgrows that, dedicated/enterprise tenants can be sharded onto their own Redis cluster — name it as the escape hatch, not the default.
+- **Downstream parallelism** is partitioned the same way: queues per plan tier (or per large tenant), with a scheduler that serves them in proportion to plan weight — **weighted fair queueing** in plain language: if pro tenants collectively bought 3x the capacity of free tenants, the scheduler gives them roughly 3x the worker time when both are backlogged, and any tenant's unused share is lent to the others rather than wasted.
+
+## 8. Storage strategy
+
+- **Token buckets (Redis):** two numbers per tenant — tokens remaining and last-refill timestamp — plus the plan parameters. Tiny: a few thousand tenants is a few megabytes. Refill is computed lazily on each check from elapsed time, so there is no per-tenant timer or background job.
+- **Plan config:** stored in the admin service's database, cached in gateways for a few seconds. Stale-by-seconds config is fine; a limit change does not need to be instantaneous to the millisecond.
+- **Raw usage events:** retained for the billing period plus a dispute window (say 90 days) in the metering store / cheap object storage. This is the evidence behind every invoice line.
+- **Aggregated usage:** per tenant, per endpoint class, per day (rolled up to per month) — small, kept long-term for billing history and trend reporting.
+- **What you deliberately do not store:** a log of rejected requests at full fidelity. 429s are counted (per tenant, per minute) for monitoring and support, but a runaway client can generate millions of them — sample or aggregate, never store one row each.
+
+## 9. Dedup and idempotency, with a worked example
+
+Two different things need to be idempotent here, and candidates often merge them:
+
+1. **The token spend must be atomic.** If two gateway instances check the same bucket concurrently and both see "1 token left", both must not pass. The check-and-spend has to be a single atomic operation — in Redis, a Lua script, which Redis runs without interleaving.
+2. **Metering must not double-count on retries.** A client that times out and retries a request gets a new attempt — but if the first attempt actually succeeded, billing must charge once. So each logical request carries a client-supplied (or gateway-assigned on first sight) idempotency/request ID, and the metering consumer dedups on it, exactly like the dedup pattern used for event ingestion.
+
+The atomic token-bucket check, as a Redis Lua script — this is the shape to write on a whiteboard:
+
+```lua
+-- KEYS[1] = bucket key for the tenant
+-- ARGV: capacity, refill_rate_per_sec, now_ms, cost_of_this_request
+local capacity = tonumber(ARGV[1])
+local rate     = tonumber(ARGV[2])
+local now      = tonumber(ARGV[3])
+local cost     = tonumber(ARGV[4])
+
+local bucket = redis.call('HMGET', KEYS[1], 'tokens', 'ts')
+local tokens = tonumber(bucket[1]) or capacity
+local ts     = tonumber(bucket[2]) or now
+
+-- Refill for the time elapsed since the last check
+local elapsed = math.max(0, (now - ts) / 1000)
+tokens = math.min(capacity, tokens + elapsed * rate)
+
+local allowed = 0
+local retry_after = 0
+if tokens >= cost then
+  tokens = tokens - cost
+  allowed = 1
+else
+  retry_after = math.ceil((cost - tokens) / rate)  -- seconds until enough tokens
+end
+
+redis.call('HMSET', KEYS[1], 'tokens', tokens, 'ts', now)
+redis.call('EXPIRE', KEYS[1], 3600)
+return {allowed, math.floor(tokens), retry_after}
+```
+
+Why a script and not "read, decide, write" from the gateway? Because between the read and the write, another instance can spend the same token — the classic race that makes limits leak exactly when traffic is highest. The script makes read-decide-write one indivisible step.
+
+And the metering side, in plain code:
+
+```python
+# Metering consumer: bill each logical request at most once.
+def on_usage_event(event, store):
+    if store.seen(event.request_id):     # a retry re-emitted the event
+        metrics.inc("usage_duplicate_dropped")
+        return
+    store.add_usage(event.tenant_id, event.units, period=event.period)
+    store.mark_seen(event.request_id, ttl_days=90)
+```
+
+## 10. Retry, failure handling, and the limiter-down decision
+
+- **Client retry behaviour (what your 429 design must assume):** clients will retry. `Retry-After` plus jittered exponential backoff on their side is the healthy pattern; your headers exist to make it possible. A client that ignores them still cannot hurt other tenants — it just burns its own bucket faster.
+- **Gateway → Redis failure:** the central decision of this section. If Redis is unreachable, the gateway cannot check buckets. Two honest options:
+  - **Fail-open:** allow the request. Availability wins; for a few minutes tenants are unthrottled. Risk: a noisy tenant picks exactly that moment to flood you — mitigated by a coarse in-memory per-instance fallback limit (limit ÷ instance count, roughly) that only engages when Redis is down.
+  - **Fail-closed:** reject with `503`. Limits are perfectly enforced and the API is completely down — the limiter has become a single point of failure that took the product with it.
+  - **The design decision:** fail-open for cheap reads and normal endpoints, fail-closed (or fail to a much lower fallback limit) for genuinely expensive/dangerous operations — bulk exports, report generation, anything that can melt a downstream. State this per-endpoint-class split explicitly; "it depends, and here is what it depends on" is the correct interview answer.
+- **Redis data loss / restart:** buckets are reconstructible state. If Redis restarts empty, every bucket refills to full capacity — tenants briefly get a free burst, nobody is locked out. That is the safe direction for this state to fail in; say so.
+- **Metering pipeline down:** usage events queue up in the stream and are processed when the consumer recovers. Requests are unaffected — this is why metering is asynchronous. Alert on consumer lag so a billing gap is noticed in hours, not at invoice time.
+- **Config service down:** gateways keep using their last cached plan limits. A config outage freezes limits; it does not break them.
+
+## 11. Monitoring and observability
+
+- **429 rate per tenant** — the headline metric. A spike for one tenant is the noisy-neighbour alarm; a spike across *all* tenants means your limits or your capacity are wrong.
+- **Per-tenant request rate vs their limit** — who is consistently at 95% of quota is a sales/support signal (they need a bigger plan) as well as an operational one.
+- **Limiter latency** (the Redis check) and **limiter error rate** — the check is on every request; its p99 belongs on the main dashboard, and its errors tell you whether you are currently failing open.
+- **Per-tenant latency downstream** — proof that isolation works: tenant B's p99 should not move when tenant A is being throttled. If it does, the bulkheads/queues are leaking.
+- **Metering lag and duplicate-event rate** — billing health: lag says invoices will be late; a rising duplicate rate says a client (or your gateway) is double-emitting.
+- **Top talkers report** — a simple ranked list of tenants by usage, reviewed regularly; every noisy-neighbour incident in history was visible here first.
+
+## 12. Security
+
+- **Tenant identity comes from authentication, never from the request.** The tenant ID is resolved from the verified API key/token at the gateway. A `tenant_id` field in the request body or a header the client can set would let a tenant spend someone else's bucket — or frame them.
+- **Per-key sub-limits under the tenant limit:** a single leaked API key can then burn at most its sub-limit before being cut off, and the key can be revoked without touching the tenant's other keys.
+- **Do not leak other tenants' information in errors:** rate-limit headers show the caller only their own limit, remaining, and reset — never platform-wide capacity or anyone else's usage.
+- **Admin overrides are privileged and audited:** raising a limit, lifting a throttle, or applying a kill switch goes through the admin service with an audit log of who changed what, when, and why. During an incident this log is how you reconstruct what happened.
+- **Abuse beyond accidents:** distinguish a buggy script (this scenario) from deliberate abuse — credential stuffing, scraping. That is a WAF/bot problem at the edge; the per-tenant limiter still bounds the blast radius while it is handled.
+
+## 13. Scalability, the 10x question, and cost
+
+**At 10x (10x tenants, 10x request volume):** the shape does not change. Gateways scale horizontally (stateless). Redis scales first by being efficient — one Lua call per request, and a single cluster handles hundreds of thousands of checks/sec; shard buckets by tenant ID across a Redis Cluster when one cluster is not enough, since buckets are independent per tenant and never need cross-tenant transactions. The metering pipeline scales like any stream consumer: more partitions by tenant ID, more consumers. The things that actually creak at 10x are the admin/config fan-out (solved by caching) and per-tenant downstream queues (thousands of queues is fine for a broker; per-tenant *worker pools* are not — graduate from per-tenant bulkheads to per-tier bulkheads, with dedicated pools only for the largest enterprise tenants).
+
+**Cost levers:** the limiter itself is cheap — Redis holding a few numbers per tenant is one of the smallest line items in the system. The real cost story is that throttling *saves* money: capacity is provisioned for the sum of what tenants bought, not for the sum of what their buggiest scripts can generate. Metering storage is bounded by aggregating early and keeping raw events only for the dispute window.
+
+## 14. Trade-offs, stated honestly
+
+| Choice | You gain | You pay |
+|---|---|---|
+| Central bucket in Redis | One true limit across all gateway instances | A network hop on every request, and a dependency whose failure mode you must design (fail-open/closed) |
+| Token bucket with burst | Legitimate bursty clients work; sustained floods are capped | A tenant can still spend its whole burst at once — burst size is a real capacity-planning number, not a freebie |
+| Reject fast with 429 | Downstream is fully protected; failure is cheap and immediate | Work is refused rather than smoothed; clients must implement backoff to have a good experience |
+| Per-tier queues / bulkheads | One tenant's backlog cannot occupy every worker | More moving parts; capacity split between tiers is sometimes idle in one tier while another is saturated (mitigated by lending unused share) |
+| Async metering | Zero billing cost on the request path | Usage numbers are eventually consistent; "how much have I used right now?" is always a few seconds stale |
+
+<Callout type="warn">
+Say this sentence in the interview: "With buckets checked in one Redis, counts are exact *for that check* — but the moment you shard limiters, cache config, or fall back to per-instance limits during an outage, counting becomes approximate. I will not claim perfect global accuracy from local counters." Interviewers set this trap deliberately: any design that checks limits in several places and claims the total is exact is wrong, and they know it.
+</Callout>
+
+**Counting accuracy, precisely.** Strict counting — one atomic bucket, every request checked against it — gives an exact limit, and it is achievable here because the check is cheap and Redis is fast. Approximate counting — per-instance local buckets, periodically synced — scales further and survives partitions, but the real limit drifts to roughly limit × sync error, and during a fail-open episode there is effectively no limit at all beyond the fallback. The honest design uses strict counting as the default, names the moments it degrades to approximate (Redis outage, fallback mode), and keeps billing accuracy independent of both: billing comes from the deduplicated metering pipeline, not from the limiter's counters, so a throttling approximation never becomes a billing error.
+
+## 15. Interviewer follow-up Q&As
+
+1. **"Why not just use a fixed window counter — 1,000 requests per minute, reset every minute?"** — Because of the boundary burst: 1,000 requests at 12:00:59 and 1,000 more at 12:01:00 is 2,000 requests in two seconds, all legal. Token bucket smooths this — the sustained rate is real, and the burst is a size you chose.
+2. **"A tenant has 50 API keys. Can't they just multiply their quota?"** — Only if you limit per key. The primary bucket is per tenant; keys can have sub-limits beneath it, but the tenant total is the ceiling.
+3. **"The noisy tenant is your biggest enterprise customer. Still throttle them?"** — Yes — but their plan buys a much bigger bucket, dedicated capacity/bulkhead, and the override path exists for a planned big job: support raises their limit for a window. What you never do is let any tenant's traffic degrade everyone else's silently.
+4. **"Redis goes down at peak. Walk me through the next five minutes."** — Gateways detect check failures, fail open for normal endpoints with the coarse per-instance fallback limit engaged, fail closed for the expensive endpoints, and page the on-call. When Redis returns, buckets refill and strict counting resumes. The incident is degraded fairness for minutes — not an outage.
+5. **"A client retries a timed-out request and gets billed twice. How do you prevent it?"** — The logical request carries one request/idempotency ID across retries; the metering consumer dedups on it, and the end-of-period reconciliation re-aggregates raw events to prove the total.
+6. **"Why return 429 instead of just slowing the tenant's requests down (delaying them)?"** — Delays hold connections and queue space, turning their overload into your resource usage, and the client cannot tell "slow" from "broken". A fast 429 with `Retry-After` is honest, cheap, and lets a good client schedule its retry.
+7. **"How do you set the numbers — rate and burst — for each plan?"** — From the product side: what the plan promises and what capacity costs. Technically you sanity-check them: sum of all tenants' sustained rates should be provisionable, and burst sizes multiplied by simultaneous tenants is your worst-case spike to absorb.
+8. **"One endpoint costs 100x another. Does one request still equal one token?"** — No — weighted costs: the expensive endpoint costs more tokens (say 50) from the same bucket. Otherwise a tenant can be "within limits" while melting the reporting database.
+9. **"How is this different from a normal rate limiter?"** — A normal rate limiter protects one service from too much traffic, usually per IP or per user. Here the point is fairness and economics between paying tenants on a shared system: plan-based quotas, isolation so one tenant's excess never becomes another's latency, and metering because the numbers turn into invoices.
+10. **"A tenant says their bill is wrong. How do you prove your number?"** — From the raw usage events: every billed unit traces to deduplicated events with request IDs and timestamps for that tenant and period. The reconciliation job's totals match the invoice; you can re-aggregate the period in front of them.
+
+## 16. Interview-ready spoken answer
+
+> "First, the requirements I'd pin down: a few thousand tenants on free, pro, and enterprise plans sharing one API, and one tenant's runaway batch job is destroying latency for everyone else. The clarifications that matter most are what we're limiting — I'll assume requests with a per-endpoint cost for heavy calls — whether bursts are allowed, and the one most candidates miss: what should happen when the limiter itself is down.
+>
+> The bottleneck isn't raw capacity, it's fairness: without per-tenant limits, capacity goes to whoever sends the most traffic, not to who paid for it. So the architecture is: the API gateway authenticates each request, resolves the tenant, and before routing anywhere it makes one atomic token-bucket check in Redis. The bucket's refill rate is the plan's sustained limit and its size is the burst allowance, and both come from a config service so support can change them without a deploy.
+>
+> The data flow splits on that check. If a token is available, it's spent and the request goes to the API services, which sit behind per-tier queues and bulkheads so even allowed traffic from one tenant can't occupy every worker — and interactive traffic gets its own lane, separate from batch. If the bucket is empty, the gateway returns a 429 immediately, with Retry-After and rate-limit headers, before any real work happens. The noisy tenant throttles itself; everyone else never notices.
+>
+> On reliability and duplicates: the check-and-spend is a single Lua script in Redis, so ten gateway instances can't race and overspend the same token. Every allowed request emits a usage event with a unique request ID into an async metering pipeline, which dedups on that ID — so a client retry never becomes a double charge — and billing reads from the metering store, never from the live counters. And for the limiter-down case: fail open for normal endpoints with a coarse per-instance fallback limit, fail closed for the genuinely expensive operations, decided per endpoint class in advance.
+>
+> Scaling is mostly adding stateless gateways; buckets are independent per tenant, so Redis can shard by tenant ID when needed. At 10x I'd move from per-tenant to per-tier bulkheads with dedicated pools only for the largest tenants.
+>
+> The main trade-off I'd flag: I'm choosing strict central counting — exact limits — and accepting a dependency on the request path whose failure modes I then have to design around. And I wouldn't claim the counting stays perfect in fallback mode; during a limiter outage it is deliberately approximate, which is acceptable for throttling precisely because billing accuracy lives in the metering pipeline, not in the limiter."
+
+## 17. Mock interview mode
+
+**Five hard follow-ups, with expected answers**
+
+1. **"Your limiter adds a Redis call to every request. The team says that's too much latency. Defend or change it."** — Expected: quantify first — a same-network Redis Lua call is typically well under a millisecond, against an API response budget of tens to hundreds of milliseconds. If that is genuinely too much for a specific hot endpoint, the honest options are a short-TTL local cache of the bucket for that tenant (accepting approximate counting, stated out loud) — not removing the check.
+2. **"Two tenants both burst to full bucket capacity at the same moment. Who wins?"** — Expected: both spend their own bursts — that's what the burst is for — and downstream, the weighted fair scheduler divides worker time by plan weight; unused capacity is lent, used capacity is guaranteed. If the sum of all bursts exceeds provisioned capacity, that's a capacity-planning failure, and the fix is in plan numbers, not in the limiter.
+3. **"Prove tenant B's latency was unaffected during tenant A's incident."** — Expected: per-tenant latency metrics exist precisely for this — show B's p99 flat across A's 429 spike, plus A's requests rejected at the gateway (never reaching services). If you can't measure it per tenant, you can't claim isolation.
+4. **"The metering consumer was down for a day. Are the invoices wrong?"** — Expected: no — events accumulated in the stream and were processed on recovery; the end-of-period batch reconciliation re-aggregates raw events and compares against the streaming totals before any invoice is issued. A discrepancy blocks billing, not the API.
+5. **"A tenant scripts around your per-key sub-limit by creating 500 keys and rotating them."** — Expected: rotation doesn't help them — the binding constraint is the per-tenant bucket above all keys. Key creation itself can be rate-limited and capped per tenant, and the pattern is visible in the top-talkers/429 monitoring.
+
+**Common candidate mistakes**
+
+- Designing a single global rate limit ("the API allows 10,000 req/sec") that does nothing about fairness between tenants.
+- Limiting per API key or per IP, letting one tenant multiply keys or sit behind one NAT with everyone else.
+- Claiming the limit is exact while checking it independently on every server instance.
+- Returning 429 with no `Retry-After` or headers, so good clients retry blindly and make things worse.
+- Putting the usage/billing write synchronously in the request path — or worse, billing from the limiter's counters.
+- No answer for "the limiter is down" — or picking fail-closed for everything and making the limiter a single point of total failure.
+
+**What a senior candidate mentions unprompted**
+
+- This is a fairness and plan-economics problem, not just a rate limiter.
+- Burst allowance as an explicit, sized decision — and its capacity cost.
+- The fail-open vs fail-closed split by endpoint class.
+- Weighted costs for expensive endpoints, and interactive vs batch lanes.
+- Billing accuracy lives in a deduplicated metering pipeline, independent of the limiter.
+- Admin overrides and a kill switch as first-class features, because incidents are handled by humans at 2 a.m.
+
+**Scoring rubric (out of 10)**
+
+| Score | What it looks like |
+|---|---|
+| 9–10 | Per-tenant token buckets with plan config, atomic central check, downstream bulkheads/fair queues, async deduplicated metering, fail-open/closed reasoned per endpoint, counting accuracy stated honestly |
+| 7–8 | Sound limiter design and 429 contract, but isolation downstream or the limiter-down case is thin |
+| 5–6 | A rate limiter exists (per key or fixed window) but fairness, burst, and billing are hand-wavy |
+| 3–4 | One global limit, or limits enforced separately per server with no awareness of the inconsistency |
+| 0–2 | "Add more servers" / block the tenant's IP; no per-tenant concept at all |
+
+Sources: [Redis documentation — Lua scripting and atomic execution](https://redis.io/docs/latest/develop/programmability/eval-intro/) · [IETF draft — RateLimit header fields for HTTP](https://datatracker.ietf.org/doc/draft-ietf-httpapi-ratelimit-headers/) · [RFC 6585 — HTTP 429 Too Many Requests](https://www.rfc-editor.org/rfc/rfc6585)

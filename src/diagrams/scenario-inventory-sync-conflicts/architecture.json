@@ -1,0 +1,193 @@
+{
+  "cards": [
+    {
+      "dot": "cyan",
+      "items": [
+        "Scanners keep working offline against a local stock log and durable outbox",
+        "Events carry event_id, SKU, delta, device clock and a per-warehouse sequence"
+      ],
+      "title": "Local first, sync later"
+    },
+    {
+      "dot": "emerald",
+      "items": [
+        "Version vectors show whether two updates are causally ordered or truly concurrent",
+        "Concurrent updates to the same SKU merge by delta where safe, and are flagged \u2014 never silently resolved by last-write-wins"
+      ],
+      "title": "Conflicts are detected, not overwritten"
+    },
+    {
+      "dot": "rose",
+      "items": [
+        "Warehouses may count offline, but a sale reserves against the central stock DB with an atomic conditional decrement",
+        "Cycle-count reconciliation closes the loop between system stock and physical stock"
+      ],
+      "title": "Selling is central, counting is distributed"
+    }
+  ],
+  "components": [
+    {
+      "id": "scanners-a",
+      "label": "Warehouse A Scanners",
+      "sublabel": "handhelds, offline-capable",
+      "type": "external"
+    },
+    {
+      "id": "scanners-b",
+      "label": "Warehouses B + C Scanners",
+      "sublabel": "handhelds, offline-capable",
+      "type": "external"
+    },
+    {
+      "id": "edge-a",
+      "label": "Warehouse A Edge Node",
+      "sublabel": "local stock log + outbox, works offline",
+      "type": "backend"
+    },
+    {
+      "id": "edge-b",
+      "label": "Warehouses B + C Edge Nodes",
+      "sublabel": "local stock log + outbox, works offline",
+      "type": "backend"
+    },
+    {
+      "id": "sync",
+      "label": "Sync Gateway",
+      "sublabel": "auth, validate, accept event batches",
+      "type": "backend"
+    },
+    {
+      "id": "log",
+      "label": "Inventory Event Log (Kafka)",
+      "sublabel": "partition by SKU + warehouse",
+      "type": "messagebus"
+    },
+    {
+      "id": "conflict",
+      "label": "Conflict Engine",
+      "sublabel": "version vectors, merge or flag \u2014 never silent LWW",
+      "type": "backend"
+    },
+    {
+      "id": "stockdb",
+      "label": "Central Stock DB",
+      "sublabel": "per-SKU counts + version vectors",
+      "type": "database"
+    },
+    {
+      "id": "guard",
+      "label": "Reservation / Oversell Guard",
+      "sublabel": "atomic decrement against central authority",
+      "type": "backend"
+    },
+    {
+      "id": "orders",
+      "label": "Storefront / Orders",
+      "sublabel": "availability checks + reservations",
+      "type": "external"
+    },
+    {
+      "id": "recon",
+      "label": "Reconciliation Job",
+      "sublabel": "cycle counts vs system counts",
+      "type": "backend"
+    },
+    {
+      "id": "monitor",
+      "label": "Monitoring & Alerts",
+      "sublabel": "conflict rate, sync lag, negative stock",
+      "type": "cloud"
+    }
+  ],
+  "connections": [
+    {
+      "from": "scanners-a",
+      "id": "scan-a-edge",
+      "label": "scan events (local first)",
+      "to": "edge-a"
+    },
+    {
+      "from": "scanners-b",
+      "id": "scan-b-edge",
+      "label": "scan events (local first)",
+      "to": "edge-b"
+    },
+    {
+      "from": "edge-a",
+      "id": "edge-a-sync",
+      "label": "sync when online",
+      "to": "sync",
+      "variant": "dashed"
+    },
+    {
+      "from": "edge-b",
+      "id": "edge-b-sync",
+      "label": "sync when online",
+      "to": "sync",
+      "variant": "dashed"
+    },
+    {
+      "from": "sync",
+      "id": "sync-log",
+      "label": "append stock events",
+      "to": "log",
+      "variant": "dashed"
+    },
+    {
+      "from": "log",
+      "id": "log-conflict",
+      "label": "consume per SKU",
+      "to": "conflict",
+      "variant": "dashed"
+    },
+    {
+      "from": "conflict",
+      "id": "conflict-stock",
+      "label": "merge or flag conflict",
+      "to": "stockdb"
+    },
+    {
+      "from": "orders",
+      "id": "orders-guard",
+      "label": "check + reserve stock",
+      "to": "guard"
+    },
+    {
+      "from": "guard",
+      "id": "guard-stock",
+      "label": "atomic conditional decrement",
+      "to": "stockdb"
+    },
+    {
+      "from": "stockdb",
+      "id": "stock-orders",
+      "label": "availability view",
+      "to": "orders",
+      "variant": "dashed"
+    },
+    {
+      "from": "recon",
+      "id": "recon-stock",
+      "label": "compare + correction events",
+      "to": "stockdb",
+      "variant": "dashed"
+    },
+    {
+      "from": "conflict",
+      "id": "conflict-monitor",
+      "label": "conflict + lag alerts",
+      "to": "monitor",
+      "variant": "dashed"
+    }
+  ],
+  "diagram_type": "architecture",
+  "layout": {
+    "mode": "auto"
+  },
+  "meta": {
+    "output": ".archify/build/scenario-inventory-sync-conflicts/architecture.html",
+    "quality_profile": "showcase",
+    "title": "Inventory That Disagrees with Itself in Three Warehouses"
+  },
+  "schema_version": 1
+}

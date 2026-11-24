@@ -1,0 +1,172 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "layout": {
+    "mode": "auto"
+  },
+  "meta": {
+    "title": "Frontend News Feed \u2014 Components + Normalized Cache",
+    "output": ".archify/build/frontend-news-feed/architecture.html",
+    "quality_profile": "showcase"
+  },
+  "components": [
+    {
+      "id": "feedpage",
+      "type": "frontend",
+      "label": "FeedPage",
+      "sublabel": "page root"
+    },
+    {
+      "id": "composer",
+      "type": "frontend",
+      "label": "PostComposer",
+      "sublabel": "create post"
+    },
+    {
+      "id": "pill",
+      "type": "frontend",
+      "label": "NewPostsPill",
+      "sublabel": "new posts arrived"
+    },
+    {
+      "id": "list",
+      "type": "frontend",
+      "label": "VirtualizedFeedList",
+      "sublabel": "bounded DOM \u00b7 infinite scroll"
+    },
+    {
+      "id": "postcard",
+      "type": "frontend",
+      "label": "PostCard",
+      "sublabel": "memoized \u00b7 reads by post id"
+    },
+    {
+      "id": "media",
+      "type": "frontend",
+      "label": "MediaGrid / VideoPlayer"
+    },
+    {
+      "id": "actions",
+      "type": "frontend",
+      "label": "ActionBar",
+      "sublabel": "like \u00b7 comment \u00b7 share"
+    },
+    {
+      "id": "comments",
+      "type": "frontend",
+      "label": "CommentPreview"
+    },
+    {
+      "id": "sentinel",
+      "type": "frontend",
+      "label": "Sentinel",
+      "sublabel": "load more when visible"
+    },
+    {
+      "id": "store",
+      "type": "database",
+      "label": "Normalized Cache",
+      "sublabel": "posts, users, comments by id"
+    },
+    {
+      "id": "datalayer",
+      "type": "backend",
+      "label": "Data Layer",
+      "sublabel": "fetchFeed \u00b7 mutations \u00b7 pagination"
+    },
+    {
+      "id": "api",
+      "type": "backend",
+      "label": "Feed API",
+      "sublabel": "cursor pagination"
+    }
+  ],
+  "connections": [
+    {
+      "id": "fp-comp",
+      "from": "feedpage",
+      "to": "composer"
+    },
+    {
+      "id": "fp-pill",
+      "from": "feedpage",
+      "to": "pill"
+    },
+    {
+      "id": "fp-list",
+      "from": "feedpage",
+      "to": "list"
+    },
+    {
+      "id": "list-post",
+      "from": "list",
+      "to": "postcard",
+      "label": "renders post ids"
+    },
+    {
+      "id": "list-sent",
+      "from": "list",
+      "to": "sentinel"
+    },
+    {
+      "id": "post-media",
+      "from": "postcard",
+      "to": "media"
+    },
+    {
+      "id": "post-act",
+      "from": "postcard",
+      "to": "actions"
+    },
+    {
+      "id": "post-cmt",
+      "from": "postcard",
+      "to": "comments"
+    },
+    {
+      "id": "store-list",
+      "from": "store",
+      "to": "list",
+      "label": "entities by id"
+    },
+    {
+      "id": "dl-store",
+      "from": "datalayer",
+      "to": "store",
+      "label": "writes pages + mutation results"
+    },
+    {
+      "id": "dl-api",
+      "from": "datalayer",
+      "to": "api",
+      "label": "fetchFeed (cursor)",
+      "variant": "emphasis"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Component tree",
+      "items": [
+        "FeedPage composes composer, new-posts pill and the virtualized list",
+        "PostCard is memoized and receives only a post id, reading its data from the store"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Normalized cache",
+      "items": [
+        "Posts, users and comments stored once, by id \u2014 updating one post re-renders one card",
+        "The data layer owns pagination and mutations; components never call the API directly"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Loading more",
+      "items": [
+        "A sentinel at the list end triggers the next cursor page when it scrolls into view",
+        "First page is server-rendered; further pages are fetched on the client"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,186 @@
+{
+  "cards": [
+    {
+      "dot": "cyan",
+      "items": [
+        "Two regions, cross-region replication with measurable lag \u2014 RPO 0 is a cost decision, not a slogan",
+        "MirrorMaker 2 replicates topics and translates consumer offsets for failover"
+      ],
+      "title": "Replication"
+    },
+    {
+      "dot": "emerald",
+      "items": [
+        "Global dedup on event_id makes processing in both regions safe",
+        "Fencing and a single-writer rule prevent split-brain double effects"
+      ],
+      "title": "Correctness"
+    },
+    {
+      "dot": "rose",
+      "items": [
+        "Failover is a runbook: detect, decide, fence, shift traffic, resume consumers",
+        "At-least-once delivery plus idempotent writes = exactly-once effects, in any region"
+      ],
+      "title": "Failover"
+    }
+  ],
+  "components": [
+    {
+      "id": "producers",
+      "label": "Producers (Both Regions)",
+      "sublabel": "apps, devices, services",
+      "type": "external"
+    },
+    {
+      "id": "dns",
+      "label": "Global Traffic Manager",
+      "sublabel": "health-based routing, failover shift",
+      "type": "cloud"
+    },
+    {
+      "id": "ingest-a",
+      "label": "Ingestion \u2014 Region A",
+      "sublabel": "validate + produce locally",
+      "type": "backend"
+    },
+    {
+      "id": "kafka-a",
+      "label": "Kafka \u2014 Region A (Primary)",
+      "sublabel": "source topics, RF3",
+      "type": "messagebus"
+    },
+    {
+      "id": "mm2",
+      "label": "MirrorMaker 2",
+      "sublabel": "replication + offset translation",
+      "type": "messagebus"
+    },
+    {
+      "id": "kafka-b",
+      "label": "Kafka \u2014 Region B (Standby)",
+      "sublabel": "replica topics, checkpointed offsets",
+      "type": "messagebus"
+    },
+    {
+      "id": "ingest-b",
+      "label": "Ingestion \u2014 Region B",
+      "sublabel": "fenced until promoted",
+      "type": "backend"
+    },
+    {
+      "id": "proc",
+      "label": "Stream Processing",
+      "sublabel": "active region, checkpointed state",
+      "type": "backend"
+    },
+    {
+      "id": "dedup",
+      "label": "Global Dedup Store",
+      "sublabel": "event_id registry, cross-region",
+      "type": "database"
+    },
+    {
+      "id": "store",
+      "label": "Storage & Warehouse",
+      "sublabel": "replicated, residency-pinned data",
+      "type": "database"
+    },
+    {
+      "id": "consumers",
+      "label": "Downstream Consumers",
+      "sublabel": "alerts, billing, analytics",
+      "type": "external"
+    },
+    {
+      "id": "monitor",
+      "label": "Monitoring & Runbook",
+      "sublabel": "replication lag, failover drills",
+      "type": "cloud"
+    }
+  ],
+  "connections": [
+    {
+      "from": "producers",
+      "id": "prod-dns",
+      "label": "HTTPS / produce",
+      "to": "dns",
+      "variant": "dashed"
+    },
+    {
+      "from": "dns",
+      "id": "dns-inga",
+      "label": "route to healthy region",
+      "to": "ingest-a"
+    },
+    {
+      "from": "ingest-a",
+      "id": "inga-kafkaa",
+      "label": "produce events",
+      "to": "kafka-a"
+    },
+    {
+      "from": "kafka-a",
+      "id": "kafkaa-mm2",
+      "label": "replicate (async)",
+      "to": "mm2",
+      "variant": "dashed"
+    },
+    {
+      "from": "mm2",
+      "id": "mm2-kafkab",
+      "label": "replica topics + offsets",
+      "to": "kafka-b",
+      "variant": "dashed"
+    },
+    {
+      "from": "ingest-b",
+      "id": "ingb-kafkab",
+      "label": "produce after promotion",
+      "to": "kafka-b"
+    },
+    {
+      "from": "kafka-a",
+      "id": "kafkaa-proc",
+      "label": "consume (async)",
+      "to": "proc",
+      "variant": "dashed"
+    },
+    {
+      "from": "proc",
+      "id": "proc-dedup",
+      "label": "check event_id",
+      "to": "dedup",
+      "variant": "dashed"
+    },
+    {
+      "from": "proc",
+      "id": "proc-store",
+      "label": "idempotent writes",
+      "to": "store"
+    },
+    {
+      "from": "store",
+      "id": "store-cons",
+      "label": "reads / feeds",
+      "to": "consumers"
+    },
+    {
+      "from": "mm2",
+      "id": "mm2-monitor",
+      "label": "replication lag",
+      "to": "monitor",
+      "variant": "dashed"
+    }
+  ],
+  "diagram_type": "architecture",
+  "layout": {
+    "mode": "auto"
+  },
+  "meta": {
+    "output": ".archify/build/scenario-multi-region-dr/architecture.html",
+    "quality_profile": "showcase",
+    "title": "Multi-Region Event Pipeline \u2014 RPO 0, RTO 15 Minutes"
+  },
+  "schema_version": 1
+}

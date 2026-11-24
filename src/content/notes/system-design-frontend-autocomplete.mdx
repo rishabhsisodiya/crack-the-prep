@@ -10,6 +10,7 @@ description: "Designing a reusable autocomplete/typeahead component — componen
 
 import Callout from '../../components/Callout.astro';
 import Mermaid from '../../components/Mermaid.astro';
+import ArchDiagram from '../../components/ArchDiagram.astro';
 
 Part of the [system design](/prep/system-design) series. Uses the [frontend framework](/prep/system-design/frontend-system-design). The backend is [Search Autocomplete](/prep/system-design/search-autocomplete); a working implementation is in [Machine Coding — Autocomplete](/prep/machine-coding/autocomplete).
 
@@ -49,7 +50,8 @@ Keep the network out of the component's internals by accepting `fetchSuggestions
 
 ## 3. Architecture and data flow
 
-<Mermaid caption="Keystrokes are debounced, served from cache when possible, and stale responses are discarded" code={`flowchart LR
+<ArchDiagram src="frontend-autocomplete/architecture" caption="Keystrokes are debounced, served from cache when possible, and stale responses are discarded">
+<Mermaid code={`flowchart LR
   IN[Input onChange] --> DB[Debounce ~200ms]
   DB --> C{In cache?}
   C -->|yes| R[Render results]
@@ -59,6 +61,7 @@ Keep the network out of the component's internals by accepting `fetchSuggestions
   CHK -->|yes| W[Write cache] --> R
   CHK -->|no| X[Discard]
 `} />
+</ArchDiagram>
 
 State: `query`, `results`, `status` (`idle | loading | success | error`), `activeIndex`, `isOpen`.
 

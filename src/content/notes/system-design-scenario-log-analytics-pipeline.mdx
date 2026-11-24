@@ -1,0 +1,287 @@
+---
+title: "Scenario — Ingesting 2 TB of Logs a Day and Making Them Searchable"
+track: "system-design"
+kind: "notes"
+order: 70
+slug: "scenario-log-analytics-pipeline"
+updated: 2026-11-24
+description: "A scenario-based interview problem: ingest 2 TB/day of application logs from 500 services, make the last 7 days searchable in under 2 seconds, and control cost with hot/warm/cold tiers — without falling over during incident bursts."
+---
+
+import Callout from '../../components/Callout.astro';
+import ArchDiagram from '../../components/ArchDiagram.astro';
+
+Part of the [system design](/prep/system-design) series. This is a **scenario** page: you get the problem the way an interviewer would state it, then a full worked solution. **Level 2 — Senior engineer.**
+
+> **Original practice scenario** — written for interview preparation; not a question from any specific company's interview.
+
+## 1. The problem statement
+
+Here is how the interviewer puts it. Read it the way you would in the room — nothing in this section is the solution.
+
+> "We run about **500 services**. Together they produce roughly **2 TB of application logs a day** — request logs, errors, background-job output, the lot. Engineers debug production incidents by searching those logs: 'show me every error from the payments service in the last hour containing this request ID.'
+>
+> The search has to be fast — **under 2 seconds** for queries over the **last 7 days** of logs. Older logs still matter for post-mortems and audits, but nobody expects them to be instant.
+>
+> Storage and the search cluster are our fastest-growing infrastructure cost, so we need a real **retention and tiering policy**, not 'keep everything forever on the fastest disks.'
+>
+> One more thing: log volume is not steady. During a major incident, error and retry logs can **spike several-fold** — and that is exactly when every engineer on the bridge is hammering search. The system must not fall over, and must not silently lose logs, at the worst possible moment.
+>
+> Design the log ingestion, indexing, search and storage system."
+
+**Functional requirements**
+
+- Ingest application logs from ~500 services at ~2 TB/day, continuously.
+- Make the last 7 days of logs full-text searchable in under 2 seconds.
+- Keep older logs retrievable under a defined retention policy (post-mortems, audits).
+- Survive incident bursts — several-fold volume spikes — without the search path collapsing.
+
+**Non-functional requirements**
+
+- No silent data loss in normal operation: a host or agent restart must not lose buffered logs.
+- Search stays usable during an incident burst, even if indexing freshness degrades.
+- Cost is a first-class constraint: hot storage is expensive, so what lives where, and for how long, must be deliberate.
+- Any log dropping or sampling under overload must be explicit, counted and visible — never silent.
+- Duplicates from agent retries must not flood search results.
+
+## 2. Clarifying questions to ask first
+
+Ask these before drawing anything. Each one changes the design.
+
+| Question | Why it matters |
+|---|---|
+| Are logs structured (JSON with service, level, timestamp, request ID) or free text? | Structured logs can be parsed once at the edge and queried by field. Free text forces heavier parsing in the indexing pipeline and weaker, slower queries. |
+| What does the &lt;2s promise actually cover — a simple term search, or aggregations and dashboards too? | A term search over 7 days and a "count errors by service over 7 days" aggregation have very different shard and hardware implications. Pin the SLA to the common query shapes. |
+| How long must logs be retained in total — 30 days, 90 days, a year? | That is the single biggest cost input. 2 TB/day × 30 days and × 365 days are different businesses. Compliance or audit rules often set this floor. |
+| How fresh must search be — seconds behind ingest, or is a minute acceptable? | Near-real-time indexing (refresh every second) costs cluster CPU. A 30–60 second freshness target is dramatically cheaper and usually fine for debugging. |
+| What is the burst profile — 3x for 30 minutes, or 10x for hours? | That sizes the buffer. Kafka retention and disk headroom for a 3x/30-minute spike are modest; a sustained 10x changes the indexing fleet size. |
+| Which logs may never be dropped — errors only, or audit/security logs too? | The drop policy under overload needs a priority order agreed in advance. Deciding it mid-incident is how audit logs get sampled away. |
+| Are there multi-line logs (stack traces) and how are they grouped? | A stack trace split into 50 separate documents destroys search usefulness. The shipper needs a grouping rule, and that rule belongs at the edge. |
+
+<Callout type="tip">
+The single highest-value clarification here is total retention plus the drop-priority order. Retention sets the cost curve, and the priority order — agreed calmly, before any incident — is what lets you shed load honestly under burst instead of losing whatever happens to be in the queue.
+</Callout>
+
+## 3. The solution, in plain language first
+
+The simple version: every host runs a small shipper agent that tails the log files and forwards batches to a durable buffer (Kafka). Indexing workers read from Kafka, parse and enrich each log line, and bulk-index it into a search cluster. The cluster keeps the last 7 days on fast disks (the hot tier), moves older indices to cheaper disks (warm), and snapshots the oldest data to object storage (cold) before deleting it from the cluster. Engineers query through a search API that fans out to hot and warm tiers.
+
+Why a buffer in the middle? Because logs arrive at the speed of the incident, not the speed of your indexer. Kafka decouples the two: a burst fills the buffer and indexing catches up afterwards, instead of the burst knocking the cluster over. That decoupling — plus honest tiering — is the whole design. Everything else is sizing and policy.
+
+## 4. Architecture
+
+<ArchDiagram src="scenario-log-analytics-pipeline/architecture" caption="Log analytics pipeline architecture" />
+
+**Component by component**
+
+- **Services (500).** Applications write logs to local files or stdout. Prefer structured JSON with `timestamp`, `service`, `level`, `request_id`/`trace_id` and `message`. The design works with free text too, but parsing cost and query quality both suffer — say so.
+- **Log shipper agents (Fluent Bit / Filebeat-style).** One lightweight agent per host. It tails files, groups multi-line stack traces, adds host/service metadata, buffers to local disk when the network or Kafka is unavailable, and ships in batches with retries. The agent stamps each batch — and ideally each event — with a stable ID at read time, so a retry after a crash does not create a second, different identity for the same line.
+- **Kafka buffer.** The shock absorber. Topics partitioned by service (or service group), retention of a few days — long enough to replay after an indexing bug or a cluster outage, short enough to afford. During a burst, producers keep writing and consumers fall behind; lag is the visible symptom, not data loss.
+- **Indexing / enrichment workers.** Stateless consumers that parse fields, normalise timestamps to event time, drop or route malformed lines, enrich with service metadata, deduplicate on the event ID, and build bulk indexing requests. They scale horizontally with Kafka partitions.
+- **Search cluster — hot tier (OpenSearch / Elasticsearch-style).** SSD-backed data nodes holding the last 7 days. This is where the &lt;2s promise lives: enough replicas for query throughput and node-failure safety, shards sized for fast search (see §7–§8).
+- **Warm tier.** Cheaper, denser disks (HDD or lower-performance SSD), fewer or no replicas, holding roughly days 8–30. Searchable, but seconds-to-tens-of-seconds is acceptable here. Indices are typically made read-only and force-merged to fewer segments to cut heap and storage.
+- **Cold / object storage archive.** Snapshots in S3/GCS-style object storage for data beyond the warm window, up to total retention. Not directly searchable at speed — restoring a snapshot back into a cluster is the access path, and that trade is stated honestly to users.
+- **Search UI / API.** The query path engineers actually touch. It routes recent queries to hot, wider date ranges to hot + warm, enforces timeouts and result limits, and protects the cluster from one runaway query (see §5).
+- **Monitoring.** A separate, small observability stack watching the pipeline itself — ingest rate, Kafka lag, indexing rate and rejections, query latency — deliberately not dependent on the log cluster it monitors (see §11).
+
+## 5. End-to-end data flow
+
+1. A service writes a log line. The shipper tails it, groups multi-line events, attaches `service`, `host`, `level` and a stable event ID, and appends it to its local disk buffer.
+2. The shipper ships a batch to Kafka and only advances its file offset once Kafka acks. A crashed agent restarts from the last acked offset — lines may be re-sent (duplicates, handled in step 4), but not skipped.
+3. Indexing workers consume from Kafka in parallel. Each event is parsed, its timestamp normalised, and malformed lines routed to a dead-letter topic with the raw payload preserved.
+4. Each event is checked for duplication on its event ID (see §9) and accumulated into a bulk request — hundreds to thousands of documents per request, because one-document-at-a-time indexing cannot keep up with 2 TB/day.
+5. The bulk request lands in the current hot-tier index for that day/service group. The document becomes searchable after the next index refresh (typically ~1s by default; tuning this is a freshness-vs-cost lever, see §6).
+6. An engineer searches. The API validates the time range, fans the query out to the relevant hot (and, for older ranges, warm) shards in parallel, merges results, and returns the first page — with timeouts and a hard cap so a bad query degrades to partial results plus a warning, not a cluster-wide stall.
+7. In the background, index lifecycle management rolls indices over, migrates them hot → warm as they age, snapshots them to object storage, and finally deletes them at the end of retention (see §8).
+
+## 6. Technology choices, and why
+
+| Decision | Choice | Why | Alternative considered |
+|---|---|---|---|
+| Shipper agent | Fluent Bit (or Filebeat) | Tiny footprint per host across hundreds of machines, disk buffering, multi-line handling, backpressure-aware output | Shipping from the app directly over HTTP — couples app deploys to logging, loses the local buffer exactly when the host is in trouble |
+| Buffer / queue | Kafka | Durable, replayable, absorbs multi-hour bursts, consumer groups let indexing scale and re-run independently | Direct shipper → cluster indexing — the common small-scale setup, and the first thing to fall over in an incident burst; a managed queue (Kinesis-style) is a valid equivalent |
+| Indexing pipeline | Stateless workers (or Logstash / a stream processor) consuming Kafka | Parse/enrich/dedup scales with partitions; a bad parser version can be fixed and the buffer replayed | Parsing inside the cluster (ingest pipelines) — convenient, but parse CPU then competes with search CPU on the same nodes |
+| Search cluster | OpenSearch / Elasticsearch-style inverted-index cluster | Purpose-built for full-text log search: inverted index, fielded queries, aggregations, mature ILM/tiering | A warehouse or ClickHouse-style column store — excellent for structured analytics over logs, weaker for ad-hoc full-text debugging search; Postgres full-text search is the right answer at 1/100th of this volume, not here |
+| Cold archive | Object storage snapshots (+ optionally Parquet exports) | An order of magnitude cheaper per GB than cluster disks; snapshots restore directly into the cluster | Keeping everything in the cluster on warm nodes forever — simple, and the cost curve never flattens |
+
+**Batch vs streaming.** Ingestion and indexing here are streaming — logs are only useful for a live incident if they are searchable within seconds to a minute. But the lifecycle around them is batch-shaped: rollover, force-merge, tier migration, snapshotting and deletion are all scheduled, policy-driven batch operations, and that is fine, because none of them sits on the query path. A purely batch design (ship files hourly, index in bulk) would be cheaper per GB and is a legitimate answer for audit-only logs — it fails this problem's core use case, which is searching during an incident that is happening now.
+
+## 7. Partitioning and parallelism
+
+- **Kafka partitioning by service** (hash of `service` name): all logs for one service stay ordered on one partition, indexing workers scale up to the partition count, and a single noisy service can be isolated, throttled or re-routed without touching the other 499.
+- **Index sharding is the search-side equivalent.** An inverted index is split into shards; each shard is a self-contained Lucene index, and a query fans out to all shards covering the time range and merges results. Too few, huge shards make queries slow and recovery painful; too many tiny shards waste heap on per-shard overhead and slow the fan-out.
+- **Shard sizing rule of thumb:** aim for roughly **10–50 GB per shard** for log data. At 2 TB/day raw, expect indexed size in the same order of magnitude (inverted index plus stored fields, partially offset by compression), so a daily index lands in the dozens-to-low-hundreds of shards. Roll over by size or time — whichever comes first — rather than blindly creating one index per service per day: 500 services × daily indices would create a shard-count explosion that crushes cluster state and heap.
+- **Group low-volume services** into shared indices (partitioned logically by the `service` field) and give only the handful of very high-volume services dedicated indices. This is the standard escape from the per-service index trap.
+- **Parallelism on the write path:** indexing workers scale with Kafka partitions; bulk request size and per-node indexing threads are tuned so the cluster's indexing rate has headroom over the average ingest rate — that headroom is what drains burst lag afterwards.
+- **Hot service problem:** one service in an error loop can dominate a partition, an index and a shard set. Mitigate with per-service quotas at the shipper/Kafka layer and, if needed, a dedicated topic and index for the offender — name it, and isolate rather than letting it starve everyone else.
+
+## 8. Storage strategy
+
+- **Hot tier — days 0–7:** SSD, full replica (typically 1 replica = 2 copies), on the fastest nodes. This tier alone carries the &lt;2s SLA, so it is sized generously and kept lean: 7 days × ~2 TB/day is ~14 TB of source logs before index overhead and replicas — the honest starting number for the cost conversation.
+- **Warm tier — roughly days 8–30:** cheaper, denser nodes; indices set read-only, force-merged down to few segments, replicas reduced or removed where the risk is accepted. Search still works, slower. This is where post-mortem queries for last month's incident live.
+- **Cold tier — day 31 to end of retention:** snapshots in object storage, deleted from the cluster. Access means restoring a snapshot (minutes to hours, stated up front). If compliance needs raw-log retention beyond search retention, export raw logs to object storage in a compressed columnar or gzipped form in parallel — raw archive and searchable archive are different products with different prices.
+- **Index lifecycle management (ILM) automates all of it:** rollover (by size/age) → warm migration after 7 days → snapshot → delete from warm after ~30 days → snapshot expiry at total retention (for example 90 days or 1 year, per policy). No human runs these steps; a policy that needs a human will eventually not happen.
+- **What not to index:** the cheapest GB is the one never indexed. High-cardinality or never-searched fields (full request bodies, huge headers) can be stored but not indexed, or dropped at the indexing worker by policy. Field discipline at ingest is a permanent cost saving; fixing it later means reindexing.
+
+## 9. Deduplication and idempotency, with a worked example
+
+Delivery here is **at-least-once** at every hop: shippers retry after crashes, Kafka consumers rebalance and replay. So the same log line can legitimately arrive twice. Unlike a payments ledger, a duplicated log line is an annoyance rather than a financial error — but during an incident, a wall of duplicated errors actively misleads the engineers reading them, so dedup is worth doing properly.
+
+The defence is a stable, deterministic document ID. If the document ID is derived from the content's identity — service + source file + offset, or a hash of the event's stable fields — then re-indexing the same line targets the same document, and the second write is an overwrite of identical content rather than a second document:
+
+```python
+# Indexing worker: deterministic document ID makes re-indexing idempotent.
+import hashlib
+
+def document_id(event) -> str:
+    # Stable identity assigned at the source: host + file + byte offset of the
+    # line's first byte. A shipper retry re-reads the same line with the
+    # same identity — it never mints a new one.
+    raw = f"{event.host}|{event.source_file}|{event.file_offset}"
+    return hashlib.sha256(raw.encode()).hexdigest()
+
+def index_batch(events, search_client):
+    actions = [
+        {
+            "_id": document_id(e),          # same line -> same document
+            "_index": target_index(e),      # e.g. logs-2026.11.24 (hot)
+            "_source": to_document(e),
+        }
+        for e in events
+    ]
+    # Bulk index: a retried batch overwrites identical documents in place.
+    # No duplicate documents, no double-counted errors in search results.
+    search_client.bulk(actions)
+    # Commit the Kafka offset only after the bulk request succeeds.
+```
+
+The database-style equivalent, for any relational side store (for example a table of parsed error fingerprints), is the same conditional-write shape:
+
+```sql
+-- Idempotent insert: the second delivery of the same log event is a no-op.
+INSERT INTO error_fingerprints (event_id, service, fingerprint, first_seen)
+VALUES ($1, $2, $3, $4)
+ON CONFLICT (event_id) DO NOTHING;
+```
+
+Two rules make this work. First, the identity is assigned **once, at the source** — if the shipper generates a fresh random ID on every retry, dedup is blind and duplicates sail through. Second, the Kafka offset is committed **after** the bulk index succeeds, so a worker crash mid-batch causes a redelivery (absorbed by the deterministic ID) rather than a silent gap.
+
+## 10. Retry, failure handling, checkpointing and recovery
+
+- **Shipper retry and local buffering:** exponential backoff with jitter; the on-disk buffer is the checkpoint — file offsets advance only on Kafka ack. A host under stress sheds logging load last, not first: the agent gets a strict CPU/memory cap so it can never starve the service it observes.
+- **Kafka unavailable:** shippers buffer locally up to a configured disk cap. What happens when the cap is hit is a policy decision made in advance (see §14) — drop the lowest-priority logs first, count every drop, and raise an alert from outside the log pipeline itself.
+- **Indexing worker crash:** it restarts and re-consumes from the last committed offset. Deterministic document IDs (§9) make the replay safe. Poison lines (unparseable, oversized) go to a dead-letter topic after a few attempts, with an alert on DLQ rate — one bad line must never stall a partition.
+- **Cluster node loss:** replicas take over for search; shard replicas are re-created on surviving nodes. During reallocation, indexing and search both slow — another reason the Kafka buffer, not the cluster, is the burst absorber.
+- **Bulk indexing rejections:** the cluster returns `429`-style rejections when its queues are full. Workers must back off and retry, and Kafka lag grows — that is backpressure working as designed, not a failure. Treating rejections as drops is the silent-loss bug to avoid.
+- **Recovery from a bad parser/index mapping:** fix the worker, reset its consumer group, and replay Kafka retention. This is the payoff for keeping a few days of buffer: most indexing bugs become re-runs, not data loss.
+
+## 11. Monitoring and observability
+
+- **Ingest rate (GB/day and events/sec) per service** — a sudden jump is either an incident or a runaway logger; both need a human to know.
+- **Kafka consumer lag, in time** — how many minutes behind indexing is. The primary health metric during a burst; alert on lag age crossing the freshness target.
+- **Indexing rate, bulk rejection rate and DLQ rate** — rejections rising means the cluster, not the workers, is the bottleneck.
+- **Query latency percentiles (p50/p95/p99) and query timeout rate on the hot tier** — measured against the &lt;2s promise, split by tier so warm slowness does not hide hot slowness.
+- **Drop/sampling counters, by service and level** — if anything was shed under load, it is a chart and an alert, not a rumour.
+- **Cluster health:** shard count and heap per node, disk watermark headroom on hot nodes, ILM errors (a failed tier migration quietly fills the hot tier until disks hit watermarks and indexing blocks — this specific failure deserves its own alert).
+- The pipeline's own alerts must not depend on the pipeline: if the log cluster is down, the "log cluster is down" alert cannot be a log in the log cluster. A small, separate metrics/alerting path is not optional.
+
+## 12. Security
+
+- **Logs contain secrets — design as if they do.** Passwords, tokens and personal data end up in logs no matter what the style guide says. Mitigate at the indexing worker (and ideally at the shipper) with redaction patterns for known secret shapes, and treat redaction as defence in depth, not a guarantee.
+- **Access control by sensitivity:** not every engineer needs every service's logs. Role-based access at the index-pattern level (for example, payments and auth logs restricted), enforced in the search API/cluster security layer, with queries themselves audit-logged.
+- **Encryption in transit** (shipper → Kafka → workers → cluster) and **at rest** on cluster disks and in object-storage snapshots.
+- **Tenant/service isolation on write:** a compromised or buggy service can flood or forge its own logs, but credentials are scoped per service so it cannot write into another service's indices.
+- **Retention is also a security control:** the deletion end of the ILM policy actually deletes — expired logs lingering in forgotten snapshots are a compliance liability, so snapshot expiry is part of the policy, not housekeeping.
+
+## 13. Scalability, the 10x question, and cost
+
+**At 10x (20 TB/day):** the shape survives, the numbers and two assumptions do not. Kafka and the indexing workers scale by adding partitions and nodes — that part is linear and boring, which is the point. What breaks first is the hot tier: 7 hot days at 20 TB/day is ~140 TB of source logs on SSD with replicas, and query fan-out across that many shards will not hold &lt;2s without work. Honest 10x answers: shorten the hot window for low-value services (7 days for errors, 48 hours for debug chatter), split hot indices by service criticality, pre-aggregate the dashboard queries instead of scanning raw logs, and push more volume straight to warm/cold with search-on-restore. At some point the real answer is that not all logs deserve the same product — tiering by log value, not just by age.
+
+**Cost math, worked.** Start from the input: 2 TB/day.
+
+- **Hot:** 7 days × 2 TB/day ≈ 14 TB of logs. With index overhead and 1 replica, plan on roughly 2–3x that in physical SSD — call it ~30–40 TB of the most expensive storage you own. Every extra hot day costs ~2 TB × overhead × replica factor. That sentence is the retention negotiation.
+- **Warm:** ~23 more days ≈ 46 TB of logs, but on cheap dense disks, force-merged, with reduced replicas — a fraction of the hot cost per GB.
+- **Cold:** the remainder of retention (say to 90 days: ~120 TB more) as compressed snapshots in object storage — the cheapest tier by an order of magnitude, priced per GB-month with restore time as the trade.
+- **The levers, in order of impact:** (1) hot retention days, (2) what fraction of logs is indexed at all (sampling debug logs at ingest can cut volume before any storage is bought), (3) replica count per tier, (4) field discipline — not indexing unsearched fields, (5) compression and force-merge on warm. Component brand names are not a cost strategy; these five numbers are.
+
+## 14. Trade-offs, stated honestly
+
+| Choice | You gain | You pay |
+|---|---|---|
+| Kafka buffer between shippers and cluster | Burst absorption, replay after indexing bugs, decoupled scaling | Another system to run; freshness is now bounded by consumer lag, which must be monitored honestly |
+| 7 days hot / ~30 warm / snapshots cold | The &lt;2s promise is affordable; cost curve flattens with age | Older searches are slower or need a restore; engineers must learn which tier a query hits |
+| Deterministic-ID dedup | Retries and replays do not duplicate search results | Identity must be assigned correctly at the source across 500 services; a service that logs the same line from two hosts without stable offsets can still collide or duplicate |
+| Sampling / dropping low-priority logs under extreme load | The system — and error logs — survive the worst incident spikes | Some debug logs are genuinely gone; the policy must be pre-agreed, counted and disclosed, or trust in the system dies |
+
+<Callout type="warn">
+Say this sentence in the interview: "Under a big enough burst, this design chooses explicitly: error and audit logs are protected, indexing freshness degrades first, and low-value debug logs are sampled or dropped — counted, alerted, and disclosed. What it never does is drop logs silently and randomly, which is what an unbuffered design does by accident." Pretending nothing is ever dropped is the least credible answer in this problem.
+</Callout>
+
+**Delivery semantics, precisely.** At-most-once (ship and forget) would lose logs on every agent restart and network blip — unacceptable for debugging and audit. This design is **at-least-once** from shipper to Kafka to indexer, with idempotent indexing (deterministic document IDs) producing **exactly-once effects in the search index** — the same line, indexed twice, is one document. That is not exactly-once *delivery*, and no honest design over a retrying network claims it is: the guarantee that matters to the user — "search results are not polluted by duplicates and lines are not silently lost" — comes from at-least-once delivery plus idempotent writes plus a disclosed drop policy for the overload case, stated as three separate promises rather than one magical one.
+
+## 15. Interviewer follow-up Q&As
+
+1. **"It is 2 a.m., a major incident triples log volume, and search is timing out. What is happening and what do you do?"** — Most likely: indexing is competing with search for the same cluster CPU/disk, and burst lag is growing. Short term: protect the query path — shed or sample low-priority ingest, pause non-essential indexing work, enforce query timeouts and limits. The design lesson to state: the Kafka buffer is what buys you the time to do any of this; without it, the cluster falls over and takes the logs with it.
+2. **"Why not ship logs straight from the agent into the search cluster and skip Kafka?"** — At small scale, that is the right design and you should say so. At 2 TB/day with incident bursts, direct indexing couples ingest rate to cluster health: a burst or a cluster slowdown loses logs or crashes agents. Kafka costs an extra system and buys burst absorption plus replay.
+3. **"An engineer says yesterday's error is missing from search. How do you investigate?"** — Check in order: was it written (service log file), shipped (agent offset and buffer state), buffered (Kafka topic offsets for that service/time), indexed (worker DLQ, bulk rejections, lag at that time), and is it a query problem (time zone, index pattern, tier — is yesterday in hot or already migrated)? Every hop has a counter precisely so this question has an answer.
+4. **"How do you choose shard count?"** — From data volume and the 10–50 GB per shard rule of thumb, rolled over by size or time, with low-volume services grouped into shared indices. Then verify empirically: query latency and heap per shard, not just the arithmetic. Both failure modes — a few giant shards and thousands of tiny ones — are named failure modes, not surprises.
+5. **"A single service starts logging 20x its normal volume in an error loop. What protects the other 499?"** — Per-service partitioning and quotas: the offender fills its own partitions and can be throttled or sampled at the shipper by policy, its lag is isolated, and its indices are separable. Cluster-level disk watermarks are the last-resort protection, and reaching them means the earlier layers failed.
+6. **"How do you keep search under 2 seconds as the hot tier grows?"** — Bound the fan-out: time-based indices mean a 7-day query touches only 7 days of shards; keep shard sizes in range; cache frequent queries at the API; enforce timeouts with partial results; and keep indexing headroom so refresh and merge load do not starve query threads. If it still degrades, the lever is a shorter hot window for low-value services, stated as a product trade, not a tuning trick.
+7. **"Why not just keep 90 days hot? Storage is cheap."** — Do the math out loud: 90 days × 2 TB/day × index overhead × replicas on SSD, plus the node count to serve it, versus snapshots in object storage at a fraction per GB. Storage media is cheap; searchable, replicated, heap-resident hot storage is not. The tiering exists because the query SLA, not the byte, is what costs money.
+8. **"How do duplicates happen in this system, and why should I believe search is not full of them?"** — Shipper retries after a crash re-send from the last acked offset, and consumer rebalances replay batches. Both are absorbed because the document ID is derived from the line's stable source identity, so a re-index overwrites the same document. The residual risk — a source that cannot provide stable identity — is named and monitored via duplicate-rate signals, not waved away.
+9. **"Legal asks for all logs for one service for a specific week, four months ago. Walk me through it."** — Four months is beyond warm, so: locate the snapshots covering that week in object storage, restore the relevant indices into a (possibly temporary) cluster or a segregated node set, run the query/export there, and record the access in the audit log. Set the expectation on time — hours, not seconds — because that is the cold-tier trade the retention policy already made.
+10. **"What is the first thing you would cut if the budget was halved?"** — Hot retention for low-value logs and debug-log sampling at ingest, in that order — both cut volume on the most expensive tier while keeping errors fully retained and searchable. Cutting replicas on hot is the tempting wrong answer: it saves money by spending the failure safety the debugging use case depends on.
+
+## 16. Interview-ready spoken answer
+
+> "First, the requirements I'd pin down: 500 services producing about 2 TB of logs a day, search under 2 seconds over the last 7 days, a defined total retention — I'll assume around 90 days unless compliance says otherwise — and the hard one: volume spikes several-fold during incidents, exactly when search matters most. I'd also pin down which logs may never be dropped, because that decides the overload policy.
+>
+> The bottleneck is not average throughput — it is the burst, and the cost of hot storage. So the architecture decouples ingest from indexing: a lightweight shipper agent on every host tails the log files, buffers to local disk, and ships batches to Kafka, partitioned by service. Indexing workers consume from Kafka, parse and enrich, and bulk-index into a search cluster.
+>
+> The data flow for search: the last 7 days live on a hot SSD tier — that is where the 2-second promise is kept. Index lifecycle management then moves indices to a warm tier on cheaper disks for about a month, snapshots them to object storage as the cold tier, and deletes them at the end of retention. Engineers query through an API that fans out to hot, or hot plus warm for older ranges, with timeouts so one bad query cannot hurt everyone.
+>
+> On reliability and duplicates: delivery is at-least-once at every hop, so I design for it. Shippers only advance offsets on Kafka acks, workers commit offsets only after a successful bulk index, and every document gets a deterministic ID from its source identity, so a retry overwrites the same document instead of duplicating it. Poison lines go to a dead-letter topic rather than stalling a partition.
+>
+> Scaling is adding Kafka partitions and indexing workers — linear and boring — until the hot tier's size and shard fan-out become the limit, which is why shard sizing and grouping low-volume services into shared indices matter. At 10x, I would tier by log value as well as age, not just buy a bigger cluster.
+>
+> The trade-off I'd flag honestly: under an extreme burst, freshness degrades first, and if that is not enough, low-priority debug logs get sampled or dropped under a pre-agreed, counted, disclosed policy — errors and audit logs are protected. And the semantics are at-least-once delivery with idempotent indexing giving exactly-once effects in search results — not exactly-once delivery. The system is designed so that its worst day degrades visibly and by policy, instead of failing silently."
+
+## 17. Mock interview mode
+
+**Five hard follow-ups, with expected answers**
+
+1. **"Your Kafka buffer has 3 days of retention and the search cluster is down for 4. Reconstruct the missing day."** — Expected: you cannot from Kafka — and a senior candidate says so immediately, then goes to the other copies: shipper local buffers (partial, host-dependent) and any raw-log archive in object storage, which is exactly why high-retention raw export exists separately from the search pipeline. The design fix to propose: size Kafka retention and raw archiving against the cluster-recovery time you actually believe in.
+2. **"Search p99 is 8 seconds but p50 is 300ms. Diagnose it."** — Expected: a fan-out or hot-shard problem, not a general slowness — one slow shard, a query shape hitting too many shards (wide date range reaching into warm), a merge/GC stall on one node, or a single tenant's aggregation. Diagnosis path: per-shard query timings, split latency by tier and by query type, check hot nodes for merge and GC pressure.
+3. **"The bill doubled in a quarter but log volume only grew 30%. Where do you look?"** — Expected: indexed volume grew faster than raw volume — a service started logging a huge unindexed-should-be field, cardinality or mapping explosion, hot retention crept up, replicas were raised, or ILM silently failed and warm/cold data is still sitting on hot disks. The method: compare raw GB/day vs indexed GB/day vs physical GB by tier, per service.
+4. **"Defend dropping any logs at all. Isn't the answer just 'scale up'?"** — Expected: scaling has a ceiling set by money and by physics during a correlated incident — every service bursts at once because they share the incident. A pre-agreed priority order with counters is strictly more honest than an unbuffered system that drops arbitrarily under the same load. The candidate should name what is protected (errors, audit) and what is shed (debug/verbose), and who agreed it.
+5. **"An engineer needs a full-text search across the entire 90 days, fast, for a post-mortem. Your tiers say no. Resolve it."** — Expected: this is a requirements conflict, not a tuning problem. Options with prices: restore the needed weeks from snapshots into temporary capacity for the investigation (hours, planned cost), keep a longer warm window for a subset of services, or accept a slower scan over cold exports. The senior move is presenting the priced options and the SLA change each implies, not quietly promising it.
+
+**Common candidate mistakes**
+
+- Shipping agents straight into the cluster with no buffer, then having no answer for the incident burst.
+- One index per service per day — 500 services of shard explosion, unmentioned.
+- Claiming "exactly-once delivery" from Kafka or the cluster.
+- No drop/sampling policy, or a policy that drops silently and at random under load.
+- Quoting storage cost as raw TB only — ignoring index overhead, replicas and tier.
+- Forgetting that the log pipeline's own monitoring cannot live inside the log pipeline.
+
+**What a senior candidate mentions unprompted**
+
+- The burst-during-incident correlation: load and query demand spike together, by causation, not coincidence.
+- Shard sizing (10–50 GB) and grouping low-volume services into shared indices.
+- ILM as an automated policy — rollover, force-merge, tier migration, snapshot, delete — including alerting on ILM failure.
+- Deterministic document IDs as the dedup mechanism, with identity assigned at the source.
+- Secrets in logs: redaction, restricted indices for sensitive services, and audit-logged queries.
+- Cost math in TB × days × overhead × replicas, per tier, with named levers.
+
+**Scoring rubric (out of 10)**
+
+| Score | What it looks like |
+|---|---|
+| 9–10 | Buffered pipeline, correct shard/ILM/tiering design, dedup via deterministic IDs, burst and drop policy stated honestly, delivery semantics precise, cost math worked in numbers |
+| 7–8 | Sound pipeline and tiering, but shard sizing, burst behaviour or the drop policy is hand-wavy |
+| 5–6 | Components named (Kafka, Elasticsearch) but responsibilities vague; retention mentioned without lifecycle or cost numbers |
+| 3–4 | Direct-to-cluster indexing, no buffer, no tiering — the design falls over in the first incident |
+| 0–2 | Claims exactly-once delivery, promises nothing is ever dropped at any load, no retention policy at all |
+
+Sources: [Apache Kafka documentation — design and delivery semantics](https://kafka.apache.org/documentation/) · [OpenSearch documentation — index lifecycle management and UltraWarm/cold storage](https://opensearch.org/docs/latest/) · [Elasticsearch documentation — index lifecycle management and data tiers](https://www.elastic.co/guide/en/elasticsearch/reference/current/index-lifecycle-management.html) · [Fluent Bit documentation — buffering and backpressure](https://docs.fluentbit.io/manual/)

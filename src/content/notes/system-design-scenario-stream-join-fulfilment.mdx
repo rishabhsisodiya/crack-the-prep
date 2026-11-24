@@ -1,0 +1,290 @@
+---
+title: "Scenario — Joining Orders and Payments in a Stream"
+track: "system-design"
+kind: "notes"
+order: 73
+slug: "scenario-stream-join-fulfilment"
+updated: 2026-11-24
+description: "A scenario-based interview problem: a stream-stream join of Kafka orders and payments within a 30-minute window to trigger fulfilment, handling out-of-order and unmatched events."
+---
+
+import Callout from '../../components/Callout.astro';
+import ArchDiagram from '../../components/ArchDiagram.astro';
+
+Part of the [system design](/prep/system-design) series. This is a **scenario** page: you get the problem the way an interviewer would state it, then a full worked solution. **Level 3 — Lead / Architect.**
+
+> **Original practice scenario** — written for interview preparation; not a question from any specific company's interview.
+
+## 1. The problem statement
+
+Here is how the interviewer puts it. Read it the way you would in the room — nothing in this section is the solution.
+
+> "Our checkout produces two event streams on Kafka. When a customer places an order, the order service publishes an **order event**. When the payment is authorised, the payment service publishes a **payment event**. Both carry the same `order_id`.
+>
+> Fulfilment — picking, packing, handing to the carrier — may only start when **both** have arrived: an order that was actually paid for. So we need a service that joins the two streams: when an order and its payment have **both** been seen, and they arrived within **30 minutes** of each other, emit a match and trigger fulfilment.
+>
+> Reality is messier than that sentence. Events arrive **out of order** — the payment regularly shows up before the order, because the two services publish independently. Some orders are **never paid for** — the customer abandons checkout, the card is declined downstream, the session just dies. Some payments arrive with **no matching order** at all. And occasionally a payment turns up **after** the 30-minute window has closed — the money was taken, but as far as the join is concerned, that order already timed out.
+>
+> Design the joining service. It has to run continuously, survive its own crashes and restarts without losing matches or triggering fulfilment twice, and handle the unmatched and late cases explicitly — not silently drop them."
+
+**Functional requirements**
+
+- Consume two Kafka streams — orders and payments — both keyed by `order_id`.
+- When an order and its payment both arrive within a 30-minute window, emit exactly one match (in effect) and trigger fulfilment.
+- Tolerate out-of-order arrival in either direction: payment-before-order is normal traffic, not an error.
+- Expire unmatched orders after the window: an order with no payment must surface as an explicit timeout outcome, not sit in state forever.
+- Route payments with no matching order, and payments arriving after the window closed, to an explicit late/orphan path — refund or manual review — never a silent drop.
+- Survive processor crashes, restarts, and rebalances without losing a match that should have fired or firing fulfilment twice for the same order.
+
+**Non-functional requirements**
+
+- No silent loss: every order and every payment ends in exactly one visible outcome — matched, expired, orphaned, or late — and the counts reconcile.
+- Duplicate deliveries and reprocessing must not double-trigger fulfilment: the business effect happens once per `order_id`.
+- State must stay bounded: the join cannot accumulate unmatched events indefinitely.
+- Recovery after a crash must be automatic and bounded in time — the service cannot replay a week of history to rebuild its join state before it can match again.
+- The join must scale horizontally with order volume, and a single very large customer must not break it.
+
+## 2. Clarifying questions to ask first
+
+Ask these before drawing anything. Each one changes the design.
+
+| Question | Why it matters |
+|---|---|
+| Is the 30-minute window measured in event time (timestamps on the events) or processing/arrival time? | Event time is the honest business rule — "paid within 30 minutes of ordering" — but it makes you depend on producer clocks and watermarks. Arrival time is simpler and wrong when producers are delayed. This choice drives everything downstream. |
+| Are both topics keyed by `order_id`, and do they have the same partition count? | A stream-stream join only works without a shuffle if both sides are co-partitioned: same key, same partition count, same partitioner. If not, your first task is fixing the topics or paying for a repartition. |
+| Can there be more than one payment event per order — retries, partial payments, a failed attempt then a success? | A 1:1 join and a 1:N join are different state shapes. If failed attempts also publish, the join must match on the *successful* payment, not the first one. |
+| What does "trigger fulfilment" actually do — write a row, call an API, publish an event? | That decides where idempotency can live. A downstream API you control can dedup on `order_id`; an external API with no idempotency key forces a much more careful design at the emission point. |
+| How late is too late — is there a grace period beyond the 30 minutes for a slow payment, and what is the business cost of each side of that line? | A longer grace period catches more legitimate slow payments but holds state longer and delays the "unpaid order" signal. The late-payment path (refund vs fulfil-anyway) is a business decision, not a technical one. |
+| What is the event rate, the average event size, and the peak-to-average ratio? | That is the state-store sizing math: window × rate × record size. Without it you cannot say how much state this join holds, and state size is the whole operational problem. |
+| When the join emits a match, do downstream consumers need the *first* signal fast, or only the *final* correct answer? | Early emission gives low latency but can produce updates/retractions as more data arrives. Suppression until the window closes gives one clean final result, 30+ minutes later. Fulfilment usually wants early and once — which forces the idempotency conversation. |
+| What happens today when a payment arrives after timeout — automatic refund, manual review, or fulfil anyway? | You are designing that path, not just the happy join. If nobody can answer, propose refund-plus-review and flag it as an open business decision. |
+
+<Callout type="tip">
+The single highest-value clarification here is co-partitioning: same key, same partition count on both topics. If the two streams are not co-partitioned, no join library will save you — you either repartition one side (extra topic, extra latency, extra state) or the join silently misses matches. Ask it first, and say out loud that a silent miss is worse than a loud failure.
+</Callout>
+
+## 3. The solution, in plain language first
+
+The simple version: one stream processor consumes both topics. For every `order_id` it keeps whichever side arrived first — the order or the payment — in a local state store, stamped with its event time. When the second side arrives and the two event times are within 30 minutes of each other, it emits a match and clears the state. A clock — the watermark — sweeps through the state continuously: anything that has waited past the window plus a grace period without a partner is expired and emitted on the unmatched path. Payments that arrive after their order already expired go down a late-payment path to refund or manual review. The state store is backed by a changelog topic, so a crashed processor rebuilds its in-flight join state by replaying the changelog, not by re-reading both input topics from the beginning of time.
+
+Why a real stream processor (Kafka Streams or Flink) and not two consumers and a database table? Because the join *is* state plus time: keyed state with a TTL, event-time windows, a watermark to decide when waiting is over, and checkpointed recovery. That is precisely the machinery stream processors exist to provide. Hand-rolling it on a database gives you race conditions between the order-writer and the payment-writer, a polling sweeper for expiries, and a recovery story you invented at 2 a.m. Name the hand-rolled version, then explain why you are not building it.
+
+## 4. Architecture
+
+<ArchDiagram src="scenario-stream-join-fulfilment/architecture" caption="Stream join architecture — orders joined with payments" />
+
+**Component by component**
+
+- **Order service.** Publishes an order event on order creation, keyed by `order_id`, carrying the order's event timestamp, customer, line items or a reference to them, and amount. The key is not a detail: keying by `order_id` is what routes every event for one order to the same partition, and therefore to the same join task.
+- **Payment service.** Publishes a payment event on authorisation, keyed by the same `order_id`, carrying its own event timestamp, amount, currency, payment reference, and status. Only successful authorisations should publish to this topic — or, if attempts publish too, the status field is part of the join predicate, not an afterthought.
+- **Orders topic and payments topic.** Kafka topics with the **same partition count** and the same keying. This co-partitioning is a hard precondition for the join (section 7), and it is verified in deployment, not assumed: a config drift that changes one topic's partition count breaks the join silently.
+- **Stream join processor (Kafka Streams or Flink).** The brain. It consumes both topics, maintains windowed keyed state per `order_id`, emits a match when both sides are present within the window, expires unmatched state as the watermark passes, and routes late payments to the late path. It owns no database and calls no synchronous APIs — inputs and outputs are all topics, which is what makes it replayable and recoverable.
+- **State store + changelog topic.** Each processor instance keeps its slice of the join state in a local embedded store (RocksDB in both Kafka Streams and Flink's common setup). Every state change is also written to a changelog topic, so the local store is a cache of the log, not the only copy. Section 8 goes deep here — this is where crash recovery comes from.
+- **Matched output topic.** The join's product: one record per matched `order_id`, carrying both sides' key fields. Publishing the match as a topic (rather than calling fulfilment directly from the processor) decouples the join from fulfilment's availability and gives an auditable, replayable record of every match decision.
+- **Fulfilment service.** Consumes the matched topic and starts fulfilment — **idempotently, on `order_id`** (section 9). It is an ordinary consumer with an at-least-once delivery guarantee, so it must assume the same match can be delivered twice and make the second delivery a no-op.
+- **Expiry / late handler.** Consumes the unmatched and late outputs. Unpaid orders past the window become an explicit expired outcome (release any reservation, mark the order unpaid, feed reporting). Orphan and late payments become refund instructions or manual-review tasks — money was taken with no fulfilment following it, so this path is a finance obligation, not a log line.
+- **Refund / manual review queue.** The durable hand-off to the payments/refund operation and to human review, with the payment reference attached so a refund can be issued without detective work.
+
+## 5. End-to-end data flow
+
+1. **Order first (the common telling).** The order event arrives. The processor looks up `order_id` in its state store: no payment waiting. It stores the order side, stamped with its event time, and moves on. Nothing is emitted.
+2. **Payment second.** The payment event arrives for the same `order_id` — routed to the same task because the key and partitioning match. Lookup finds the waiting order. The processor checks the event-time difference: within 30 minutes, so it emits one match record to the matched topic and deletes the state entry. Fulfilment consumes the match and starts, idempotently.
+3. **Payment first (equally normal).** The payment arrives before the order — the services publish independently, so this is a large minority of traffic, not an anomaly. The processor stores the payment side and waits. When the order arrives, the same lookup, the same window check, the same single match. The join is symmetric; neither side is "the trigger" and the other "the lookup".
+4. **The window check is on event time.** The 30 minutes is measured between the two events' own timestamps, not their arrival times. Two events that arrive seconds apart but are stamped 45 minutes apart do **not** match — the payment was genuinely late relative to the order, whatever the network did. Conversely, a delayed delivery of a payment stamped 10 minutes after the order still matches when it finally arrives, as long as it arrives within the grace period (step 6).
+5. **Unmatched order, timeout.** No payment arrives. The watermark — the processor's event-time clock, roughly "I have seen events up to time T on both inputs" — advances past the order's event time + 30-minute window + grace period. Only then is the order declared unmatched: the processor emits it on the expired output and deletes the state. Declaring expiry on the watermark, not on wall-clock timers per record, is what makes expiry deterministic and replayable.
+6. **The grace period.** The window says how far apart the two event times may be; the grace period says how long *after* the window closes the processor will still accept a late-arriving partner whose event time falls inside the window. Grace absorbs producer delays, retries, and brief consumer lag. Every minute of grace is a minute longer that state is retained and that the expired signal is delayed — it is a tuned trade-off, not a safety blanket (section 14).
+7. **Late payment, after expiry.** A payment arrives whose `order_id` has no state — either the order never existed, or it existed and already expired. These two cases must be distinguished, because the response differs in urgency but not in kind: the money needs a decision. The payment is emitted on the late/orphan path with its payment reference; the handler checks whether an order record exists downstream (expired-unpaid) and routes to refund or manual review. What it must never do is resurrect the join and trigger fulfilment silently — the order may have been cancelled, the stock released, the customer told it failed. Fulfilling it anyway is a business decision a human or an explicit rule makes, not a side effect of a late event.
+8. **Orphan payment, no order ever.** Same path as step 7, and worth saying separately in the interview: a payment with no order at all usually means a bug or a broken upstream flow, so the orphan rate is an operational metric with an alert on it, not just a queue filling quietly.
+9. **Crash mid-join.** The processor dies after storing an order but before its payment arrives. The replacement task restores the state store from the changelog topic (section 10), the waiting order is back in state, and when the payment arrives the match fires normally. The crash is invisible to the outcome — that is the entire point of the changelog.
+
+## 6. Technology choices, and why
+
+| Decision | Choice | Why | Alternative considered |
+|---|---|---|---|
+| Join engine | Kafka Streams or Apache Flink | Both provide keyed windowed state, event-time joins, watermarks/grace, and changelog/checkpoint-based recovery as tested primitives; Kafka Streams wins when the world is already all-Kafka and the join is the whole job, Flink wins when the join sits inside a larger, more complex streaming topology | Hand-rolled consumers + a database table — you re-implement keyed state, expiry sweeping, and recovery yourself, and inherit write races between the two sides |
+| Join key and partitioning | `order_id` on both topics, identical partition counts | Co-partitioning means both sides of one `order_id` land on the same task — the join is a local state lookup, no shuffle, no cross-instance traffic | Joining on differently-partitioned topics forces a repartition of one or both streams first: an extra topic, extra state, extra latency on every event |
+| State store | Embedded RocksDB per task, backed by a changelog topic | Local reads/writes at join speed (no network hop per event), and the changelog makes the local store disposable and rebuildable | A remote database (Postgres/Redis) as join state — a network round trip and a shared bottleneck per event, plus you now own its availability during the join's busiest moment |
+| Match hand-off | A matched output topic, consumed by fulfilment | Decouples join availability from fulfilment availability, gives an auditable record of every match, and makes the fulfilment trigger replayable | Calling the fulfilment API directly from the processor — couples a crash-retry in the processor to a side effect in another system, the hardest place in the design to keep idempotent |
+| Unmatched/late hand-off | Dedicated output topics to an expiry/late handler | Unmatched and late are first-class outcomes with their own consumers, SLAs, and alerts — not a log line inside the join | Dropping unmatched state silently when the window closes — loses the unpaid-order signal and, worse, loses track of taken money on the late-payment side |
+| Emission mode | Early emission of the match, with an idempotent downstream trigger | Fulfilment should start when both sides are known — usually minutes after ordering, not 30+ minutes later when the window closes | Suppression until window end (final result only) — one perfectly clean emission, at the cost of delaying every fulfilment by the full window plus grace; right for analytics aggregates, wrong for starting fulfilment |
+
+**Batch vs streaming.** This problem is streaming by construction: the business event "this order is now paid, start fulfilment" is worth minutes, and a batch join (an hourly SQL merge of the orders and payments tables) would delay every fulfilment by up to the batch interval and still need the same dedup and late-data logic. But batch has one honest role here: **reconciliation**. A daily batch job that joins the full day's orders and payments tables and compares the result against the stream join's outcomes — matched, expired, late — is how you *prove* the streaming join missed nothing. Streaming for the action, batch for the audit. If the two disagree, the batch result is the evidence you debug the stream with, and the idempotent fulfilment trigger is what makes correcting a missed match safe.
+
+
+## 7. Partitioning and parallelism
+
+- **Co-partitioning is the join's precondition.** Both topics are keyed by `order_id` and have the same number of partitions, produced with the same (default Kafka) partitioner. That guarantees that the order and the payment for one `order_id` are consumed by the same processor task, so the join is a lookup in that task's local state store. If the partition counts differ, some pairs land on different tasks and can never see each other — the join does not error, it just silently produces fewer matches. Verify counts in CI/deployment checks; alert on drift.
+- **If the topics are not co-partitioned today,** the processor must repartition one or both streams by `order_id` into internal topics with matching counts before joining (Kafka Streams does this automatically when it detects mismatched partitioning, at the cost of the extra topics and a full copy of the stream). Naming that cost — and preferring to fix the source topics — is the lead-level answer.
+- **Parallelism = partition count.** The join scales by adding tasks up to the number of partitions; each task owns a disjoint set of `order_id`s, so there is no cross-task coordination and scaling is close to linear. Raising the partition count later is possible but reshuffles key ownership, so size it with headroom (section 13).
+- **Ordering within a key is all you get — and all you need.** Kafka guarantees order within a partition, not across partitions and not across topics. The join does not need a global order: it needs both sides of one key in one place, and event-time comparison to decide the window. Do not promise more ordering than that; a payment processed before its order is handled by state, not by ordering.
+- **Hot key problem:** one `order_id` is one order — it cannot be hot by itself. The real skew risk is a broken or malicious producer flooding one key (a retry loop publishing the same payment thousands of times). Mitigate at the source with producer idempotence and rate limits, and in the processor by treating repeat events for an already-matched or already-stored `order_id` as cheap no-ops (section 9), so a flood costs lookups, not state growth.
+
+## 8. Storage strategy
+
+The only storage this design truly owns is the **join state**: the set of half-matches — an order waiting for its payment, or a payment waiting for its order. Everything in this section follows from one question: how big is that set, and how do you get it back after a crash?
+
+**The state store.** Each processor task holds its slice in an embedded RocksDB instance on local disk. Writes are in-place updates keyed by `order_id`; the value is the waiting side's payload (or the minimal subset the match output needs — storing the full order payload when fulfilment only needs IDs and amounts is state you pay for twice, in disk and in changelog bytes). Entries are deleted on match or on expiry, so in steady state the store holds only orders inside their window: it is a sliding buffer, not a growing table — *provided* expiry actually runs, which is why watermark progress is a health metric (section 11).
+
+**Sizing the state, with the math.** State ≈ event rate × window × record size, per side, summed:
+
+- Assume a peak of **2,000 orders/sec** and a similar payment rate, an average stored record of **~500 bytes** (key + waiting side's fields + timestamps + store overhead), and a retention of window + grace = 30 min + 10 min grace = **2,400 seconds**.
+- Orders side: 2,000/sec × 2,400 sec × 500 B ≈ **2.4 GB**. Payments waiting for orders are a minority — say 20% of payments arrive first — so ≈ 0.5 GB. Total live state ≈ **3 GB across all tasks**, divided by the partition count: at 48 partitions, ~60 MB per task. Comfortable for RocksDB on local SSD.
+- Now stress it, because the interviewer will: at 10x volume the same math gives ~30 GB total — still fine sharded, but the *changelog and restore traffic* (below) grows with it. And if grace is stretched from 10 minutes to 2 hours "to be safe", retention becomes 9,000 seconds and state roughly quadruples for zero extra matches that anyone can point to. State size is the price tag attached to every window and grace decision; quote the math when you make them.
+
+**The changelog topic — how state recovery actually works.** RocksDB on a local disk is fast and disposable; it is not the source of truth. In Kafka Streams, every state-store update is also produced to a **changelog topic**: a partitioned Kafka topic (same partitioning as the state, so task *N* owns changelog partition *N*) recording each key's latest value, with deletion tombstones when entries match or expire. In Flink the equivalent mechanism is checkpointed state snapshots to durable storage plus the same principle: local state is a materialisation of a durable log/snapshot, never the only copy. On restart, reassignment, or a rebalance moving a task to a new instance, the new owner rebuilds its store by replaying its changelog partitions from the last committed position — restoring exactly the half-matches that were in flight, so a payment that arrives five minutes after the crash still finds the order stored before it.
+
+**Compacted topics, and why the changelog must be one.** The changelog topic is configured with **log compaction**: for each key, Kafka retains only the latest value (and eventually drops tombstoned keys). Without compaction, the changelog is an append-only history of every state change ever made, and restore time grows without bound — you would replay every order since deployment to rebuild a store that only needs the last 40 minutes of in-flight state. With compaction, changelog size tracks *live state size*, not history, and restore time stays roughly proportional to the ~3 GB of live state above, not to total traffic. The same compaction idea is why a **standby replica** (Kafka Streams) or Flink's checkpoint restore can be fast: standbys continuously apply the changelog so they are already warm when a task moves. Two honest caveats: compaction is eventual — a recently-written changelog segment is not compacted instantly, so restore replays some superseded updates too; and compaction plus retention settings are configuration that must be verified, because a changelog topic accidentally created with plain time-based retention and a short window can delete state that in-flight joins still need.
+
+**What is *not* stored here.** The matched, expired, and late outputs are ordinary Kafka topics with ordinary retention (days), consumed downstream and archived by the usual platform patterns if audit needs them longer. The join processor itself keeps no history beyond its window: asking it "did order X match last week?" is a question for the reconciliation/reporting store (section 6), not for the state store.
+
+## 9. Deduplication and idempotency, with a worked example
+
+Duplicates reach this design from three directions, and each needs its own answer. **Duplicate input events:** producers retry, so the same order or payment event can be delivered twice. **Duplicate join outputs:** after a crash or rebalance, the processor may reprocess a pair and emit the same match twice. **Duplicate fulfilment triggers:** the fulfilment consumer itself is at-least-once, so it can receive the same match record twice even if the join emitted it once. The design does not try to prevent duplicates at any of these hops — it makes every hop's effect idempotent, keyed on `order_id`.
+
+**Inside the join**, dedup is almost free if you use the state correctly: the first side is stored once (a redelivery of the same order event overwrites the same key with the same value — a harmless no-op), and the state entry is *deleted when the match emits*. A redelivered payment after the match finds no state and would look like an orphan — which is why the processor also keeps a short-lived **matched-marker**: on match, write a tombstone-with-TTL marker for that `order_id` (retained for, say, the input topics' redelivery horizon), so a duplicate arriving shortly after the match is recognised as a duplicate and dropped-and-counted, not routed to the refund queue. Getting this detail right — duplicate-after-match vs genuinely-orphan payment — is a Level 3 distinguishing point; the two look identical without the marker and have opposite correct responses.
+
+**At the fulfilment trigger**, idempotency lives in the consumer, as a conditional write on `order_id`. This is the shape to write on a whiteboard:
+
+```python
+# Fulfilment consumer: the same match may be delivered more than once.
+# The fulfilment record's primary key IS the dedup mechanism.
+def on_match(match, db, metrics):
+    inserted = db.execute("""
+        INSERT INTO fulfilments (order_id, payment_ref, status, created_at)
+        VALUES (%s, %s, 'PENDING_PICK', now())
+        ON CONFLICT (order_id) DO NOTHING
+        RETURNING order_id
+    """, (match.order_id, match.payment_ref))
+
+    if inserted:
+        enqueue_pick_task(match.order_id)   # side effect only on first insert
+    else:
+        metrics.inc("duplicate_match_dropped")  # redelivery / reprocessed join output
+
+    db.commit_offset(match.offset)          # only after the write above succeeds
+```
+
+```sql
+-- The equivalent guard if fulfilment is driven by a status transition:
+UPDATE orders
+SET status = 'FULFILMENT_STARTED', fulfilment_started_at = now()
+WHERE order_id = $1 AND status = 'PAID_MATCHED';   -- second run matches 0 rows: a no-op
+```
+
+Three rules make this work. First, the dedup key is the **business key** — `order_id` — created once by the order service, never a per-delivery ID, or every redelivery looks like a new order. Second, the side effect (enqueue the pick task) happens **only** on the branch where the insert actually happened, inside the same transaction boundary as the insert wherever the stack allows it. Third, offsets are committed **after** the write succeeds, so a crash between write and commit produces a redelivery — which the conditional insert then absorbs. That loop, crash → redelivery → absorbed duplicate, is the whole reliability story in miniature.
+
+## 10. Retry, failure handling, checkpointing and recovery
+
+- **Processor crash and state restore.** The task restarts (or its partitions are reassigned). Its RocksDB store is rebuilt by replaying its changelog partitions (section 8); with standby replicas in Kafka Streams, a warm standby takes over and restore is near-instant. Input offsets and state are consistent because changelog writes and offset commits move together under the processor's processing guarantees — events after the last commit are reprocessed, and sections 9's idempotency absorbs the overlap. Recovery time is bounded by live state size (~3 GB total in the worked sizing), not by total history — say that number in the interview.
+- **Rebalances.** Scaling the processor or a rolling deploy triggers partition reassignment. During a rebalance a task may briefly stop, restore state on its new owner, and resume; matches are delayed, not lost. Cooperative rebalancing (Kafka Streams / modern Kafka consumers) shrinks the stop-the-world window; it does not remove the need for fast restore, which is why the changelog's compaction matters operationally, not just theoretically.
+- **Poison events** (an event that fails schema validation or crashes the join logic for one specific key): never let one bad record stall a partition — every other order on that partition is stuck behind it. Route it to a dead-letter topic with the raw payload and the error after a bounded number of attempts, count it, and alert on the DLQ rate. A poison *payment* additionally needs the late/orphan path's attention: money may be attached to it.
+- **Downstream unavailable.** Fulfilment down does not touch the join: matches accumulate safely in the matched topic and fulfilment's consumer lag grows — visible and alertable. The expiry/late handler down is the more dangerous case, because refunds queue silently; alert on that consumer's lag age specifically.
+- **A whole input stream stalls.** If the payment service stops publishing, the watermark cannot safely advance on that input, expiry stops firing, and state grows as orders pile up unmatched. That is correct behaviour — expiring orders as "unpaid" because the payment *pipeline* is down would be a mass false-expiry — but it must page a human: watermark stall and state-store growth are first-class alerts (section 11), and the runbook answer is fixing the producer, not shrinking the window.
+- **Producer retries and duplicates** are handled by design (section 9), with one producer-side assist worth naming: idempotent producers / transactional writes in the order and payment services reduce duplicate volume at the source, but the join must stay correct even if they are off.
+
+## 11. Monitoring and observability
+
+- **Match rate and match latency**: matches per minute, and the distribution of (payment event time − order event time) and (arrival of second side − arrival of first side). A falling match rate is the earliest symptom of almost every failure in this system, including silent partitioning drift.
+- **Unmatched, orphan, and late rates**: expired orders per minute, orphan payments per minute, late payments per minute. Each has a normal baseline (abandoned checkouts are real); alert on deviation from baseline, not on non-zero.
+- **State store size and changelog restore time**: per-task store bytes and entries, restore duration after restarts/rebalances. Growth without a matching traffic increase means expiry is not running — usually a watermark problem.
+- **Watermark progress per input**: how far behind wall-clock each input's event-time clock is. A stalled watermark freezes expiry and grace; it is this system's equivalent of consumer lag, and for a windowed join it matters more.
+- **Consumer lag** on every output consumer — fulfilment and especially the expiry/late handler (refund obligations hide there).
+- **Duplicate counters**: duplicate inputs absorbed, duplicate matches dropped by the fulfilment trigger, duplicate-after-match drops via the matched-marker. A sudden rise usually means an upstream retry storm or a rebalance loop.
+- Structured logs and traces carry `order_id` end to end, so the question "what happened to order X?" is answerable across order service, join, matched topic, and fulfilment in one search. For a join, per-key traceability is the observability feature support will actually use.
+
+## 12. Security
+
+- **Topic-level authorisation:** only the order service can produce to the orders topic, only the payment service to the payments topic, and only the join processor can consume both and produce to the matched/expired/late topics. A compromised or buggy service must not be able to inject a fake payment and conjure fulfilment — in this design, a forged payment event *is* a forged shipment, so producer ACLs are a fraud control, not housekeeping.
+- **Minimise payment data in events:** payment events carry a payment reference and amount, never card numbers or PAN data. The join's state store and changelog then hold no cardholder data, which keeps RocksDB disks, changelog topics, and their backups outside PCI scope. State stores and changelogs are easy to forget in a data inventory — name them explicitly.
+- **Encryption in transit and at rest** on topics, state-store disks, and changelog topics; access to the late/manual-review queue restricted to the payments-operations role, since it enumerates taken-but-unfulfilled payments.
+- **Schema validation at produce/consume time** (schema registry with compatibility checks): a malformed or hostile event dies at the edge of the join rather than poisoning state — and a schema change that breaks the join predicate (for example renaming the status field) fails deployment checks, not production matching.
+
+## 13. Scalability, the 10x question, and cost
+
+**At 10x (say 20,000 orders/sec peak):** the architecture does not change; the numbers in section 8 do. Live state grows to roughly 30 GB total — still ordinary when sharded across proportionally more partitions and tasks (raise partitions toward a few hundred, add processor instances to match). The things that strain first are not the join logic: they are **changelog write throughput** (every state change is also a Kafka produce, so state churn costs double), **restore time** if standby replicas are not enabled (replaying a task's changelog share of 30 GB is minutes, not seconds — at 10x, standbys stop being optional), and the **fulfilment service's** write rate, which is a conventional scaling problem with a conventional answer. Skew stays a non-issue because the key is one order; no single key can exceed one task's capacity unless a producer is broken, and section 7 covers that.
+
+**Cost levers:** the dominant cost is state and its changelog — so record size discipline (store the fields the match needs, not the whole order document), a grace period sized by evidence about real payment delays rather than by anxiety, and compaction verified on the changelog topic. Matched/expired/late topics are cheap by comparison (days of retention, small records). The standby-replica decision is an explicit cost-for-recovery-time trade: standbys roughly double local state storage and changelog read traffic in exchange for near-instant failover; take it when the fulfilment SLA is tight, skip it when a few minutes of restore is acceptable — and say which you chose and why.
+
+## 14. Trade-offs, stated honestly
+
+| Choice | You gain | You pay |
+|---|---|---|
+| Event-time window (30 min on event timestamps) | The business rule as actually meant; correct under producer delays and replays | Dependence on producer clock quality and watermarks; expiry only fires when event time advances |
+| Grace period beyond the window | Slow-but-legitimate payments still match; fewer false expiries and refunds | State retained longer, expired signal delayed, state cost grows linearly with grace |
+| Early emission of the match | Fulfilment starts minutes after payment, not after window close | The match can be emitted before all information is final; correctness rests on the idempotent downstream trigger |
+| Suppression until window close (the rejected alternative for the match) | Exactly one, final emission per key — nothing to retract | Every fulfilment delayed by window + grace; usually unacceptable for a fulfilment trigger, right for financial aggregates |
+| Embedded state store + changelog | Local-speed joins; recovery without an external database | Changelog write amplification on every state change; restore time proportional to live state; disk to manage per instance |
+| Co-partitioning requirement | A local lookup instead of a distributed join; linear scaling | A hard coupling between two topics owned by two teams; partition-count drift breaks matching silently unless actively verified |
+
+<Callout type="warn">
+Say this sentence in the interview: "This design does not deliver exactly-once delivery — no design spanning two Kafka topics, a state store, and a fulfilment database can. It delivers at-least-once delivery with an idempotent join and an idempotent fulfilment trigger, which gives exactly-once *effects*: one fulfilment per paid order." Conflating delivery with effects is the most common senior-level slip in this problem.
+</Callout>
+
+**Delivery semantics, precisely.** **At-most-once** — emit the match and commit before the effect is durable — would lose matches on any crash between emit and fulfilment: paid orders that never ship, the worst failure this system can have. **At-least-once** is the baseline everywhere here: inputs are redelivered, join outputs can be re-emitted on reprocessing, and the fulfilment consumer can receive a match twice; every stage absorbs duplicates by keying its effect on `order_id`. **"Exactly-once"** as offered by Kafka Streams' exactly-once processing (and Flink's checkpointed exactly-once state) is real but narrow: it guarantees that state updates and output writes *within that framework's transactional boundary* are applied once per input record. It does not extend into the fulfilment service's database or any external API — the moment the effect leaves the streaming framework, exactly-once *effects* are something you build with idempotent writes (section 9), not something a configuration flag gives you. The honest summary: exactly-once state inside the join, exactly-once effects at the trigger, at-least-once delivery on every wire between them.
+
+## 15. Interviewer follow-up Q&As
+
+1. **"The payment arrives before the order. Does your join still work?"** — Yes, by construction. The join is symmetric: whichever side arrives first is stored in keyed state under `order_id`, and the second side's arrival performs the lookup and the window check. Payment-first is a large share of normal traffic here, because the two services publish independently.
+2. **"A payment arrives 10 minutes after the order already expired. What happens — exactly?"** — The lookup finds no state. A short-lived matched-marker also misses (this order never matched — it expired), so the payment is emitted on the late path with its payment reference. The handler confirms the order is in expired-unpaid state and routes to refund or manual review. The join does not resurrect the order or trigger fulfilment on its own; if the business wants late-paid orders fulfilled anyway, that is an explicit rule in the handler, with the order's current status checked first.
+3. **"How big is your state store? Show me the arithmetic."** — Rate × retention × record size, per side. At 2,000 orders/sec, 40 minutes of retention (window + grace), ~500 bytes per stored record: roughly 2.4 GB for the order side plus a fraction for payment-first records — about 3 GB total, sharded by partition. Then state the sensitivity: state grows linearly with volume, window, grace, and record size, and grace is the knob people turn carelessly.
+4. **"The processor crashes at the worst moment — after matching, before fulfilment runs. Is fulfilment lost, or doubled?"** — Neither, if the pieces are in place. The match is a record on the matched topic, durable independently of the processor. Fulfilment consumes it at-least-once; if fulfilment itself crashes after writing but before committing its offset, it receives the match again and the conditional insert on `order_id` makes the second delivery a no-op. The dangerous gap would be calling fulfilment synchronously from inside the processor — which is why the design doesn't.
+5. **"Why can't the two topics just have different partition counts? What actually breaks?"** — The join task assignment. With different counts, the order and payment for the same `order_id` can be assigned to different tasks, each holding half the pair in its own state, neither able to see the other. No error is raised; matches silently go missing. The fixes are aligning the counts at the source, or repartitioning one stream inside the processor and paying for the extra topic and copy.
+6. **"Early emission or suppression — which do you pick for this problem, and why?"** — Early emission for the fulfilment trigger: the business value is starting fulfilment when the pair is known, and the risk early emission usually carries (retractions, updated results) doesn't apply to a 1:1 match that cannot be un-matched by later data — a second, different payment for the same order is a data problem to flag, not a retraction of the match. Suppression until window close is the right choice for aggregates and financial reporting outputs, where one final number beats a fast provisional one.
+7. **"An order can have a failed payment attempt and then a successful one. Both publish events. What changes?"** — The join predicate gains a condition: only a successful-authorisation payment can complete a match; failed attempts are stored (or filtered upstream) but never trigger fulfilment. State shape also changes if multiple attempts must be retained for audit — the waiting value becomes a small list, or attempts go to a separate topic the join doesn't consume. Clarifying this up front (section 2) is what prevents redesigning the state mid-interview.
+8. **"How do you know the join isn't silently missing matches right now?"** — Reconciliation: a daily batch join of the orders and payments tables compared outcome-by-outcome against the stream's matched/expired/late outputs, alerting on divergence. Plus the operational proxies — match rate versus its baseline, orphan rate, and a deployment check that both topics' partition counts still match. "The framework handles joins" is not an answer; a verification loop is.
+9. **"Clocks: the payment service's clock is 5 minutes fast. What happens to your window?"** — Event-time windows inherit producer clock error: a fast payment clock makes payments look later relative to orders, eating 5 minutes of the 30-minute window and pushing borderline payments into the late path. Mitigations: NTP discipline as a platform requirement, sanity checks that reject or flag events stamped implausibly far from arrival time, and grace sized to absorb known skew. Name clock skew unprompted; it is what the question in section 2 about event time was for.
+10. **"Walk me through a rebalance while traffic is at peak."** — Partitions move to their new owners; each new owner restores its state store from its changelog partitions — or takes over a warm standby if standbys are enabled, which at peak is the configuration you want. During the move, affected keys' matches are delayed by the restore duration; nothing is lost, because inputs wait in the topics and state is rebuilt before processing resumes. The metrics to watch are restore time and the match-latency spike, and the design decision that controls both is standby replicas, bought with extra storage and changelog traffic.
+
+## 16. Interview-ready spoken answer
+
+> "First, the requirements I'd pin down: two Kafka streams, orders and payments, joined on `order_id`; a match within a 30-minute window triggers fulfilment; out-of-order arrival is normal; unmatched orders, orphan payments, and late payments all need explicit outcomes. The clarifications that matter most are whether the window is event time — I'll design for event time, because that's the business rule — whether both topics are co-partitioned on `order_id` with the same partition count, and whether an order can have multiple payment attempts.
+>
+> The bottleneck isn't throughput, it's state plus time: holding half-matches correctly, expiring them correctly, and getting the state back after a crash. So the architecture is a single stream processor — Kafka Streams or Flink — consuming both topics, with an embedded RocksDB state store keyed by `order_id`, backed by a changelog topic. Order and payment services just publish; fulfilment just consumes a matched topic; an expiry and late handler consumes the unmatched outputs.
+>
+> The data flow is symmetric. Whichever side arrives first waits in state; the second side's arrival checks the event-time gap and, inside 30 minutes, emits one match and clears the state. A watermark drives expiry: past window plus a grace period with no partner, the order is emitted as expired. A payment arriving after expiry goes to refund or manual review with its payment reference — never silently dropped, and never silently fulfilling a dead order.
+>
+> On reliability and duplicates: delivery is at-least-once at every hop, so I don't pretend otherwise. Producers can redeliver inputs, reprocessing can re-emit a match, and fulfilment can receive it twice — so the join's state operations are naturally idempotent on `order_id`, and the fulfilment trigger is a conditional insert on `order_id` where the side effect only happens when the insert actually lands. A short-lived matched-marker distinguishes a duplicate payment from a genuinely orphaned one. Crashes recover by restoring state from the changelog, which is log-compacted so restore time tracks live state, not history.
+>
+> Scaling is adding partitions and tasks — the join is a local lookup per key, so it's close to linear. State size is the number to watch: rate times window-plus-grace times record size, about 3 GB at a 2,000-per-second peak with a 40-minute retention, and it grows linearly with every one of those factors.
+>
+> The trade-offs I'd flag: the grace period buys tolerance for slow payments with state size and a delayed unpaid signal; early emission gets fulfilment moving fast and leans on the idempotent trigger for correctness, where suppression would give one final result 30 minutes late; and the system delivers exactly-once effects — one fulfilment per paid order — not exactly-once delivery. That distinction is the design."
+
+## 17. Mock interview mode
+
+**Five hard follow-ups, with expected answers**
+
+1. **"Your grace period is 10 minutes. The business asks for 2 hours 'to be safe'. Take me through the consequences."** — Expected: retention goes from 40 minutes to 2.5 hours, so live state roughly quadruples (worked math: ~3 GB becomes ~11–12 GB at the same rates), changelog volume and restore time grow with it, and the expired-unpaid signal — which downstream teams and possibly customers wait on — is delayed by 2 hours for every abandoned order. Then the counter-question: what fraction of payments actually arrive in minutes 40–150? Size grace from that data, and route the true tail to the late path, which exists precisely so grace doesn't have to be huge.
+2. **"Prove no paid order failed to trigger fulfilment yesterday."** — Expected: reconciliation, not faith. A batch join over yesterday's orders and payments tables, compared against the stream's matched outputs and fulfilment records on `order_id`; every paid-in-window order must appear exactly once in fulfilment. Plus the in-stream evidence: matched-marker and duplicate counters, orphan/late rates at baseline. "Kafka Streams guarantees exactly-once" is not proof and should score down.
+3. **"Someone changed the payments topic from 48 to 64 partitions last week. Symptoms?"** — Expected: co-partitioning silently broken — a fraction of pairs now land on different tasks, match rate drops noticeably but not to zero, orphan and expired rates climb, no errors anywhere. Detection: match-rate alert and the partition-count deployment check. Fix: realign (or repartition inside the processor as a stopgap), then reconcile the affected window and re-drive missed matches through the idempotent trigger — which is safe precisely because fulfilment dedups on `order_id`.
+4. **"Why not just write both events into a Postgres table and run a SQL join every minute?"** — Expected: a fair hearing, then the gaps. At moderate volume it genuinely works, and saying so scores points. What it gives up: per-event latency (up to the polling interval on every fulfilment), the expiry sweeper and the two-writer race become your code, event-time/watermark semantics are hand-rolled, and the table grows a hot, constantly-updated working set that mixes transactional and streaming concerns. The stream processor is chosen because state-plus-time-plus-recovery is its native job — not because SQL is beneath the problem.
+5. **"The fulfilment team asks you to also emit a 'preliminary match' the moment an order arrives, before payment, so they can pre-pick. What do you say?"** — Expected: recognise it as a different output with different semantics, not a tweak. It can be emitted from the same state (order-arrived is known immediately), but it must be a separate topic/type that cannot be confused with a paid match, pre-picking must be reversible work only, and the cancellation path (order expires unpaid) must reach the warehouse as reliably as the match does. The design smell to name: if preliminary and final signals ever share a topic or a status value, someone will eventually ship an unpaid order.
+
+**Common candidate mistakes**
+
+- Assuming events arrive in order, or designing the join with the order as "the trigger" and the payment as "the lookup" — payment-first breaks it immediately.
+- Never asking whether the topics are co-partitioned, or not knowing that mismatched partition counts fail silently.
+- Claiming exactly-once delivery end to end from a Kafka Streams configuration flag.
+- Dropping unmatched state at window close with no expired output, and having no answer at all for a payment that arrives after expiry — taken money, silently forgotten.
+- No state-size arithmetic: proposing windows and grace periods with no idea they multiply into gigabytes of state and changelog.
+- Calling the fulfilment API synchronously from inside the join, putting the least idempotent step at the hardest place to retry.
+
+**What a senior candidate mentions unprompted**
+
+- Co-partitioning as a precondition, and verifying it continuously because its failure is silent.
+- Event time vs arrival time for the window, watermarks as the expiry mechanism, and grace as a separately-tuned knob.
+- The matched-marker problem: a duplicate payment after a successful match looks exactly like an orphan payment without one.
+- Changelog compaction as what keeps restore time proportional to live state.
+- Reconciliation (batch audit) as the proof mechanism, separate from the streaming path's own guarantees.
+- Clock skew between the two producing services as a real input to window correctness.
+
+**Scoring rubric (out of 10)**
+
+| Score | What it looks like |
+|---|---|
+| 9–10 | Symmetric event-time join on co-partitioned topics, state sized with real arithmetic, changelog/compacted recovery explained, late and orphan paths designed, delivery semantics stated precisely, reconciliation proposed |
+| 7–8 | Sound join with windows and state recovery, but grace, duplicate-after-match, or partition-drift handling is hand-wavy |
+| 5–6 | Components named (Kafka Streams, a state store) but the join is order-triggered only, expiry is a timer afterthought, no late-payment path |
+| 3–4 | Database-table join with polling, no event-time story, duplicates treated as impossible |
+| 0–2 | Claims exactly-once delivery, drops unmatched events silently, no recovery story for the join state |
+
+Sources: [Apache Kafka documentation — Kafka Streams joins, state stores and exactly-once processing](https://kafka.apache.org/documentation/) · [Apache Kafka Streams documentation — windowing, grace period and suppression](https://kafka.apache.org/documentation/streams/) · [Apache Flink documentation — streaming joins, state backends and checkpointing](https://flink.apache.org/)

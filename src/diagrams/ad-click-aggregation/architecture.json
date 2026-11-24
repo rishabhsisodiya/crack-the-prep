@@ -1,0 +1,152 @@
+{
+  "meta": {
+    "title": "Ad Click Aggregation \u2014 Fast Stream, Exact Batch",
+    "output": ".archify/build/ad-click-aggregation/architecture.html",
+    "quality_profile": "showcase"
+  },
+  "components": [
+    {
+      "id": "c",
+      "type": "external",
+      "label": "Ad-Serving Clients",
+      "sublabel": "click / conversion events"
+    },
+    {
+      "id": "gw",
+      "type": "backend",
+      "label": "Ingest API",
+      "sublabel": "validate + write to Kafka"
+    },
+    {
+      "id": "k",
+      "type": "messagebus",
+      "label": "Kafka",
+      "sublabel": "raw click events"
+    },
+    {
+      "id": "f",
+      "type": "backend",
+      "label": "Flink Job",
+      "sublabel": "window + aggregate"
+    },
+    {
+      "id": "agg",
+      "type": "database",
+      "label": "Aggregate Store",
+      "sublabel": "per ad / minute counts"
+    },
+    {
+      "id": "s3",
+      "type": "database",
+      "label": "Raw Event Log (S3)",
+      "sublabel": "immutable, replayable"
+    },
+    {
+      "id": "batch",
+      "type": "backend",
+      "label": "Nightly Batch Job",
+      "sublabel": "exact reconciliation"
+    },
+    {
+      "id": "ledger",
+      "type": "database",
+      "label": "Billing Ledger",
+      "sublabel": "source of truth"
+    },
+    {
+      "id": "api",
+      "type": "backend",
+      "label": "Query API",
+      "sublabel": "serves aggregates"
+    },
+    {
+      "id": "dash",
+      "type": "frontend",
+      "label": "Advertiser Dashboard",
+      "sublabel": "near-real-time numbers"
+    }
+  ],
+  "connections": [
+    {
+      "id": "c-g",
+      "from": "c",
+      "to": "gw",
+      "label": "click / conversion events"
+    },
+    {
+      "id": "g-k",
+      "from": "gw",
+      "to": "k",
+      "label": "append events",
+      "variant": "emphasis"
+    },
+    {
+      "id": "k-f",
+      "from": "k",
+      "to": "f",
+      "label": "stream events"
+    },
+    {
+      "id": "f-a",
+      "from": "f",
+      "to": "agg",
+      "label": "per-minute counts",
+      "variant": "emphasis"
+    },
+    {
+      "id": "k-s",
+      "from": "k",
+      "to": "s3",
+      "label": "archive raw events",
+      "variant": "dashed"
+    },
+    {
+      "id": "s-b",
+      "from": "s3",
+      "to": "batch",
+      "label": "replay the day"
+    },
+    {
+      "id": "b-l",
+      "from": "batch",
+      "to": "ledger",
+      "label": "exact counts",
+      "variant": "emphasis"
+    },
+    {
+      "id": "a-api",
+      "from": "agg",
+      "to": "api",
+      "label": "query aggregates"
+    },
+    {
+      "id": "api-d",
+      "from": "api",
+      "to": "dash",
+      "label": "render reports"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Streaming path",
+      "items": [
+        "Kafka \u2192 Flink windows clicks per ad per minute into the aggregate store",
+        "Dashboards get numbers in seconds \u2014 close enough for watching a campaign"
+      ]
+    },
+    {
+      "dot": "orange",
+      "title": "Batch path",
+      "items": [
+        "The raw log in S3 is replayed nightly for the exact count",
+        "Billing comes from the ledger of record, never from the streaming aggregate"
+      ]
+    }
+  ],
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "layout": {
+    "mode": "auto"
+  }
+}

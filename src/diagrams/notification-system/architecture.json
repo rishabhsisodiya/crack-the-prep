@@ -1,0 +1,245 @@
+{
+  "cards": [
+    {
+      "dot": "cyan",
+      "items": [
+        "Fan-out turns one event into batched per-recipient tasks",
+        "Generation and delivery scale as separate domains"
+      ],
+      "title": "Two-stage fan-out"
+    },
+    {
+      "dot": "emerald",
+      "items": [
+        "Push, email and SMS run on independent queues and pools",
+        "A slow or down provider on one channel never blocks another"
+      ],
+      "title": "Per-channel isolation"
+    },
+    {
+      "dot": "rose",
+      "items": [
+        "Preferences and quiet hours checked before rendering",
+        "Dedupe key checked before every send, including failover retries"
+      ],
+      "title": "Dedupe + preferences"
+    }
+  ],
+  "components": [
+    {
+      "id": "producer",
+      "label": "Producer Service",
+      "sublabel": "fires event, moves on",
+      "type": "external"
+    },
+    {
+      "id": "ingest-q",
+      "label": "Ingestion Queue",
+      "sublabel": "NotificationRequested",
+      "type": "messagebus"
+    },
+    {
+      "id": "fanout",
+      "label": "Fan-Out Stage",
+      "sublabel": "expand + batch recipients",
+      "type": "backend"
+    },
+    {
+      "id": "task-q",
+      "label": "Per-Recipient Task Queue",
+      "sublabel": "batched tasks",
+      "type": "messagebus"
+    },
+    {
+      "id": "gen",
+      "label": "Generation Workers",
+      "sublabel": "prefs, dedupe, render",
+      "type": "backend"
+    },
+    {
+      "id": "pref",
+      "label": "Preferences",
+      "sublabel": "opt-in/out + quiet hours",
+      "type": "database"
+    },
+    {
+      "id": "dedup",
+      "label": "Redis Dedupe",
+      "sublabel": "dedupe + rate limit",
+      "type": "database"
+    },
+    {
+      "id": "tpl",
+      "label": "Template Render",
+      "sublabel": "per type + channel",
+      "type": "backend"
+    },
+    {
+      "id": "push-q",
+      "label": "Push Queue",
+      "sublabel": "per channel",
+      "type": "messagebus"
+    },
+    {
+      "id": "email-q",
+      "label": "Email Queue",
+      "sublabel": "per channel",
+      "type": "messagebus"
+    },
+    {
+      "id": "sms-q",
+      "label": "SMS Queue",
+      "sublabel": "per channel",
+      "type": "messagebus"
+    },
+    {
+      "id": "push-sender",
+      "label": "Push Sender",
+      "sublabel": "isolated pool",
+      "type": "backend"
+    },
+    {
+      "id": "email-sender",
+      "label": "Email Sender",
+      "sublabel": "isolated pool",
+      "type": "backend"
+    },
+    {
+      "id": "sms-sender",
+      "label": "SMS Sender",
+      "sublabel": "isolated pool",
+      "type": "backend"
+    },
+    {
+      "id": "prov-push",
+      "label": "APNs / FCM",
+      "sublabel": "push provider",
+      "type": "external"
+    },
+    {
+      "id": "prov-email",
+      "label": "SES / SendGrid",
+      "sublabel": "email provider",
+      "type": "external"
+    },
+    {
+      "id": "prov-sms",
+      "label": "Twilio",
+      "sublabel": "SMS provider",
+      "type": "external"
+    },
+    {
+      "id": "status",
+      "label": "Delivery Status Store",
+      "sublabel": "queued \u2192 delivered / failed",
+      "type": "database"
+    }
+  ],
+  "connections": [
+    {
+      "from": "producer",
+      "id": "p-q1",
+      "label": "NotificationRequested",
+      "to": "ingest-q"
+    },
+    {
+      "from": "ingest-q",
+      "id": "q1-fo",
+      "to": "fanout"
+    },
+    {
+      "from": "fanout",
+      "id": "fo-q2",
+      "label": "batch into tasks",
+      "to": "task-q"
+    },
+    {
+      "from": "task-q",
+      "id": "q2-gen",
+      "to": "gen"
+    },
+    {
+      "from": "gen",
+      "id": "gen-pref",
+      "label": "check prefs",
+      "to": "pref"
+    },
+    {
+      "from": "gen",
+      "id": "gen-dedup",
+      "label": "dedupe + limit",
+      "to": "dedup"
+    },
+    {
+      "from": "gen",
+      "id": "gen-tpl",
+      "label": "render",
+      "to": "tpl"
+    },
+    {
+      "from": "gen",
+      "id": "gen-qp",
+      "label": "push",
+      "to": "push-q"
+    },
+    {
+      "from": "gen",
+      "id": "gen-qe",
+      "label": "email",
+      "to": "email-q"
+    },
+    {
+      "from": "gen",
+      "id": "gen-qs",
+      "label": "SMS",
+      "to": "sms-q"
+    },
+    {
+      "from": "push-q",
+      "id": "qp-sp",
+      "to": "push-sender"
+    },
+    {
+      "from": "email-q",
+      "id": "qe-se",
+      "to": "email-sender"
+    },
+    {
+      "from": "sms-q",
+      "id": "qs-ss",
+      "to": "sms-sender"
+    },
+    {
+      "from": "push-sender",
+      "id": "sp-prov1",
+      "to": "prov-push"
+    },
+    {
+      "from": "email-sender",
+      "id": "se-prov2",
+      "to": "prov-email"
+    },
+    {
+      "from": "sms-sender",
+      "id": "ss-prov3",
+      "to": "prov-sms"
+    },
+    {
+      "from": "prov-push",
+      "id": "prov1-stat",
+      "label": "webhook",
+      "to": "status",
+      "variant": "dashed"
+    }
+  ],
+  "diagram_type": "architecture",
+  "layout": {
+    "mode": "auto"
+  },
+  "meta": {
+    "output": ".archify/build/notification-system/architecture.html",
+    "quality_profile": "showcase",
+    "title": "Notification System \u2014 Two-Stage Fan-Out, Per-Channel Delivery"
+  },
+  "schema_version": 1
+}

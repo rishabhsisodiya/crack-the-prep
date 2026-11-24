@@ -1,0 +1,103 @@
+{
+  "meta": {
+    "title": "Transactional Outbox",
+    "output": ".archify/build/building-blocks/architecture-3.html",
+    "quality_profile": "showcase"
+  },
+  "components": [
+    {
+      "id": "handler",
+      "type": "backend",
+      "label": "Request Handler",
+      "sublabel": "domain change + event"
+    },
+    {
+      "id": "domain",
+      "type": "database",
+      "label": "Domain Table",
+      "sublabel": "the actual change"
+    },
+    {
+      "id": "outbox",
+      "type": "database",
+      "label": "Outbox Table",
+      "sublabel": "event row \u00b7 same transaction"
+    },
+    {
+      "id": "relay",
+      "type": "backend",
+      "label": "Outbox Relay",
+      "sublabel": "polls the table / tails the DB log"
+    },
+    {
+      "id": "broker",
+      "type": "messagebus",
+      "label": "Message Broker",
+      "sublabel": "Kafka / queue"
+    }
+  ],
+  "connections": [
+    {
+      "id": "h-d",
+      "from": "handler",
+      "to": "domain",
+      "label": "write domain row \u2014 in the transaction"
+    },
+    {
+      "id": "h-o",
+      "from": "handler",
+      "to": "outbox",
+      "label": "write outbox row \u2014 same transaction"
+    },
+    {
+      "id": "o-r",
+      "from": "outbox",
+      "to": "relay",
+      "label": "poll unsent rows"
+    },
+    {
+      "id": "r-b",
+      "from": "relay",
+      "to": "broker",
+      "label": "publish event"
+    },
+    {
+      "id": "r-o",
+      "from": "relay",
+      "to": "outbox",
+      "label": "mark row sent",
+      "variant": "dashed"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "The guarantee",
+      "items": [
+        "Event is published if and only if the transaction committed",
+        "No lost event, no phantom event from a rolled-back change"
+      ]
+    },
+    {
+      "dot": "orange",
+      "title": "Still at-least-once",
+      "items": [
+        "The relay can publish twice if it crashes after publish, before mark-sent",
+        "Consumers must dedupe \u2014 the outbox moves the problem, it doesn't delete it"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "CDC variant",
+      "items": [
+        "Debezium-style relays read the DB replication log directly",
+        "Same idea, no explicit outbox table to maintain"
+      ]
+    }
+  ],
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "layout": {
+    "mode": "auto"
+  }
+}

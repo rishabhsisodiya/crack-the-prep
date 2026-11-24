@@ -1,0 +1,120 @@
+{
+  "meta": {
+    "title": "URL Shortener \u2014 Cache-First Redirects",
+    "output": ".archify/build/guide/url-shortener.html",
+    "quality_profile": "showcase"
+  },
+  "components": [
+    {
+      "id": "client",
+      "type": "external",
+      "label": "Client",
+      "sublabel": "creates + follows links"
+    },
+    {
+      "id": "lb",
+      "type": "cloud",
+      "label": "Load Balancer",
+      "sublabel": "HTTPS"
+    },
+    {
+      "id": "svc",
+      "type": "backend",
+      "label": "Shortener Service",
+      "sublabel": "POST /urls \u00b7 GET /:code"
+    },
+    {
+      "id": "cache",
+      "type": "database",
+      "label": "Redis Cache",
+      "sublabel": "code \u2192 long URL"
+    },
+    {
+      "id": "kv",
+      "type": "database",
+      "label": "Key-Value Store",
+      "sublabel": "urls table \u00b7 PK = code"
+    },
+    {
+      "id": "counter",
+      "type": "backend",
+      "label": "ID / Counter Service",
+      "sublabel": "base62 code generation"
+    },
+    {
+      "id": "analytics",
+      "type": "messagebus",
+      "label": "Analytics Stream",
+      "sublabel": "click events \u00b7 async"
+    }
+  ],
+  "connections": [
+    {
+      "id": "cl-lb",
+      "from": "client",
+      "to": "lb",
+      "label": "HTTPS"
+    },
+    {
+      "id": "lb-s",
+      "from": "lb",
+      "to": "svc"
+    },
+    {
+      "id": "s-c",
+      "from": "svc",
+      "to": "cache",
+      "label": "GET /:code: check cache"
+    },
+    {
+      "id": "s-kv",
+      "from": "svc",
+      "to": "kv",
+      "label": "miss: load + backfill"
+    },
+    {
+      "id": "s-cnt",
+      "from": "svc",
+      "to": "counter",
+      "label": "POST: next ID"
+    },
+    {
+      "id": "s-a",
+      "from": "svc",
+      "to": "analytics",
+      "label": "click event",
+      "variant": "dashed"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Read path",
+      "items": [
+        "~4,000 redirects/s at a 100:1 read:write ratio",
+        "Cache hit serves directly; miss loads the KV store and back-fills Redis"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Write path",
+      "items": [
+        "Counter + base62 gives short, collision-free codes",
+        "Ranges of 1,000 IDs can be pre-claimed per app server"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Async",
+      "items": [
+        "Click events go to the analytics stream off the redirect path",
+        "301 cuts server load; 302 counts every click"
+      ]
+    }
+  ],
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "layout": {
+    "mode": "auto"
+  }
+}

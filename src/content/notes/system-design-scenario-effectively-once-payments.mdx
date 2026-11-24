@@ -1,0 +1,264 @@
+---
+title: "Scenario — Effectively-Once Payment Event Processing"
+track: "system-design"
+kind: "notes"
+order: 61
+slug: "scenario-effectively-once-payments"
+updated: 2026-11-24
+description: "A scenario-based interview problem: process payment webhooks and internal payment events that arrive duplicated and out of order, at 5M events/day, so the ledger never double-posts — effectively-once effects, not the myth of exactly-once delivery."
+---
+
+import Callout from '../../components/Callout.astro';
+import Mermaid from '../../components/Mermaid.astro';
+import ArchDiagram from '../../components/ArchDiagram.astro';
+
+Part of the [system design](/prep/system-design) series. See also the [payment system](/prep/system-design/payment-system) page. This is a **scenario** page: the problem as an interviewer states it, then a full worked solution. **Level 3 — Lead engineer / Architect.**
+
+> **Original practice scenario** — written for interview preparation; not a question from any specific company's interview.
+
+## 1. The problem statement
+
+Nothing in this section is the solution.
+
+> "We process payments through an external provider. The provider notifies us about payment state changes — authorised, captured, failed, refunded, charged back — through **webhooks**. Our own services (checkout, refunds, payouts) also emit payment events.
+>
+> The delivery reality is messy. Webhooks are **at-least-once**: the provider retries until we acknowledge, so the same event arrives two, three, sometimes five times. Events also arrive **out of order** — a 'captured' notification can land before the 'authorised' one for the same payment. Volume is about **5 million payment events per day**.
+>
+> All of this feeds our **ledger** — the double-entry record of who owes what to whom. The one unforgivable bug: **a payment must never be posted twice.** A double posting is a real financial loss and an audit finding.
+>
+> Design the event processing system: ingestion, processing, the ledger writes, an **audit trail** of everything that happened to every payment, and a **reconciliation** process that proves, every day, that our ledger matches the provider's records."
+
+**Functional requirements**
+
+- Receive provider webhooks and internal payment events; never lose one that was acknowledged.
+- Apply each event's effect to the ledger at most once, in a valid order.
+- Maintain a complete, immutable audit history per payment.
+- Reconcile the ledger against the provider's settlement/reporting files daily and surface discrepancies.
+
+**Non-functional requirements**
+
+- 5M events/day (~60/sec average, with sharp peaks around sales and retry storms — design for bursts, not the average).
+- A webhook endpoint that is slow or down causes provider retries to pile up; acknowledgement must be fast and decoupled from processing.
+- Strong consistency where money is concerned: the ledger write and the record that the event was processed must not be able to disagree.
+- Full auditability: for any ledger entry, you can show exactly which event caused it.
+
+## 2. Clarifying questions to ask first
+
+| Question | Why it matters |
+|---|---|
+| Does every provider event carry a stable, unique event ID that is identical across retries? | The entire idempotency design hangs on this. If retries mint new IDs, you must fall back to a business key (provider payment ID + event type + amount + state) — weaker, and worth saying so. |
+| Is there a queryable provider API to fetch a payment's current state? | If yes, out-of-order handling gets much easier: on a suspicious transition you can fetch ground truth instead of guessing. If no, you need buffering and a stricter state machine. |
+| What are the legal payment states and allowed transitions? | The state machine is the ordering defence. You cannot define "out of order" until the valid order is explicit. |
+| How fast must a payment's state be visible internally — seconds or minutes? | Seconds means the processing path stays lean; minutes gives you room for batching and ordering buffers. |
+| What does the provider's reconciliation file contain, and when does it arrive? | Reconciliation is a requirement here, not a garnish. Its format decides whether matching is by event, by payment, or by settled amount. |
+| Can the ledger database and the processed-events record live in the same database? | If yes, one local transaction gives you atomicity for free. If they are separate systems, you are into outbox patterns and much harder conversations — the interviewer wants to hear you notice. |
+| What is the retention and audit requirement — years? | Payment audit trails are usually retained for many years; that drives append-only storage and immutability choices. |
+
+<Callout type="tip">
+The strongest opening move in this problem is one sentence: "Exactly-once *delivery* over a network with retries is impossible — what I can build is at-least-once delivery with idempotent processing, so every event has an exactly-once *effect* on the ledger." Candidates who promise exactly-once delivery lose credibility with any experienced interviewer in the first minute.
+</Callout>
+
+## 3. The solution, in plain language first
+
+Simple version: accept every webhook quickly, store it raw, and put it on a queue. A processor then takes each event and tries to **claim** it — inserting its event ID into a "processed events" table that has a unique constraint. If the claim fails, the event is a duplicate and is dropped. If the claim succeeds, the processor applies the payment's state transition and writes the ledger entry **in the same database transaction** as the claim. Claim and posting either both happen or neither does. That one transaction is the heart of the design.
+
+Ordering is handled separately: events for one payment are processed in one lane (partitioned by payment ID), and a state machine only allows legal transitions — an event that arrives too early is parked and retried, not applied.
+
+Finally, because no stream is perfect, a daily reconciliation job compares the ledger against the provider's settlement files and flags every mismatch for humans. The stream aims to be right; reconciliation proves it.
+
+## 4. Architecture
+
+<ArchDiagram src="scenario-effectively-once-payments/architecture" caption="Effectively-once payment event processing architecture" />
+
+
+**Component by component**
+
+- **Webhook receiver.** Verifies the provider's signature (an unsigned webhook is an attack, not an event), stores the raw payload durably, publishes it to the queue, and returns 200 — all in milliseconds. Verification and storage are the only work allowed on this path; everything else is downstream. If the receiver is slow, the provider retries, and your duplicate rate — and load — multiplies.
+- **Queue / Kafka, partitioned by `payment_id`.** All events for one payment travel in one partition, in arrival order, processed by one consumer at a time. Cross-payment ordering does not matter; per-payment ordering is everything.
+- **Processor.** Applies the state machine, claims event IDs, writes ledger entries. Scales by partition count.
+- **Idempotency (processed-events) store.** A table with a unique constraint on `event_id`, in the **same database** as the ledger. This co-location is a deliberate, defensible choice: it buys a single local transaction for claim + posting.
+- **Ledger.** Append-only, double-entry: every posting is balanced debits and credits. Corrections are new, reversing entries — never updates or deletes. History is the product.
+- **Audit log.** Every received event (including duplicates and rejected transitions) with its raw payload, arrival time, and disposition. This is what lets you answer "why does this payment look like this?" six months later.
+- **Reconciliation job.** Daily (and intraday, if files allow) comparison of provider records vs the ledger: missing postings, extra postings, amount mismatches. Each class has a runbook; some auto-heal (replay the missed event), most go to a human queue with the audit trail attached.
+
+## 5. End-to-end data flow
+
+1. Provider sends `payment.captured` for payment `pay_123`, event ID `evt_987`. The receiver verifies the signature, stores the raw event, publishes it, acks.
+2. The processor for `pay_123`'s partition picks it up and opens a transaction:
+   - Insert `evt_987` into `processed_events`. Success means "this is the first time".
+   - Check the state machine: current state `authorised`, transition to `captured` is legal.
+   - Insert the double-entry ledger posting; append the audit record.
+   - Commit. Only now is the queue offset committed.
+3. The provider, whose first ack was lost in a network blip, retries `evt_987`. Step 2's insert now hits the unique constraint. The processor records "duplicate received" in the audit log and moves on. The ledger is untouched.
+4. A `payment.refunded` event arrives before the capture has been processed (queue lag on a busy day). The state machine says `authorised → refunded` is illegal. The event is **parked** — set aside with a retry delay — not dropped and not applied. When the capture lands, the parked refund is re-evaluated and applies cleanly.
+5. Next morning, reconciliation matches the provider's settlement file against the ledger. One payment settled at the provider has no ledger posting (its webhook was lost entirely — the provider's retry window expired during your outage). The job raises a discrepancy, and the event is recovered from the provider API / settlement record and posted through the same idempotent path.
+
+## 6. Technology choices, and why
+
+| Decision | Choice | Why | Alternative considered |
+|---|---|---|---|
+| Ledger + idempotency store | One relational database (PostgreSQL) | ACID local transaction spanning claim + posting is the correctness core; double-entry ledgers are a natural relational fit | Splitting ledger and dedup across services/databases — then claim and post cannot be atomic, and you are rebuilding atomicity with outbox/saga machinery for no benefit at this volume |
+| Transport | Kafka (or SQS FIFO / a durable queue) | Replayability matters: after a processor bug you must be able to re-run events through fixed code | Fire-and-forget webhooks straight into the processor — a crash after ack loses the event forever |
+| Ordering | Partition by payment ID + state machine | Per-payment serial processing makes ordering a local problem; the state machine makes illegal orders unrepresentable | Global ordering — unnecessary and unscalable; vector clocks / total-order broadcast — wildly over-engineered for this |
+| Webhook ack | Store-raw-then-ack | Fast ack stops provider retry storms; raw storage makes every later step re-derivable | Process-then-ack — couples your slowest logic to the provider's timeout and manufactures duplicates |
+| Reconciliation source | Provider settlement files + provider API | Independent ground truth; the stream's own logs cannot catch the stream's own blind spots | Self-reconciliation (queue counts vs ledger counts) — catches internal loss, blind to events that never arrived |
+
+**Batch vs streaming.** Processing is streaming (state changes should be visible in seconds), reconciliation is batch (the provider's files are batch, and a daily full comparison is cheap at 5M events/day). Neither substitutes for the other — that is the point of having both.
+
+## 7. Partitioning and parallelism
+
+5M events/day is ~60/sec on average — modest. The design constraint is not throughput, it is **burst shape and per-payment serialisation**. Partition by `payment_id` into, say, 32–64 partitions; each partition is processed serially, different payments fully in parallel. Retry storms multiply event arrivals, not unique work — duplicates are dropped at the claim step, cheaply. A single hot payment (a viral checkout being refunded repeatedly) is bounded by one partition, which is correct: its events genuinely must be serial.
+
+## 8. Storage strategy
+
+- **Ledger:** append-only tables, partitioned by month; never updated. Balances are derived (or maintained as a snapshot table that can always be rebuilt from entries).
+- **Processed events:** the `event_id` claim table grows by 5M rows/day. Retain claims at least as long as the provider's maximum retry window plus your replay horizon (90 days is a common floor); archive older claims to cold storage — but note the trade-off: after a claim is purged, a replayed ancient event could re-post. Mitigation: the ledger itself carries the originating `event_id` on each entry, with its own unique constraint, as a permanent second line of defence.
+- **Raw events and audit log:** immutable object storage, retained per regulatory policy (often 5–10 years for payments).
+
+## 9. Deduplication and idempotency — the worked example
+
+The claim-and-post transaction, in SQL-shaped pseudocode:
+
+```sql
+BEGIN;
+
+-- 1. Claim the event. A duplicate delivery fails here and aborts the txn.
+INSERT INTO processed_events (event_id, payment_id, received_at)
+VALUES ('evt_987', 'pay_123', now());
+--    (unique constraint on event_id; on conflict -> ROLLBACK, treat as duplicate)
+
+-- 2. Apply the state transition (application checks it is legal first).
+UPDATE payments SET state = 'captured', version = version + 1
+WHERE payment_id = 'pay_123' AND state = 'authorised';
+--    (0 rows updated -> illegal or stale transition -> park the event instead)
+
+-- 3. Post to the ledger, stamped with the event that caused it.
+INSERT INTO ledger_entries (entry_id, payment_id, event_id, debit_acct, credit_acct, amount, currency)
+VALUES (gen_random_uuid(), 'pay_123', 'evt_987', 'provider_clearing', 'merchant_payable', 49900, 'INR');
+--    (unique constraint on ledger_entries.event_id as defence in depth)
+
+COMMIT;
+-- 4. Only after COMMIT, acknowledge / commit the queue offset.
+```
+
+The same pattern from application code, for an internal service calling an API rather than a database — idempotency keys on the request:
+
+```js
+// Client side: one key per logical operation, reused on every retry.
+const idempotencyKey = `refund:${paymentId}:${refundRequestId}`;
+await paymentsApi.post('/refunds', { paymentId, amount }, {
+  headers: { 'Idempotency-Key': idempotencyKey },
+});
+// Server side: first request stores (key -> response); a retry with the
+// same key returns the stored response instead of refunding twice.
+```
+
+Key properties to state out loud: the key identifies the **logical operation**, not the HTTP attempt; it is generated by the caller, once; the server stores the outcome alongside the key so a retry gets the original result, not just a rejection.
+
+## 10. Retry, failure handling, checkpointing and recovery
+
+- **Processor crash before commit:** transaction rolls back — no claim, no posting. The queue redelivers; the event is processed cleanly. This is why the offset is committed only after the database transaction.
+- **Processor crash after commit, before offset commit:** redelivery occurs; the claim insert conflicts; duplicate dropped. The window between commit and offset-commit is exactly where duplicates are born, and the design expects them.
+- **Illegal transition (out-of-order):** park the event in a delayed-retry store keyed by payment, re-evaluate when the payment's state changes or after a short delay; escalate to a dead-letter queue with an alert if it stays illegal beyond a threshold (say 24h) — that usually means a genuinely lost predecessor event, which reconciliation will also catch.
+- **Database unavailable:** consumers pause; the queue absorbs the backlog; the webhook receiver keeps acking (its raw store is the same database in the simplest deployment — if you want acking to survive a ledger-DB outage, store raw events in a separate durable store first; name this trade-off explicitly, it is a great Lead-level discussion point).
+- **Recovery from a processor bug:** fix the code, replay the affected event range from the queue/archive through the corrected processor. Idempotency makes replay safe for events that were processed correctly; events processed wrongly need reversing ledger entries, never edits.
+
+## 11. Monitoring and observability
+
+- Duplicate rate (a spike usually means the provider is retrying because your acks are slow).
+- Parked-event count and age; dead-letter count.
+- Ledger-vs-provider reconciliation discrepancy count, by class — the metric the business actually cares about, trended daily.
+- Processing lag (event arrival to posting), webhook endpoint latency and error rate.
+- Every event traceable by `event_id` and `payment_id` across receiver, queue, processor, ledger and audit log.
+
+## 12. Security
+
+- Webhook signature verification on every request, with replay protection (timestamp tolerance) — an unverified payment webhook endpoint is a money-printing API for attackers.
+- Secrets for provider keys in a managed secret store, rotated; provider callbacks allow-listed where the provider supports it.
+- Ledger database access restricted to the processor's service identity; no human write access in production — corrections go through reversing entries, which are themselves audited.
+- PII and card-adjacent data minimised: store provider references, not card numbers; tokenisation stays with the provider (PCI scope).
+
+## 13. Scalability, the 10x question, and cost
+
+**At 10x (50M events/day, ~600/sec average, thousands/sec at peak):** the shape holds. More partitions and processor replicas; the database becomes the bottleneck to watch — claim inserts and ledger inserts are both append-shaped and index-friendly, and PostgreSQL handles this comfortably with partitioning and batch commits. If the ledger DB genuinely saturates, shard by merchant/account — the natural ledger boundary — rather than by event. Reconciliation at 50M rows/day moves from SQL joins to a Spark/batch job over files, same logic.
+
+**Cost:** this system's costs are dominated by retention (audit + raw events for years in cheap object storage — fine) and by the relational database (keep it boring and right-sized). The expensive mistake to avoid is a distributed-transaction platform bought to solve a problem one database transaction already solves.
+
+## 14. Trade-offs, stated honestly
+
+| Choice | You gain | You pay |
+|---|---|---|
+| At-least-once delivery + idempotent processing | No lost events; exactly-once **effects** on the ledger | Duplicates are routine traffic; every consumer must be idempotent, forever |
+| Claim + post in one database transaction | Atomicity with bog-standard technology | Ledger and dedup store are coupled in one database; scaling them independently is harder |
+| State machine + parking for out-of-order events | Illegal states are unrepresentable | Parked events need storage, retry logic and an escalation path; a lost predecessor can park followers for hours |
+| Daily reconciliation | Independent proof of correctness | Discrepancies are found up to a day late; needs a human runbook, not just a job |
+
+<Callout type="warn">
+The honest semantics, one more time: **at-most-once** delivery loses payments — unacceptable. **At-least-once** delivery plus idempotent processing is what this design uses, and it yields **exactly-once effects**. **Exactly-once delivery** — each event physically delivered one time, no retries ever visible — is not achievable over unreliable networks; the sender can never distinguish "the event was lost" from "the acknowledgement was lost". Any vendor or framework claiming exactly-once is claiming it within a bounded scope (for example, inside Kafka's transactions), not end to end from a third-party webhook.
+</Callout>
+
+## 15. Interviewer follow-up Q&As
+
+1. **"What happens if a consumer crashes?"** — Depends where: before commit, the transaction rolls back and the event is redelivered; after commit but before the offset commit, redelivery hits the idempotency claim and is dropped. Both paths are safe by construction.
+2. **"How do you prevent duplicate processing?"** — Unique-claim insert on `event_id` in the same transaction as the ledger posting, plus a unique constraint on `ledger_entries.event_id` as defence in depth.
+3. **"The provider sends 'refunded' before 'captured'. Walk me through it."** — Same partition, state machine rejects `authorised → refunded`, event is parked and retried after the capture is applied; if the capture never comes, the parked event escalates and reconciliation flags the payment.
+4. **"How do you recover from a bug that double-posted 200 entries last night?"** — You do not delete them. You identify them from the audit log (entries whose `event_id` was already claimed — which should be impossible, so their existence tells you where the bug bypassed the claim), post reversing entries, and fix the path. The ledger stays append-only even while you are cleaning it.
+5. **"Why not just use Kafka's exactly-once semantics and skip the claim table?"** — Kafka's exactly-once covers produce/consume inside Kafka. The critical write here is into a relational ledger driven by a third-party webhook — outside that scope. The claim table is what extends the guarantee to the write that matters.
+6. **"How do you scale horizontally?"** — Partition by `payment_id`, add consumers. Ordering is per-payment, so parallelism across payments is free.
+7. **"What if the downstream database is unavailable for an hour?"** — The queue absorbs an hour of events trivially at this volume; processors pause; on recovery they drain in order per payment. Webhook acking continues if raw storage is independent — a deployment choice to make consciously.
+8. **"How do you guarantee data completeness?"** — Three layers: provider retries until ack; per-payment event sequence/state-gap detection; and daily reconciliation against provider files, which catches even the events that never arrived at all.
+9. **"Two different events, same payment, same amount, seconds apart. Duplicates?"** — No — different `event_id`s, both legitimate (a customer can pay twice). Dedup keys on event identity, never on amount or content similarity; content-based dedup in payments is how you eat a real payment.
+10. **"How long do you keep idempotency claims?"** — At least the provider's retry window plus your replay horizon; and because the ledger entry permanently carries its `event_id` under a unique constraint, an ancient replay is still blocked even after the claim table is archived.
+11. **"What does reconciliation do with an amount mismatch — same payment, different amount?"** — Flag, never auto-correct: pull the provider's record via API, compare against the audit trail, and route to a human with both records attached. Amount discrepancies are where fraud and provider bugs hide.
+12. **"Can you make the webhook endpoint itself idempotent?"** — It stores raw events keyed by provider `event_id` with a unique constraint, so a duplicate delivery is stored once — but the endpoint's real job is fast ack; correctness lives in the processor's claim transaction.
+
+## 16. Interview-ready spoken answer
+
+> "I'd start by pinning down two things: does every provider event carry a stable ID that survives retries, and what are the legal payment states and transitions. Then I'd say the framing sentence: exactly-once delivery isn't possible over a retrying network, so I'm building at-least-once delivery with idempotent processing — exactly-once effects on the ledger.
+>
+> The architecture: a webhook receiver that verifies signatures, stores the raw event, publishes it, and acks in milliseconds — because a slow ack manufactures duplicates. Events go onto a queue partitioned by payment ID, so one payment's events are processed serially and different payments in parallel.
+>
+> The core is the processor's transaction. For each event it inserts the event ID into a processed-events table with a unique constraint, checks the state transition is legal, writes the double-entry ledger posting stamped with that event ID, and commits — claim and posting in one database transaction. A duplicate delivery fails the claim and is dropped. An out-of-order event fails the state check and is parked for retry rather than applied or lost. Only after commit do we advance the queue offset, which means crashes produce redeliveries, and redeliveries are harmless.
+>
+> Around that core: an immutable audit log of every event and its disposition, and a daily reconciliation job comparing the ledger to the provider's settlement files — because the stream can't detect an event that never arrived, and reconciliation can.
+>
+> Scaling to 10x is partitions and replicas until the ledger database needs sharding by merchant. The trade-offs I'd name: I've coupled the dedup store and the ledger in one database deliberately, to buy atomicity with ordinary technology instead of a distributed-transaction platform; and reconciliation finds problems up to a day late, which is why the stream still has to be as correct as we can make it."
+
+## 17. Mock interview mode
+
+**Five hard follow-ups, with expected answers**
+
+1. **"Your claim table and ledger are in one database. It goes down. The provider is mid-retry-storm. Describe the next hour."** — Expected: acking continues only if raw storage is independent — if not, say so honestly and describe the provider's retry window absorbing the outage (providers retry for hours to days), then the drain: backlog processed in per-payment order, duplicate rate spiking and being absorbed by claims. Bonus: proposing the independent raw store as the follow-up hardening.
+2. **"Prove this design can never double-post. Where's the hole?"** — Expected: the proof is the unique constraint + single transaction. The honest hole: anything that writes to the ledger *outside* this path — a manual fix, a second service, a migration script. Defence: database permissions (only the processor identity can insert), plus the `event_id` unique constraint on the ledger itself.
+3. **"The provider changes its event format and starts minting new IDs on retry. What breaks and how do you notice?"** — Expected: dedup silently degrades; you notice via reconciliation discrepancies and a falling duplicate-rate metric (counter-intuitive: duplicates dropping to zero is a symptom). Fallback: business-key dedup (payment ID + type + state + amount) as an emergency net, flagged as weaker.
+4. **"A payment is stuck: 'authorised' arrived, 'captured' never did, customer says they were charged. Your move?"** — Expected: query the provider API for ground truth (this is why it was a clarifying question), reconcile that payment individually, and if the capture genuinely happened, synthesise the event through the same idempotent path with full audit annotation.
+5. **"Why double-entry and append-only? Isn't that overkill for an interview design?"** — Expected: no — append-only is what makes audit, replay and safe correction possible, and double-entry makes the ledger self-checking (books must balance). Updating balances in place destroys the evidence you need exactly when money is disputed.
+
+**Common candidate mistakes**
+
+- Promising exactly-once delivery, or using "exactly-once" without scoping it.
+- Processing the webhook synchronously before acking.
+- Deduplicating on amount/content instead of event identity.
+- Handling duplicates but ignoring out-of-order delivery (or vice versa).
+- No reconciliation — trusting the stream to be its own proof.
+- Editing or deleting ledger entries to fix errors.
+
+**What a senior/lead candidate mentions unprompted**
+
+- The claim-and-post single transaction, and *why* co-locating the stores is deliberate.
+- Offset committed only after the database commit.
+- Parking (not dropping) illegal transitions, with an escalation path.
+- The ledger's own `event_id` unique constraint as defence in depth.
+- Reconciliation classes (missing / extra / amount mismatch) each with a runbook.
+
+**Scoring rubric (out of 10)**
+
+| Score | What it looks like |
+|---|---|
+| 9–10 | Delivery-vs-effects distinction up front, atomic claim+post, state machine with parking, reconciliation with discrepancy classes, honest failure holes named |
+| 7–8 | Solid idempotency and ordering, but reconciliation shallow or the atomicity story fuzzy |
+| 5–6 | Mentions idempotency keys but stores them separately from the ledger write with no atomicity answer |
+| 3–4 | Queue + consumer with "Kafka exactly-once" as the whole correctness story |
+| 0–2 | Synchronous webhook processing, in-place balance updates, promises exactly-once delivery |
+
+Sources: [Stripe — idempotent requests (API documentation on idempotency keys)](https://docs.stripe.com/api/idempotent_requests) · [Apache Kafka documentation — delivery semantics](https://kafka.apache.org/documentation/) · [Martin Fowler — double-entry bookkeeping and accounting patterns](https://martinfowler.com/eaaDev/AccountingNarrative.html)

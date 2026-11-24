@@ -1,0 +1,231 @@
+{
+  "cards": [
+    {
+      "dot": "cyan",
+      "items": [
+        "The orchestrator fans one verified request out to every store that holds the user",
+        "The registry tracks each store's task separately \u2014 a case is done only when every receipt is in"
+      ],
+      "title": "One case, many stores"
+    },
+    {
+      "dot": "emerald",
+      "items": [
+        "OLTP rows deleted, Kafka tombstoned and compacted, lake files rewritten, index documents removed",
+        "Per-user encryption keys destroyed (crypto-shredding) so backup copies become unreadable ciphertext"
+      ],
+      "title": "Erase, don't just hide"
+    },
+    {
+      "dot": "rose",
+      "items": [
+        "Every store returns a signed receipt to an append-only audit ledger",
+        "Verification scans re-check for the user_id after completion; the 30-day SLA clock is monitored per case"
+      ],
+      "title": "Provable, not promised"
+    }
+  ],
+  "components": [
+    {
+      "id": "requester",
+      "label": "User / DPO",
+      "sublabel": "erasure request + identity proof",
+      "type": "external"
+    },
+    {
+      "id": "intake",
+      "label": "Erasure Intake API",
+      "sublabel": "verify identity, open case, start 30-day clock",
+      "type": "backend"
+    },
+    {
+      "id": "orchestrator",
+      "label": "Erasure Orchestrator",
+      "sublabel": "fan-out, track per-store tasks, retry",
+      "type": "backend"
+    },
+    {
+      "id": "registry",
+      "label": "Erasure Registry",
+      "sublabel": "case state + per-store receipts",
+      "type": "database"
+    },
+    {
+      "id": "topic",
+      "label": "Erasure Topic (Kafka)",
+      "sublabel": "durable fan-out, replayable",
+      "type": "messagebus"
+    },
+    {
+      "id": "kms",
+      "label": "Key Service / KMS",
+      "sublabel": "per-user DEK, crypto-shredding",
+      "type": "security"
+    },
+    {
+      "id": "workers",
+      "label": "Per-Store Erasure Workers",
+      "sublabel": "idempotent delete / tombstone handlers",
+      "type": "backend"
+    },
+    {
+      "id": "oltp",
+      "label": "OLTP Databases",
+      "sublabel": "delete rows, null PII fields",
+      "type": "database"
+    },
+    {
+      "id": "streams",
+      "label": "Kafka Data Topics",
+      "sublabel": "tombstones + log compaction",
+      "type": "messagebus"
+    },
+    {
+      "id": "lake",
+      "label": "Data Lake",
+      "sublabel": "Delta / Iceberg deletes + rewrite",
+      "type": "database"
+    },
+    {
+      "id": "warehouse",
+      "label": "Warehouse",
+      "sublabel": "delete + re-aggregate",
+      "type": "database"
+    },
+    {
+      "id": "search",
+      "label": "Search Index",
+      "sublabel": "delete documents by user_id",
+      "type": "database"
+    },
+    {
+      "id": "backups",
+      "label": "Backups & Snapshots",
+      "sublabel": "expire, or erase-on-restore + key destruction",
+      "type": "cloud"
+    },
+    {
+      "id": "audit",
+      "label": "Audit Proof Ledger",
+      "sublabel": "append-only, signed per-store receipts",
+      "type": "database"
+    },
+    {
+      "id": "monitor",
+      "label": "Monitoring & SLA Alerts",
+      "sublabel": "case age, stuck stores, verification scans",
+      "type": "cloud"
+    }
+  ],
+  "connections": [
+    {
+      "from": "requester",
+      "id": "req-intake",
+      "label": "verified erasure request",
+      "to": "intake"
+    },
+    {
+      "from": "intake",
+      "id": "intake-orch",
+      "label": "open case",
+      "to": "orchestrator"
+    },
+    {
+      "from": "orchestrator",
+      "id": "orch-registry",
+      "label": "record tasks + state",
+      "to": "registry"
+    },
+    {
+      "from": "orchestrator",
+      "id": "orch-topic",
+      "label": "publish erasure command",
+      "to": "topic",
+      "variant": "dashed"
+    },
+    {
+      "from": "topic",
+      "id": "topic-workers",
+      "label": "deliver per store",
+      "to": "workers",
+      "variant": "dashed"
+    },
+    {
+      "from": "orchestrator",
+      "id": "orch-kms",
+      "label": "destroy per-user key",
+      "to": "kms",
+      "variant": "security"
+    },
+    {
+      "from": "workers",
+      "id": "workers-oltp",
+      "label": "delete / anonymise rows",
+      "to": "oltp"
+    },
+    {
+      "from": "workers",
+      "id": "workers-streams",
+      "label": "write tombstones",
+      "to": "streams",
+      "variant": "dashed"
+    },
+    {
+      "from": "workers",
+      "id": "workers-lake",
+      "label": "merge-delete + file rewrite",
+      "to": "lake",
+      "variant": "dashed"
+    },
+    {
+      "from": "workers",
+      "id": "workers-warehouse",
+      "label": "delete + rebuild",
+      "to": "warehouse"
+    },
+    {
+      "from": "workers",
+      "id": "workers-search",
+      "label": "delete documents",
+      "to": "search"
+    },
+    {
+      "from": "workers",
+      "id": "workers-backups",
+      "label": "tag + expire / block restore",
+      "to": "backups",
+      "variant": "dashed"
+    },
+    {
+      "from": "workers",
+      "id": "workers-audit",
+      "label": "signed receipt",
+      "to": "audit",
+      "variant": "dashed"
+    },
+    {
+      "from": "orchestrator",
+      "id": "orch-monitor",
+      "label": "case age + stuck-task alerts",
+      "to": "monitor",
+      "variant": "dashed"
+    },
+    {
+      "from": "audit",
+      "id": "audit-requester",
+      "label": "completion certificate",
+      "to": "requester",
+      "variant": "dashed"
+    }
+  ],
+  "diagram_type": "architecture",
+  "layout": {
+    "mode": "auto"
+  },
+  "meta": {
+    "output": ".archify/build/scenario-gdpr-erasure/architecture.html",
+    "quality_profile": "showcase",
+    "title": "Erasing One User from Everywhere, Provably"
+  },
+  "schema_version": 1
+}

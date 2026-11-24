@@ -1,0 +1,127 @@
+{
+  "meta": {
+    "title": "Ride-Hailing Dispatch \u2014 Geo Matching",
+    "output": ".archify/build/guide/ride-hailing.html",
+    "quality_profile": "showcase"
+  },
+  "components": [
+    {
+      "id": "driver",
+      "type": "external",
+      "label": "Driver App",
+      "sublabel": "location heartbeat"
+    },
+    {
+      "id": "ingest",
+      "type": "backend",
+      "label": "Location Ingest",
+      "sublabel": "stream intake"
+    },
+    {
+      "id": "geo",
+      "type": "database",
+      "label": "Redis Geo Index",
+      "sublabel": "per region"
+    },
+    {
+      "id": "rider",
+      "type": "external",
+      "label": "Rider App",
+      "sublabel": "requests a ride"
+    },
+    {
+      "id": "matching",
+      "type": "backend",
+      "label": "Matching Service",
+      "sublabel": "filter + rank by ETA"
+    },
+    {
+      "id": "trip",
+      "type": "database",
+      "label": "Trip State DB",
+      "sublabel": "durable source of truth"
+    },
+    {
+      "id": "ws",
+      "type": "backend",
+      "label": "WebSocket Gateway",
+      "sublabel": "per-trip channel"
+    }
+  ],
+  "connections": [
+    {
+      "id": "d-i",
+      "from": "driver",
+      "to": "ingest",
+      "label": "location every 4s"
+    },
+    {
+      "id": "i-g",
+      "from": "ingest",
+      "to": "geo",
+      "label": "update position"
+    },
+    {
+      "id": "r-m",
+      "from": "rider",
+      "to": "matching",
+      "label": "request ride"
+    },
+    {
+      "id": "m-g",
+      "from": "matching",
+      "to": "geo",
+      "label": "GEOSEARCH + atomic claim"
+    },
+    {
+      "id": "m-t",
+      "from": "matching",
+      "to": "trip",
+      "label": "create trip"
+    },
+    {
+      "id": "t-w",
+      "from": "trip",
+      "to": "ws",
+      "label": "trip updates"
+    },
+    {
+      "id": "w-r",
+      "from": "ws",
+      "to": "rider",
+      "label": "live driver location",
+      "variant": "dashed"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Location path",
+      "items": [
+        "12,500 location writes/s at 50k drivers \u2014 never to a relational DB",
+        "Redis geo index is fast, approximate and self-healing from heartbeats"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Matching",
+      "items": [
+        "GEOSEARCH a radius, filter by availability and vehicle, rank by ETA",
+        "Atomic claim prevents double-assignment; decline/timeout releases it"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Live trip",
+      "items": [
+        "Trip DB is the durable source of truth",
+        "WebSocket gateway pushes driver location to the rider"
+      ]
+    }
+  ],
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "layout": {
+    "mode": "auto"
+  }
+}

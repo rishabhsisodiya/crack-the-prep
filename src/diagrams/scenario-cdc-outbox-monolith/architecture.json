@@ -1,0 +1,162 @@
+{
+  "cards": [
+    {
+      "dot": "cyan",
+      "items": [
+        "Business row + outbox row written in one Postgres transaction \u2014 no dual-write gap",
+        "Debezium tails the WAL and publishes the outbox row, then it can be deleted"
+      ],
+      "title": "Outbox"
+    },
+    {
+      "dot": "emerald",
+      "items": [
+        "Kafka partitioned by aggregate_id keeps per-order / per-payment ordering",
+        "Consumers dedup on event_id for exactly-once effects, not delivery"
+      ],
+      "title": "Streaming"
+    },
+    {
+      "dot": "rose",
+      "items": [
+        "Zero-downtime rollout: add table, deploy code, start CDC \u2014 no rewrite, no flag day",
+        "New consumers backfill from a snapshot, then catch up on the stream"
+      ],
+      "title": "Migration"
+    }
+  ],
+  "components": [
+    {
+      "id": "clients",
+      "label": "Clients & New Services",
+      "sublabel": "orders, payments, requests",
+      "type": "external"
+    },
+    {
+      "id": "monolith",
+      "label": "Monolith App",
+      "sublabel": "existing Postgres-backed app",
+      "type": "backend"
+    },
+    {
+      "id": "postgres",
+      "label": "Postgres + Outbox",
+      "sublabel": "business tables + outbox table",
+      "type": "database"
+    },
+    {
+      "id": "debezium",
+      "label": "Debezium CDC",
+      "sublabel": "WAL tailing, outbox router",
+      "type": "backend"
+    },
+    {
+      "id": "kafka",
+      "label": "Kafka",
+      "sublabel": "partition by aggregate_id",
+      "type": "messagebus"
+    },
+    {
+      "id": "consumer1",
+      "label": "Inventory Consumer",
+      "sublabel": "dedup on event_id",
+      "type": "backend"
+    },
+    {
+      "id": "consumer2",
+      "label": "Notification / Search Consumer",
+      "sublabel": "idempotent upserts",
+      "type": "backend"
+    },
+    {
+      "id": "storage",
+      "label": "Downstream Stores",
+      "sublabel": "read models, search index",
+      "type": "database"
+    },
+    {
+      "id": "monitor",
+      "label": "Monitoring",
+      "sublabel": "outbox lag, CDC lag, consumer lag",
+      "type": "cloud"
+    }
+  ],
+  "connections": [
+    {
+      "from": "clients",
+      "id": "cli-mono",
+      "label": "requests",
+      "to": "monolith"
+    },
+    {
+      "from": "monolith",
+      "id": "mono-pg",
+      "label": "one transaction: row + outbox",
+      "to": "postgres"
+    },
+    {
+      "from": "postgres",
+      "id": "pg-deb",
+      "label": "WAL / logical decoding",
+      "to": "debezium",
+      "variant": "dashed"
+    },
+    {
+      "from": "debezium",
+      "id": "deb-kafka",
+      "label": "publish events (async)",
+      "to": "kafka",
+      "variant": "dashed"
+    },
+    {
+      "from": "kafka",
+      "id": "kafka-c1",
+      "label": "consume (async)",
+      "to": "consumer1",
+      "variant": "dashed"
+    },
+    {
+      "from": "kafka",
+      "id": "kafka-c2",
+      "label": "consume (async)",
+      "to": "consumer2",
+      "variant": "dashed"
+    },
+    {
+      "from": "consumer1",
+      "id": "c1-store",
+      "label": "idempotent write",
+      "to": "storage"
+    },
+    {
+      "from": "consumer2",
+      "id": "c2-store",
+      "label": "idempotent upsert",
+      "to": "storage"
+    },
+    {
+      "from": "debezium",
+      "id": "deb-monitor",
+      "label": "CDC + outbox lag metrics",
+      "to": "monitor",
+      "variant": "dashed"
+    },
+    {
+      "from": "kafka",
+      "id": "kafka-monitor",
+      "label": "consumer lag metrics",
+      "to": "monitor",
+      "variant": "dashed"
+    }
+  ],
+  "diagram_type": "architecture",
+  "layout": {
+    "mode": "auto"
+  },
+  "meta": {
+    "output": ".archify/build/scenario-cdc-outbox-monolith/architecture.html",
+    "quality_profile": "showcase",
+    "title": "Getting Events Out of a Monolith \u2014 Transactional Outbox + Debezium CDC to Kafka"
+  },
+  "schema_version": 1
+}

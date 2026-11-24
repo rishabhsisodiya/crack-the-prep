@@ -1,0 +1,190 @@
+{
+  "cards": [
+    {
+      "dot": "cyan",
+      "items": [
+        "Batch dumps from CRM and billing, streaming product events, CDC from support and marketing",
+        "Kafka partitioned by source customer key keeps per-source ordering"
+      ],
+      "title": "Ingestion"
+    },
+    {
+      "dot": "emerald",
+      "items": [
+        "Identity resolution matches on email, phone and device: deterministic first, probabilistic second",
+        "Survivorship rules decide which source wins per field, not per record"
+      ],
+      "title": "Resolution"
+    },
+    {
+      "dot": "rose",
+      "items": [
+        "At-least-once delivery plus idempotent upserts = effectively-once profile effects",
+        "GDPR erasure and consent propagate to every downstream copy, with tombstones"
+      ],
+      "title": "Privacy & Reliability"
+    }
+  ],
+  "components": [
+    {
+      "id": "sources",
+      "label": "Source Systems",
+      "sublabel": "CRM, billing, support, marketing",
+      "type": "external"
+    },
+    {
+      "id": "product",
+      "label": "Product Events",
+      "sublabel": "app + web clickstream",
+      "type": "external"
+    },
+    {
+      "id": "ingest",
+      "label": "Ingestion Layer",
+      "sublabel": "batch loaders + CDC + API",
+      "type": "backend"
+    },
+    {
+      "id": "kafka",
+      "label": "Kafka",
+      "sublabel": "partition by source key",
+      "type": "messagebus"
+    },
+    {
+      "id": "dedup",
+      "label": "Dedup + Normalise",
+      "sublabel": "source event_id, schema map",
+      "type": "backend"
+    },
+    {
+      "id": "identity",
+      "label": "Identity Resolution",
+      "sublabel": "match, merge, split",
+      "type": "backend"
+    },
+    {
+      "id": "profile",
+      "label": "Customer Profile Store",
+      "sublabel": "golden record + field lineage",
+      "type": "database"
+    },
+    {
+      "id": "lake",
+      "label": "Data Lake + Warehouse",
+      "sublabel": "raw archive + history",
+      "type": "database"
+    },
+    {
+      "id": "dest",
+      "label": "Downstream Consumers",
+      "sublabel": "email, ads, support UI, analytics",
+      "type": "external"
+    },
+    {
+      "id": "privacy",
+      "label": "Privacy Service",
+      "sublabel": "consent + erasure propagation",
+      "type": "backend"
+    },
+    {
+      "id": "monitor",
+      "label": "Monitoring",
+      "sublabel": "match rate, lag, erasure SLA",
+      "type": "cloud"
+    }
+  ],
+  "connections": [
+    {
+      "from": "sources",
+      "id": "src-ing",
+      "label": "batch + CDC (async)",
+      "to": "ingest",
+      "variant": "dashed"
+    },
+    {
+      "from": "product",
+      "id": "prod-ing",
+      "label": "streaming events",
+      "to": "ingest",
+      "variant": "dashed"
+    },
+    {
+      "from": "ingest",
+      "id": "ing-kafka",
+      "label": "produce raw events",
+      "to": "kafka"
+    },
+    {
+      "from": "kafka",
+      "id": "kafka-dedup",
+      "label": "consume (async)",
+      "to": "dedup",
+      "variant": "dashed"
+    },
+    {
+      "from": "dedup",
+      "id": "dedup-id",
+      "label": "clean records",
+      "to": "identity",
+      "variant": "dashed"
+    },
+    {
+      "from": "identity",
+      "id": "id-profile",
+      "label": "idempotent upsert",
+      "to": "profile"
+    },
+    {
+      "from": "kafka",
+      "id": "kafka-lake",
+      "label": "archive raw (async)",
+      "to": "lake",
+      "variant": "dashed"
+    },
+    {
+      "from": "profile",
+      "id": "profile-dest",
+      "label": "profile changes (CDC)",
+      "to": "dest",
+      "variant": "dashed"
+    },
+    {
+      "from": "lake",
+      "id": "lake-dest",
+      "label": "batch exports",
+      "to": "dest",
+      "variant": "dashed"
+    },
+    {
+      "from": "privacy",
+      "id": "privacy-profile",
+      "label": "erase / consent update",
+      "to": "profile",
+      "variant": "dashed"
+    },
+    {
+      "from": "privacy",
+      "id": "privacy-dest",
+      "label": "erasure fan-out (async)",
+      "to": "dest",
+      "variant": "dashed"
+    },
+    {
+      "from": "identity",
+      "id": "id-monitor",
+      "label": "metrics + match quality",
+      "to": "monitor",
+      "variant": "dashed"
+    }
+  ],
+  "diagram_type": "architecture",
+  "layout": {
+    "mode": "auto"
+  },
+  "meta": {
+    "output": ".archify/build/scenario-customer-360-ingestion/architecture.html",
+    "quality_profile": "showcase",
+    "title": "Customer 360 \u2014 Five Sources, One Customer Record"
+  },
+  "schema_version": 1
+}

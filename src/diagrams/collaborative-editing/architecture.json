@@ -1,0 +1,110 @@
+{
+  "cards": [
+    {
+      "dot": "cyan",
+      "items": [
+        "Clients keep a local copy plus a queue of unacknowledged ops, so typing and dragging never wait on the network",
+        "On reconnect, pending ops are replayed / re-transformed / re-merged \u2014 never silently discarded"
+      ],
+      "title": "Local-first clients"
+    },
+    {
+      "dot": "emerald",
+      "items": [
+        "A central server per document transforms incoming ops (OT) or merges commutative updates (CRDT), then broadcasts",
+        "Full peer-to-peer sync adds complexity most products don't need, since edits already flow through servers"
+      ],
+      "title": "Server as arbiter"
+    },
+    {
+      "dot": "rose",
+      "items": [
+        "OT is battle-tested for linear text (Google Docs); CRDTs generalize to trees (Figma: last-write-wins per property)",
+        "CRDT tombstones grow unbounded \u2014 periodic snapshot + bounded history (Figma: ~7 days) cuts file size ~90%"
+      ],
+      "title": "OT vs CRDT & growth"
+    }
+  ],
+  "components": [
+    {
+      "id": "client_a",
+      "label": "Client A",
+      "sublabel": "local doc + pending ops",
+      "type": "external"
+    },
+    {
+      "id": "client_b",
+      "label": "Client B",
+      "sublabel": "local doc + pending ops",
+      "type": "external"
+    },
+    {
+      "id": "server",
+      "label": "Sync Server",
+      "sublabel": "assign order / transform / merge",
+      "type": "backend"
+    },
+    {
+      "id": "docstore",
+      "label": "Document Store",
+      "sublabel": "periodic snapshot",
+      "type": "database"
+    },
+    {
+      "id": "oplog",
+      "label": "Operation Log",
+      "sublabel": "append-only op log",
+      "type": "database"
+    }
+  ],
+  "connections": [
+    {
+      "from": "client_a",
+      "id": "a-server",
+      "label": "WebSocket: op/update",
+      "to": "server"
+    },
+    {
+      "from": "client_b",
+      "id": "b-server",
+      "label": "WebSocket: op/update",
+      "to": "server"
+    },
+    {
+      "from": "server",
+      "id": "server-a",
+      "label": "broadcast accepted op",
+      "to": "client_a",
+      "variant": "dashed"
+    },
+    {
+      "from": "server",
+      "id": "server-b",
+      "label": "broadcast accepted op",
+      "to": "client_b",
+      "variant": "dashed"
+    },
+    {
+      "from": "server",
+      "id": "server-doc",
+      "label": "periodic snapshot",
+      "to": "docstore"
+    },
+    {
+      "from": "server",
+      "id": "server-log",
+      "label": "append-only op log",
+      "to": "oplog"
+    }
+  ],
+  "diagram_type": "architecture",
+  "layout": {
+    "mode": "auto"
+  },
+  "meta": {
+    "output": ".archify/build/collaborative-editing/architecture.html",
+    "quality_profile": "showcase",
+    "title": "Collaborative Editing \u2014 Central Server Relays and Orders"
+  },
+  "schema_version": 1
+}

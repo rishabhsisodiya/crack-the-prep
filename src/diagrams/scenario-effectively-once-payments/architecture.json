@@ -1,0 +1,167 @@
+{
+  "cards": [
+    {
+      "dot": "cyan",
+      "items": [
+        "Delivery is at-least-once; the ledger effect must happen exactly once",
+        "Claim the event_id with a unique insert in the same transaction as the posting"
+      ],
+      "title": "Core rule"
+    },
+    {
+      "dot": "emerald",
+      "items": [
+        "Partition by payment_id; a state machine rejects or parks out-of-order transitions",
+        "Refunds and captures reference the original payment, never free-standing postings"
+      ],
+      "title": "Ordering"
+    },
+    {
+      "dot": "rose",
+      "items": [
+        "Daily reconciliation against provider settlement files catches anything the stream missed",
+        "Append-only ledger: corrections are new entries, never edits"
+      ],
+      "title": "Safety net"
+    }
+  ],
+  "components": [
+    {
+      "id": "provider",
+      "label": "Payment Provider",
+      "sublabel": "webhooks, at-least-once",
+      "type": "external"
+    },
+    {
+      "id": "internal",
+      "label": "Internal Services",
+      "sublabel": "checkout, refunds, payouts",
+      "type": "external"
+    },
+    {
+      "id": "receiver",
+      "label": "Webhook Receiver",
+      "sublabel": "verify signature, store raw",
+      "type": "backend"
+    },
+    {
+      "id": "queue",
+      "label": "Event Queue / Kafka",
+      "sublabel": "partition by payment_id",
+      "type": "messagebus"
+    },
+    {
+      "id": "processor",
+      "label": "Payment Processor",
+      "sublabel": "state machine + ordering",
+      "type": "backend"
+    },
+    {
+      "id": "idem",
+      "label": "Idempotency Store",
+      "sublabel": "processed event_ids, unique key",
+      "type": "database"
+    },
+    {
+      "id": "ledger",
+      "label": "Ledger DB",
+      "sublabel": "append-only, double-entry",
+      "type": "database"
+    },
+    {
+      "id": "recon",
+      "label": "Reconciliation Job",
+      "sublabel": "provider files vs ledger",
+      "type": "backend"
+    },
+    {
+      "id": "audit",
+      "label": "Audit Log",
+      "sublabel": "immutable event history",
+      "type": "database"
+    },
+    {
+      "id": "monitor",
+      "label": "Monitoring & Alerts",
+      "sublabel": "mismatches, stuck payments",
+      "type": "cloud"
+    }
+  ],
+  "connections": [
+    {
+      "from": "provider",
+      "id": "prov-recv",
+      "label": "signed webhooks",
+      "to": "receiver"
+    },
+    {
+      "from": "internal",
+      "id": "int-recv",
+      "label": "payment events",
+      "to": "receiver"
+    },
+    {
+      "from": "receiver",
+      "id": "recv-queue",
+      "label": "publish raw event",
+      "to": "queue",
+      "variant": "dashed"
+    },
+    {
+      "from": "queue",
+      "id": "queue-proc",
+      "label": "consume (async)",
+      "to": "processor",
+      "variant": "dashed"
+    },
+    {
+      "from": "processor",
+      "id": "proc-idem",
+      "label": "claim event_id (unique insert)",
+      "to": "idem"
+    },
+    {
+      "from": "processor",
+      "id": "proc-ledger",
+      "label": "post once, in one txn",
+      "to": "ledger"
+    },
+    {
+      "from": "processor",
+      "id": "proc-audit",
+      "label": "append audit entry",
+      "to": "audit",
+      "variant": "dashed"
+    },
+    {
+      "from": "provider",
+      "id": "provider-recon",
+      "label": "settlement files",
+      "to": "recon",
+      "variant": "dashed"
+    },
+    {
+      "from": "recon",
+      "id": "recon-ledger",
+      "label": "compare + flag gaps",
+      "to": "ledger"
+    },
+    {
+      "from": "recon",
+      "id": "recon-monitor",
+      "label": "mismatch alerts",
+      "to": "monitor",
+      "variant": "dashed"
+    }
+  ],
+  "diagram_type": "architecture",
+  "layout": {
+    "mode": "auto"
+  },
+  "meta": {
+    "output": ".archify/build/scenario-effectively-once-payments/architecture.html",
+    "quality_profile": "showcase",
+    "title": "Effectively-Once Payment Event Processing"
+  },
+  "schema_version": 1
+}

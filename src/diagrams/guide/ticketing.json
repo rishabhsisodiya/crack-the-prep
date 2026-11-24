@@ -1,0 +1,179 @@
+{
+  "meta": {
+    "title": "Support Ticketing \u2014 Multi-Channel Intake & SLA",
+    "output": ".archify/build/guide/ticketing.html",
+    "quality_profile": "showcase"
+  },
+  "components": [
+    {
+      "id": "web",
+      "type": "external",
+      "label": "Web Form",
+      "sublabel": "ticket submission"
+    },
+    {
+      "id": "email",
+      "type": "external",
+      "label": "Email Webhook",
+      "sublabel": "inbound mail"
+    },
+    {
+      "id": "phone",
+      "type": "external",
+      "label": "Telephony Webhook",
+      "sublabel": "phone channel"
+    },
+    {
+      "id": "partner",
+      "type": "external",
+      "label": "Partner Webhook",
+      "sublabel": "inbound API"
+    },
+    {
+      "id": "normalise",
+      "type": "backend",
+      "label": "Normalise",
+      "sublabel": "CreateTicket command"
+    },
+    {
+      "id": "dedupe",
+      "type": "backend",
+      "label": "Dedupe Check",
+      "sublabel": "seen channel id?"
+    },
+    {
+      "id": "existing",
+      "type": "backend",
+      "label": "Return Existing",
+      "sublabel": "duplicate intake"
+    },
+    {
+      "id": "create",
+      "type": "backend",
+      "label": "CreateTicketService",
+      "sublabel": "state machine + guards"
+    },
+    {
+      "id": "db",
+      "type": "database",
+      "label": "Tickets DB",
+      "sublabel": "tickets \u00b7 events \u00b7 sla_clocks"
+    },
+    {
+      "id": "queue",
+      "type": "messagebus",
+      "label": "Event Queue",
+      "sublabel": "ticket events"
+    },
+    {
+      "id": "notify",
+      "type": "backend",
+      "label": "Notification Worker",
+      "sublabel": "retries + DLQ"
+    },
+    {
+      "id": "sla",
+      "type": "backend",
+      "label": "SLA Engine",
+      "sublabel": "1-min breach scan"
+    }
+  ],
+  "connections": [
+    {
+      "id": "web-n",
+      "from": "web",
+      "to": "normalise",
+      "label": "submit"
+    },
+    {
+      "id": "email-n",
+      "from": "email",
+      "to": "normalise",
+      "label": "webhook"
+    },
+    {
+      "id": "phone-n",
+      "from": "phone",
+      "to": "normalise",
+      "label": "webhook"
+    },
+    {
+      "id": "partner-n",
+      "from": "partner",
+      "to": "normalise",
+      "label": "webhook"
+    },
+    {
+      "id": "n-d",
+      "from": "normalise",
+      "to": "dedupe"
+    },
+    {
+      "id": "d-e",
+      "from": "dedupe",
+      "to": "existing",
+      "label": "yes: seen",
+      "variant": "dashed"
+    },
+    {
+      "id": "d-c",
+      "from": "dedupe",
+      "to": "create",
+      "label": "no: new ticket"
+    },
+    {
+      "id": "c-db",
+      "from": "create",
+      "to": "db",
+      "label": "write ticket + event"
+    },
+    {
+      "id": "c-q",
+      "from": "create",
+      "to": "queue",
+      "label": "publish event",
+      "variant": "dashed"
+    },
+    {
+      "id": "q-notify",
+      "from": "queue",
+      "to": "notify"
+    },
+    {
+      "id": "q-sla",
+      "from": "queue",
+      "to": "sla"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Intake",
+      "items": [
+        "Four channels normalise to one CreateTicket command",
+        "Dedupe on channel message id returns the existing ticket"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Core",
+      "items": [
+        "CreateTicketService enforces the status state machine",
+        "Every transition appends a ticket_events audit row"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Async",
+      "items": [
+        "Event queue fans out to notifications and the SLA engine",
+        "SLA engine scans clocks nearing breach every minute"
+      ]
+    }
+  ],
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "layout": {
+    "mode": "auto"
+  }
+}

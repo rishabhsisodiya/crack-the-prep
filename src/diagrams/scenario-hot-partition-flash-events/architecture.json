@@ -1,0 +1,186 @@
+{
+  "cards": [
+    {
+      "dot": "cyan",
+      "items": [
+        "One hot event_id key drives ~500K events/sec onto a single partition",
+        "Key salting spreads the hot key, two-stage merge restores order and totals"
+      ],
+      "title": "The Hot Key"
+    },
+    {
+      "dot": "emerald",
+      "items": [
+        "Tiered topics and per-tenant quotas isolate other tenants from the spike",
+        "Load shedding: queue what matters, drop what is cheap, reject the rest fast with 429"
+      ],
+      "title": "Isolation & Shedding"
+    },
+    {
+      "dot": "rose",
+      "items": [
+        "At-least-once delivery plus idempotent writes = exactly-once effects",
+        "Consumer lag age, not count, is the backpressure signal that triggers action"
+      ],
+      "title": "Reliability"
+    }
+  ],
+  "components": [
+    {
+      "id": "clients",
+      "label": "Clients & Fans",
+      "sublabel": "flash-event traffic, 20x spike",
+      "type": "external"
+    },
+    {
+      "id": "edge",
+      "label": "Edge / Load Balancer",
+      "sublabel": "rate limit, 429 + Retry-After",
+      "type": "backend"
+    },
+    {
+      "id": "ingest",
+      "label": "Ingestion API",
+      "sublabel": "validate, quota, tenant tiering",
+      "type": "backend"
+    },
+    {
+      "id": "salter",
+      "label": "Key Salter / Router",
+      "sublabel": "hot key -> N salted sub-keys",
+      "type": "backend"
+    },
+    {
+      "id": "kafka",
+      "label": "Kafka",
+      "sublabel": "hot topic + standard topics, partitioned",
+      "type": "messagebus"
+    },
+    {
+      "id": "workers",
+      "label": "Stream Workers",
+      "sublabel": "stage 1: partial aggregates per salt",
+      "type": "backend"
+    },
+    {
+      "id": "dedup",
+      "label": "Dedup Service",
+      "sublabel": "event_id / idempotency-key check",
+      "type": "backend"
+    },
+    {
+      "id": "merge",
+      "label": "Merge / Aggregator",
+      "sublabel": "stage 2: combine salted partials",
+      "type": "backend"
+    },
+    {
+      "id": "store",
+      "label": "Inventory & Orders Store",
+      "sublabel": "conditional writes, hot + cold data",
+      "type": "database"
+    },
+    {
+      "id": "dlq",
+      "label": "Dead-Letter Queue",
+      "sublabel": "poison + shed overflow",
+      "type": "messagebus"
+    },
+    {
+      "id": "dash",
+      "label": "Buyers & Ops Dashboards",
+      "sublabel": "live counts, order status",
+      "type": "external"
+    },
+    {
+      "id": "monitor",
+      "label": "Monitoring",
+      "sublabel": "per-partition lag, skew, shed rate",
+      "type": "cloud"
+    }
+  ],
+  "connections": [
+    {
+      "from": "clients",
+      "id": "cli-edge",
+      "label": "HTTPS burst",
+      "to": "edge",
+      "variant": "dashed"
+    },
+    {
+      "from": "edge",
+      "id": "edge-ing",
+      "label": "admitted traffic",
+      "to": "ingest"
+    },
+    {
+      "from": "ingest",
+      "id": "ing-salt",
+      "label": "route by key",
+      "to": "salter"
+    },
+    {
+      "from": "salter",
+      "id": "salt-kafka",
+      "label": "produce salted keys",
+      "to": "kafka"
+    },
+    {
+      "from": "kafka",
+      "id": "kafka-work",
+      "label": "consume (async)",
+      "to": "workers",
+      "variant": "dashed"
+    },
+    {
+      "from": "workers",
+      "id": "work-dedup",
+      "label": "check event_id",
+      "to": "dedup",
+      "variant": "dashed"
+    },
+    {
+      "from": "workers",
+      "id": "work-merge",
+      "label": "partial aggregates",
+      "to": "merge",
+      "variant": "dashed"
+    },
+    {
+      "from": "merge",
+      "id": "merge-store",
+      "label": "idempotent upsert",
+      "to": "store"
+    },
+    {
+      "from": "workers",
+      "id": "work-dlq",
+      "label": "poison / overflow",
+      "to": "dlq",
+      "variant": "dashed"
+    },
+    {
+      "from": "store",
+      "id": "store-dash",
+      "label": "reads",
+      "to": "dash"
+    },
+    {
+      "from": "kafka",
+      "id": "kafka-monitor",
+      "label": "lag + skew metrics",
+      "to": "monitor",
+      "variant": "dashed"
+    }
+  ],
+  "diagram_type": "architecture",
+  "layout": {
+    "mode": "auto"
+  },
+  "meta": {
+    "output": ".archify/build/scenario-hot-partition-flash-events/architecture.html",
+    "quality_profile": "showcase",
+    "title": "Surviving a 20x Spike \u2014 Hot Partitions and Backpressure"
+  },
+  "schema_version": 1
+}

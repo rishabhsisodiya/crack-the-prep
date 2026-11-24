@@ -1,0 +1,128 @@
+{
+  "meta": {
+    "output": ".archify/build/google-drive/architecture.html",
+    "title": "Google Drive \u2014 Metadata Separated from Content-Addressed Blocks",
+    "quality_profile": "showcase"
+  },
+  "components": [
+    {
+      "id": "laptop",
+      "label": "Client \u2014 Laptop",
+      "sublabel": "chunks + hashes locally",
+      "type": "external"
+    },
+    {
+      "id": "phone",
+      "label": "Client \u2014 Phone",
+      "sublabel": "chunks + hashes locally",
+      "type": "external"
+    },
+    {
+      "id": "api",
+      "label": "API / Sync Service",
+      "sublabel": "delta sync coordination",
+      "type": "backend"
+    },
+    {
+      "id": "meta",
+      "label": "Metadata DB",
+      "sublabel": "files, versions, permissions",
+      "type": "database"
+    },
+    {
+      "id": "blocksvc",
+      "label": "Block / Chunk Service",
+      "sublabel": "which hashes are missing?",
+      "type": "backend"
+    },
+    {
+      "id": "obj",
+      "label": "Object Storage",
+      "sublabel": "content-addressed blocks",
+      "type": "database"
+    },
+    {
+      "id": "notif",
+      "label": "Notification Service",
+      "sublabel": "push: something changed",
+      "type": "backend"
+    }
+  ],
+  "connections": [
+    {
+      "id": "l-api",
+      "from": "laptop",
+      "to": "api",
+      "label": "chunk + hash"
+    },
+    {
+      "id": "p-api",
+      "from": "phone",
+      "to": "api",
+      "label": "chunk + hash"
+    },
+    {
+      "id": "api-md",
+      "from": "api",
+      "to": "meta"
+    },
+    {
+      "id": "api-blk",
+      "from": "api",
+      "to": "blocksvc"
+    },
+    {
+      "id": "blk-obj",
+      "from": "blocksvc",
+      "to": "obj"
+    },
+    {
+      "id": "api-n",
+      "from": "api",
+      "to": "notif"
+    },
+    {
+      "id": "n-l",
+      "from": "notif",
+      "to": "laptop",
+      "label": "push: something changed"
+    },
+    {
+      "id": "n-p",
+      "from": "notif",
+      "to": "phone",
+      "label": "push: something changed"
+    }
+  ],
+  "cards": [
+    {
+      "title": "The core move",
+      "dot": "cyan",
+      "items": [
+        "Split metadata from blob content: strongly consistent metadata DB at TB scale, content-addressed block store at exabyte scale",
+        "Content addressing gives dedup for free \u2014 identical bytes share one stored block and a reference count"
+      ]
+    },
+    {
+      "title": "Delta sync",
+      "dot": "emerald",
+      "items": [
+        "Client sends only chunk hashes; the server names the hashes it lacks and only those chunks upload",
+        "A one-byte edit to a 2 GB file never re-uploads 2 GB"
+      ]
+    },
+    {
+      "title": "Conflicts",
+      "dot": "rose",
+      "items": [
+        "Version mismatch on reconnect means a conflict: last-writer-wins for the canonical file",
+        "The losing edit is preserved as a conflicted copy \u2014 a user's edit is never silently destroyed"
+      ]
+    }
+  ],
+  "diagram_type": "architecture",
+  "layout": {
+    "mode": "auto"
+  },
+  "schema_version": 1
+}

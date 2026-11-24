@@ -1,0 +1,182 @@
+{
+  "cards": [
+    {
+      "dot": "cyan",
+      "items": [
+        "Every file arrives with a manifest: record count, control total and checksum",
+        "A file that fails manifest validation is quarantined, never reconciled"
+      ],
+      "title": "Completeness First"
+    },
+    {
+      "dot": "emerald",
+      "items": [
+        "Match in passes: exact on reference first, then amount/date tolerance",
+        "Unmatched items become breaks with a type, owner and ageing clock"
+      ],
+      "title": "Matching & Breaks"
+    },
+    {
+      "dot": "rose",
+      "items": [
+        "Re-running a day is safe: run-scoped staging and idempotent merge, no double-counting",
+        "At-least-once file delivery plus idempotent processing = exactly-once effects"
+      ],
+      "title": "Safe Re-runs"
+    }
+  ],
+  "components": [
+    {
+      "id": "proc_a",
+      "label": "Processor A",
+      "sublabel": "daily settlement file",
+      "type": "external"
+    },
+    {
+      "id": "proc_b",
+      "label": "Processor B",
+      "sublabel": "daily settlement file",
+      "type": "external"
+    },
+    {
+      "id": "proc_c",
+      "label": "Processor C",
+      "sublabel": "daily settlement file",
+      "type": "external"
+    },
+    {
+      "id": "landing",
+      "label": "File Landing",
+      "sublabel": "object storage + manifest check",
+      "type": "backend"
+    },
+    {
+      "id": "staging",
+      "label": "Validation & Staging",
+      "sublabel": "parse, normalise, stage by run",
+      "type": "backend"
+    },
+    {
+      "id": "recon",
+      "label": "Reconciliation Engine",
+      "sublabel": "match passes + tie-out",
+      "type": "backend"
+    },
+    {
+      "id": "ledger",
+      "label": "Internal Orders & Ledger",
+      "sublabel": "orders, payments, ledger entries",
+      "type": "database"
+    },
+    {
+      "id": "matched",
+      "label": "Matched Store",
+      "sublabel": "proven matched pairs",
+      "type": "database"
+    },
+    {
+      "id": "breakq",
+      "label": "Break Queue",
+      "sublabel": "typed, owned, ageing breaks",
+      "type": "database"
+    },
+    {
+      "id": "ops",
+      "label": "Ops Dashboard & Analysts",
+      "sublabel": "work breaks, sign off close",
+      "type": "external"
+    },
+    {
+      "id": "report",
+      "label": "Control Totals Report",
+      "sublabel": "counts, sums, tie-out proof",
+      "type": "backend"
+    }
+  ],
+  "connections": [
+    {
+      "from": "proc_a",
+      "id": "pa-land",
+      "label": "settlement file (daily)",
+      "to": "landing",
+      "variant": "dashed"
+    },
+    {
+      "from": "proc_b",
+      "id": "pb-land",
+      "label": "settlement file (daily)",
+      "to": "landing",
+      "variant": "dashed"
+    },
+    {
+      "from": "proc_c",
+      "id": "pc-land",
+      "label": "settlement file (daily)",
+      "to": "landing",
+      "variant": "dashed"
+    },
+    {
+      "from": "landing",
+      "id": "land-stage",
+      "label": "manifest OK only",
+      "to": "staging",
+      "variant": "dashed"
+    },
+    {
+      "from": "staging",
+      "id": "stage-recon",
+      "label": "staged batch (per run)",
+      "to": "recon",
+      "variant": "dashed"
+    },
+    {
+      "from": "ledger",
+      "id": "ledger-recon",
+      "label": "internal records",
+      "to": "recon"
+    },
+    {
+      "from": "recon",
+      "id": "recon-matched",
+      "label": "matched pairs",
+      "to": "matched"
+    },
+    {
+      "from": "recon",
+      "id": "recon-break",
+      "label": "breaks",
+      "to": "breakq"
+    },
+    {
+      "from": "breakq",
+      "id": "break-ops",
+      "label": "work queue",
+      "to": "ops",
+      "variant": "dashed"
+    },
+    {
+      "from": "recon",
+      "id": "recon-report",
+      "label": "counts + control totals",
+      "to": "report",
+      "variant": "dashed"
+    },
+    {
+      "from": "report",
+      "id": "report-ops",
+      "label": "tie-out sign-off",
+      "to": "ops",
+      "variant": "dashed"
+    }
+  ],
+  "diagram_type": "architecture",
+  "layout": {
+    "mode": "auto"
+  },
+  "meta": {
+    "output": ".archify/build/scenario-finance-reconciliation/architecture.html",
+    "quality_profile": "showcase",
+    "title": "Finance Reconciliation \u2014 Proving No Transaction Was Lost"
+  },
+  "schema_version": 1
+}

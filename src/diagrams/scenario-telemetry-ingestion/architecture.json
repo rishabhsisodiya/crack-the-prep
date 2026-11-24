@@ -1,0 +1,169 @@
+{
+  "cards": [
+    {
+      "dot": "cyan",
+      "items": [
+        "Gateways buffer offline and replay with original event_id and event time",
+        "Kafka partitioned by device_id keeps per-device ordering"
+      ],
+      "title": "Ingestion"
+    },
+    {
+      "dot": "emerald",
+      "items": [
+        "Stream job dedups on event_id and uses watermarks for late data",
+        "Two consumers: real-time alerting under 30s, and the warehouse path"
+      ],
+      "title": "Processing"
+    },
+    {
+      "dot": "rose",
+      "items": [
+        "At-least-once delivery plus idempotent writes = effectively-once effects",
+        "Raw events archived so any aggregate can be rebuilt by replay"
+      ],
+      "title": "Reliability"
+    }
+  ],
+  "components": [
+    {
+      "id": "devices",
+      "label": "Devices & Fleet",
+      "sublabel": "sensors, vehicles, machines",
+      "type": "external"
+    },
+    {
+      "id": "gateway",
+      "label": "Edge Gateways",
+      "sublabel": "buffer, batch, sign events",
+      "type": "backend"
+    },
+    {
+      "id": "ingest",
+      "label": "Ingestion API",
+      "sublabel": "validate + authenticate",
+      "type": "backend"
+    },
+    {
+      "id": "kafka",
+      "label": "Kafka",
+      "sublabel": "partition by device_id",
+      "type": "messagebus"
+    },
+    {
+      "id": "dedup",
+      "label": "Dedup + Stream Job",
+      "sublabel": "event_id set, watermarks",
+      "type": "backend"
+    },
+    {
+      "id": "alerts",
+      "label": "Alerting Engine",
+      "sublabel": "rules, <30s to alert",
+      "type": "backend"
+    },
+    {
+      "id": "hot",
+      "label": "Hot Store",
+      "sublabel": "ClickHouse / Pinot",
+      "type": "database"
+    },
+    {
+      "id": "lake",
+      "label": "Data Lake + Warehouse",
+      "sublabel": "raw + curated tables",
+      "type": "database"
+    },
+    {
+      "id": "dash",
+      "label": "Dashboards & Analysts",
+      "sublabel": "queries + alerts UI",
+      "type": "external"
+    },
+    {
+      "id": "monitor",
+      "label": "Monitoring",
+      "sublabel": "lag, drops, alerting on the pipeline",
+      "type": "cloud"
+    }
+  ],
+  "connections": [
+    {
+      "from": "devices",
+      "id": "dev-gw",
+      "label": "MQTT / HTTPS",
+      "to": "gateway",
+      "variant": "dashed"
+    },
+    {
+      "from": "gateway",
+      "id": "gw-ing",
+      "label": "batched replay",
+      "to": "ingest",
+      "variant": "dashed"
+    },
+    {
+      "from": "ingest",
+      "id": "ing-kafka",
+      "label": "produce events",
+      "to": "kafka"
+    },
+    {
+      "from": "kafka",
+      "id": "kafka-dedup",
+      "label": "consume (async)",
+      "to": "dedup",
+      "variant": "dashed"
+    },
+    {
+      "from": "dedup",
+      "id": "dedup-alerts",
+      "label": "clean stream",
+      "to": "alerts",
+      "variant": "dashed"
+    },
+    {
+      "from": "dedup",
+      "id": "dedup-hot",
+      "label": "upsert aggregates",
+      "to": "hot"
+    },
+    {
+      "from": "kafka",
+      "id": "kafka-lake",
+      "label": "archive raw (async)",
+      "to": "lake",
+      "variant": "dashed"
+    },
+    {
+      "from": "hot",
+      "id": "hot-dash",
+      "label": "SQL queries",
+      "to": "dash"
+    },
+    {
+      "from": "lake",
+      "id": "lake-dash",
+      "label": "batch queries",
+      "to": "dash",
+      "variant": "dashed"
+    },
+    {
+      "from": "dedup",
+      "id": "dedup-monitor",
+      "label": "metrics + lag",
+      "to": "monitor",
+      "variant": "dashed"
+    }
+  ],
+  "diagram_type": "architecture",
+  "layout": {
+    "mode": "auto"
+  },
+  "meta": {
+    "output": ".archify/build/scenario-telemetry-ingestion/architecture.html",
+    "quality_profile": "showcase",
+    "title": "Distributed Telemetry Ingestion \u2014 100K Events/Second"
+  },
+  "schema_version": 1
+}

@@ -1,0 +1,152 @@
+{
+  "meta": {
+    "title": "Hotel Reservation \u2014 Cached Search, Consistent Booking",
+    "output": ".archify/build/hotel-reservation/architecture.html",
+    "quality_profile": "showcase"
+  },
+  "components": [
+    {
+      "id": "guest",
+      "type": "external",
+      "label": "Guest",
+      "sublabel": "searches + books"
+    },
+    {
+      "id": "ota",
+      "type": "external",
+      "label": "OTA Partners",
+      "sublabel": "Expedia \u00b7 Booking.com"
+    },
+    {
+      "id": "search",
+      "type": "backend",
+      "label": "Search Service",
+      "sublabel": "availability queries"
+    },
+    {
+      "id": "cache",
+      "type": "database",
+      "label": "Availability Cache",
+      "sublabel": "Redis \u00b7 per hotel/date"
+    },
+    {
+      "id": "inv",
+      "type": "database",
+      "label": "Inventory DB",
+      "sublabel": "source of truth"
+    },
+    {
+      "id": "booking",
+      "type": "backend",
+      "label": "Booking Service",
+      "sublabel": "strongly-consistent writes"
+    },
+    {
+      "id": "res",
+      "type": "database",
+      "label": "Reservations Table",
+      "sublabel": "confirmed bookings"
+    },
+    {
+      "id": "pay",
+      "type": "backend",
+      "label": "Payment Service",
+      "sublabel": "charges the guest"
+    },
+    {
+      "id": "sweep",
+      "type": "backend",
+      "label": "Expiry Sweeper",
+      "sublabel": "releases unconfirmed holds"
+    }
+  ],
+  "connections": [
+    {
+      "id": "g-s",
+      "from": "guest",
+      "to": "search",
+      "label": "search availability"
+    },
+    {
+      "id": "s-c",
+      "from": "search",
+      "to": "cache",
+      "label": "cached availability"
+    },
+    {
+      "id": "c-i",
+      "from": "cache",
+      "to": "inv",
+      "label": "refreshed async",
+      "variant": "dashed"
+    },
+    {
+      "id": "g-b",
+      "from": "guest",
+      "to": "booking",
+      "label": "book a room",
+      "variant": "emphasis"
+    },
+    {
+      "id": "o-b",
+      "from": "ota",
+      "to": "booking",
+      "label": "bookings"
+    },
+    {
+      "id": "b-i",
+      "from": "booking",
+      "to": "inv",
+      "label": "atomic conditional decrement",
+      "variant": "emphasis"
+    },
+    {
+      "id": "b-r",
+      "from": "booking",
+      "to": "res",
+      "label": "write reservation"
+    },
+    {
+      "id": "b-p",
+      "from": "booking",
+      "to": "pay",
+      "label": "take payment"
+    },
+    {
+      "id": "i-s",
+      "from": "inv",
+      "to": "sweep",
+      "label": "change events"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Read path",
+      "items": [
+        "Search is served from the Redis availability cache",
+        "Cache is eventually consistent \u2014 refreshed async from the inventory DB"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Write path",
+      "items": [
+        "Booking decrements inventory with one atomic conditional update",
+        "No oversell: the DB, not the cache, decides the last room"
+      ]
+    },
+    {
+      "dot": "orange",
+      "title": "Holds",
+      "items": [
+        "Unconfirmed holds expire; the sweeper returns rooms to inventory"
+      ]
+    }
+  ],
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "layout": {
+    "mode": "auto"
+  }
+}

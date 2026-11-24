@@ -10,6 +10,7 @@ description: "Designing Pastebin — what it reuses from the URL shortener, and 
 
 import Callout from '../../components/Callout.astro';
 import Mermaid from '../../components/Mermaid.astro';
+import ArchDiagram from '../../components/ArchDiagram.astro';
 
 Part of the [system design](/prep/system-design) series. This is a **delta page**: Pastebin is the [URL Shortener](/prep/system-design/url-shortener) with a content payload attached. Read that first — key generation, the read-heavy caching strategy and the 301/302 discussion all carry over. This page covers only what's different.
 
@@ -34,7 +35,8 @@ Part of the [system design](/prep/system-design) series. This is a **delta page*
 
 **1. Content goes in blob storage, not the database.**
 
-<Mermaid caption="Metadata in a KV store, content in object storage, served through the CDN" code={`flowchart LR
+<ArchDiagram src="pastebin/architecture" caption="Metadata in a KV store, content in object storage, served through the CDN">
+<Mermaid code={`flowchart LR
   U[User] --> API[Paste API]
   API --> META[(Metadata KV<br/>id, owner, expiry, visibility, blob key)]
   API --> OBJ[(Object storage<br/>compressed paste body)]
@@ -45,6 +47,7 @@ Part of the [system design](/prep/system-design) series. This is a **delta page*
   EXP[Expiry cleaner] --> META
   EXP --> OBJ
 `} />
+</ArchDiagram>
 
 Metadata rows stay tiny and fast; bodies up to 10 MB live in S3-style storage (compressed — text compresses roughly 3–5×). Small pastes (under a few KB) can be inlined in the metadata row to save a round trip; that's an optimization, not the default.
 

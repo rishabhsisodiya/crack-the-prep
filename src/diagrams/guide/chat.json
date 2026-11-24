@@ -1,0 +1,132 @@
+{
+  "cards": [
+    {
+      "dot": "cyan",
+      "items": [
+        "500M users hold long-lived WebSockets to a gateway; Redis registry maps userId to gateway node",
+        "Gateway layer is stateless and disposable \u2014 the messages store is the source of truth"
+      ],
+      "title": "Connections"
+    },
+    {
+      "dot": "emerald",
+      "items": [
+        "Client-generated message id makes send idempotent \u2014 retries never duplicate",
+        "Persist first, then deliver, then recipient ACKs; unACKed messages re-send on reconnect"
+      ],
+      "title": "Delivery guarantees"
+    },
+    {
+      "dot": "rose",
+      "items": [
+        "Socket heartbeats refresh a short-TTL Redis presence key; no heartbeat means offline, then push",
+        "Gateway dies: client reconnects to any node and replays missed messages from last-seen id"
+      ],
+      "title": "Presence & failure"
+    }
+  ],
+  "components": [
+    {
+      "id": "sender",
+      "label": "Sender",
+      "sublabel": "1:1 + group messages",
+      "type": "external"
+    },
+    {
+      "id": "gw_a",
+      "label": "Gateway A",
+      "sublabel": "WebSocket \u00b7 sender's node",
+      "type": "backend"
+    },
+    {
+      "id": "msgsvc",
+      "label": "Message Service",
+      "sublabel": "persist, then deliver",
+      "type": "backend"
+    },
+    {
+      "id": "store",
+      "label": "Messages Store",
+      "sublabel": "Cassandra \u00b7 by conversation_id",
+      "type": "database"
+    },
+    {
+      "id": "registry",
+      "label": "Redis: Connection Registry",
+      "sublabel": "userId \u2192 gatewayNodeId",
+      "type": "database"
+    },
+    {
+      "id": "gw_b",
+      "label": "Gateway B",
+      "sublabel": "WebSocket \u00b7 recipient's node",
+      "type": "backend"
+    },
+    {
+      "id": "recipient",
+      "label": "Recipient",
+      "sublabel": "ACKs delivery",
+      "type": "external"
+    },
+    {
+      "id": "push",
+      "label": "Push / APNs / FCM",
+      "sublabel": "recipient offline",
+      "type": "cloud"
+    }
+  ],
+  "connections": [
+    {
+      "from": "sender",
+      "id": "a-g1",
+      "label": "WebSocket",
+      "to": "gw_a"
+    },
+    {
+      "from": "gw_a",
+      "id": "g1-ms",
+      "to": "msgsvc"
+    },
+    {
+      "from": "msgsvc",
+      "id": "ms-db",
+      "label": "persist first",
+      "to": "store"
+    },
+    {
+      "from": "msgsvc",
+      "id": "ms-reg",
+      "label": "look up recipient gateway",
+      "to": "registry"
+    },
+    {
+      "from": "msgsvc",
+      "id": "ms-g2",
+      "label": "route",
+      "to": "gw_b"
+    },
+    {
+      "from": "gw_b",
+      "id": "g2-b",
+      "label": "WebSocket",
+      "to": "recipient"
+    },
+    {
+      "from": "msgsvc",
+      "id": "ms-push",
+      "label": "recipient offline",
+      "to": "push",
+      "variant": "dashed"
+    }
+  ],
+  "diagram_type": "architecture",
+  "layout": {
+    "mode": "auto"
+  },
+  "meta": {
+    "output": ".archify/build/guide/chat.html",
+    "quality_profile": "showcase",
+    "title": "Chat System \u2014 WebSocket Gateways, Persist First"
+  },
+  "schema_version": 1
+}

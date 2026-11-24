@@ -1,0 +1,148 @@
+{
+  "meta": {
+    "output": ".archify/build/video-streaming-youtube/architecture.html",
+    "title": "Video Streaming (YouTube) \u2014 Upload Pipeline Decoupled from Playback",
+    "quality_profile": "showcase"
+  },
+  "components": [
+    {
+      "id": "creator",
+      "label": "Creator",
+      "sublabel": "uploads video",
+      "type": "external"
+    },
+    {
+      "id": "raw",
+      "label": "Raw Video Blob Storage",
+      "sublabel": "original upload",
+      "type": "database"
+    },
+    {
+      "id": "queue",
+      "label": "Transcode Job Queue",
+      "sublabel": "async jobs",
+      "type": "backend"
+    },
+    {
+      "id": "workers",
+      "label": "Transcoding Fleet",
+      "sublabel": "autoscaled batch workers",
+      "type": "backend"
+    },
+    {
+      "id": "segments",
+      "label": "Segmented Output",
+      "sublabel": "HLS / DASH chunks + ladder",
+      "type": "database"
+    },
+    {
+      "id": "origin",
+      "label": "Origin Store",
+      "sublabel": "fallback for cold content",
+      "type": "database"
+    },
+    {
+      "id": "cdn",
+      "label": "CDN Edge Caches",
+      "sublabel": "globally distributed",
+      "type": "cloud"
+    },
+    {
+      "id": "viewer",
+      "label": "Viewer",
+      "sublabel": "adaptive bitrate player",
+      "type": "external"
+    }
+  ],
+  "connections": [
+    {
+      "id": "c-raw",
+      "from": "creator",
+      "to": "raw",
+      "label": "upload"
+    },
+    {
+      "id": "raw-q",
+      "from": "raw",
+      "to": "queue"
+    },
+    {
+      "id": "q-w",
+      "from": "queue",
+      "to": "workers"
+    },
+    {
+      "id": "w-seg",
+      "from": "workers",
+      "to": "segments",
+      "label": "per resolution / bitrate + thumbnails"
+    },
+    {
+      "id": "seg-org",
+      "from": "segments",
+      "to": "origin"
+    },
+    {
+      "id": "org-cdn",
+      "from": "origin",
+      "to": "cdn"
+    },
+    {
+      "id": "v-cdn",
+      "from": "viewer",
+      "to": "cdn",
+      "label": "manifest request"
+    },
+    {
+      "id": "cdn-v",
+      "from": "cdn",
+      "to": "viewer",
+      "label": "edge hit"
+    },
+    {
+      "id": "cdn-org",
+      "from": "cdn",
+      "to": "origin",
+      "label": "edge miss",
+      "variant": "dashed"
+    },
+    {
+      "id": "v-abr",
+      "from": "viewer",
+      "to": "cdn",
+      "label": "adaptive bitrate switching per chunk",
+      "variant": "dashed"
+    }
+  ],
+  "cards": [
+    {
+      "title": "Two separate systems",
+      "dot": "cyan",
+      "items": [
+        "Upload / transcode path is write-heavy, async and latency-tolerant \u2014 never block the upload on encoding",
+        "Playback path is read-heavy, synchronous and latency-critical, served almost entirely from the CDN edge"
+      ]
+    },
+    {
+      "title": "Cost driver",
+      "dot": "emerald",
+      "items": [
+        "Storage and egress bandwidth, not compute, dominate cost at this scale",
+        "Per-title encoding and tiering cold video to cheaper storage cut that cost directly"
+      ]
+    },
+    {
+      "title": "Failure distinction",
+      "dot": "rose",
+      "items": [
+        "CDN failure degrades gracefully \u2014 fall back to origin or another edge region",
+        "Origin failure is harder: cached content still plays, but every cache miss fails"
+      ]
+    }
+  ],
+  "diagram_type": "architecture",
+  "layout": {
+    "mode": "auto"
+  },
+  "schema_version": 1
+}

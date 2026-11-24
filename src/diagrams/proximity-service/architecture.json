@@ -1,0 +1,119 @@
+{
+  "meta": {
+    "output": ".archify/build/proximity-service/architecture.html",
+    "title": "Proximity Service \u2014 Cacheable Spatial Index, Read-Optimized",
+    "quality_profile": "showcase"
+  },
+  "components": [
+    {
+      "id": "client",
+      "label": "Client",
+      "sublabel": "businesses near me",
+      "type": "external"
+    },
+    {
+      "id": "lb",
+      "label": "Load Balancer",
+      "sublabel": "lat, lng, radius",
+      "type": "backend"
+    },
+    {
+      "id": "api",
+      "label": "Proximity API",
+      "sublabel": "radius search + filters",
+      "type": "backend"
+    },
+    {
+      "id": "cache",
+      "label": "Redis Cache",
+      "sublabel": "geohash prefix \u2192 business IDs",
+      "type": "database"
+    },
+    {
+      "id": "index",
+      "label": "Spatial Index Service",
+      "sublabel": "geohash / quadtree / H3",
+      "type": "backend"
+    },
+    {
+      "id": "db",
+      "label": "Business DB",
+      "sublabel": "source of truth",
+      "type": "database"
+    },
+    {
+      "id": "writer",
+      "label": "Business Update Service",
+      "sublabel": "adds / removes / updates",
+      "type": "cloud"
+    }
+  ],
+  "connections": [
+    {
+      "from": "client",
+      "id": "c-lb",
+      "label": "lat, lng, radius",
+      "to": "lb"
+    },
+    {
+      "from": "lb",
+      "id": "lb-api",
+      "to": "api"
+    },
+    {
+      "from": "api",
+      "id": "api-cache",
+      "to": "cache"
+    },
+    {
+      "from": "cache",
+      "id": "cache-index",
+      "label": "miss",
+      "to": "index",
+      "variant": "dashed"
+    },
+    {
+      "from": "index",
+      "id": "index-db",
+      "to": "db"
+    },
+    {
+      "from": "writer",
+      "id": "writer-index",
+      "label": "async rebuild",
+      "to": "index",
+      "variant": "dashed"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Read path",
+      "items": [
+        "Reads dwarf writes \u2014 the read path never touches the primary business DB directly",
+        "Purpose-built spatial index, in memory / Redis-backed, serves sub-100ms queries"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Two-phase filter",
+      "items": [
+        "Geohash prefix + 8 neighbour cells give a cheap coarse candidate set",
+        "Exact Haversine distance runs only on that small set, never the whole DB"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Index freshness",
+      "items": [
+        "Writes are rare, so the index rebuilds asynchronously \u2014 lag of seconds to minutes is fine",
+        "A just-opened business missing briefly is an acceptable trade for a simple write path"
+      ]
+    }
+  ],
+  "diagram_type": "architecture",
+  "layout": {
+    "mode": "auto"
+  },
+  "schema_version": 1
+}

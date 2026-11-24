@@ -1,0 +1,366 @@
+{
+  "cards": [
+    {
+      "dot": "emerald",
+      "items": [
+        "Debezium snapshots each table first, then streams its changes \u2014 one ordered flow per table",
+        "Everything lands in the same append-only Bronze layer, snapshot and CDC alike",
+        "Nothing is ever edited in Bronze \u2014 corrections arrive as new change events"
+      ],
+      "title": "Snapshot, Then Stream"
+    },
+    {
+      "dot": "rose",
+      "items": [
+        "Schema, null, uniqueness and row-count checks run before data reaches Silver",
+        "Failing batches are quarantined and alerted, never silently dropped or silently promoted",
+        "Gold is built only from gated Silver data"
+      ],
+      "title": "Quality Is a Gate, Not a Hope"
+    },
+    {
+      "dot": "orange",
+      "items": [
+        "Delivery is at-least-once: Kafka and Debezium can and do redeliver",
+        "Silver uses idempotent MERGE on the primary key, so a replay changes nothing",
+        "The effect is exactly-once even though the delivery is not"
+      ],
+      "title": "Exactly-Once Effects, Honestly"
+    }
+  ],
+  "diagram_type": "dataflow",
+  "flows": [
+    {
+      "classification": "CDC",
+      "from": "pg",
+      "id": "pg-cdc",
+      "label": "WAL changes",
+      "to": "debezium",
+      "variant": "emphasis",
+      "route": "straight"
+    },
+    {
+      "classification": "CDC",
+      "from": "mysql",
+      "id": "mysql-cdc",
+      "label": "binlog changes",
+      "labelAt": [
+        220,
+        205
+      ],
+      "to": "debezium",
+      "variant": "emphasis",
+      "via": [
+        [
+          220,
+          271
+        ],
+        [
+          220,
+          157
+        ]
+      ]
+    },
+    {
+      "classification": "incremental",
+      "from": "saas",
+      "id": "saas-extract",
+      "label": "API polling",
+      "labelAt": [
+        190,
+        445
+      ],
+      "to": "kafka",
+      "variant": "dashed",
+      "via": [
+        [
+          190,
+          499
+        ],
+        [
+          190,
+          385
+        ]
+      ]
+    },
+    {
+      "classification": "CDC stream",
+      "from": "debezium",
+      "id": "cdc-kafka",
+      "label": "change events",
+      "route": "straight",
+      "to": "kafka",
+      "variant": "emphasis"
+    },
+    {
+      "classification": "append-only",
+      "from": "kafka",
+      "id": "kafka-bronze",
+      "label": "CDC append",
+      "labelAt": [
+        422,
+        330
+      ],
+      "to": "bronze",
+      "variant": "emphasis",
+      "via": [
+        [
+          422,
+          385
+        ],
+        [
+          422,
+          271
+        ]
+      ]
+    },
+    {
+      "classification": "replay",
+      "from": "bronze",
+      "id": "bronze-spark",
+      "label": "reprocess / backfill",
+      "route": "straight",
+      "to": "spark",
+      "variant": "dashed",
+      "labelAt": [
+        565,
+        215
+      ]
+    },
+    {
+      "id": "bronze-quality",
+      "from": "bronze",
+      "to": "quality",
+      "label": "Spark checks + gate",
+      "classification": "quality check",
+      "variant": "security",
+      "route": "straight",
+      "labelAt": [
+        568,
+        435
+      ]
+    },
+    {
+      "id": "quality-silver",
+      "from": "quality",
+      "to": "silver",
+      "label": "passed only",
+      "classification": "gated",
+      "variant": "security",
+      "labelAt": [
+        637,
+        325
+      ],
+      "via": [
+        [
+          637,
+          499
+        ],
+        [
+          637,
+          271
+        ]
+      ]
+    },
+    {
+      "classification": "batch/stream",
+      "from": "silver",
+      "id": "silver-gold",
+      "label": "model + aggregate",
+      "route": "straight",
+      "to": "gold",
+      "variant": "dashed"
+    },
+    {
+      "classification": "read-only",
+      "from": "gold",
+      "fromSide": "bottom",
+      "id": "gold-bi",
+      "label": "SQL queries",
+      "labelAt": [
+        880,
+        590
+      ],
+      "to": "bi",
+      "toSide": "bottom",
+      "variant": "default",
+      "via": [
+        [
+          745,
+          580
+        ],
+        [
+          1035,
+          580
+        ],
+        [
+          1035,
+          215
+        ],
+        [
+          960,
+          215
+        ]
+      ]
+    },
+    {
+      "classification": "read-only",
+      "from": "silver",
+      "id": "silver-consumers",
+      "label": "clean tables",
+      "labelAt": [
+        838,
+        330
+      ],
+      "to": "consumers",
+      "variant": "default",
+      "via": [
+        [
+          838,
+          271
+        ],
+        [
+          838,
+          385
+        ]
+      ]
+    }
+  ],
+  "meta": {
+    "output": ".archify/build/scenario-lakehouse-etl/architecture.html",
+    "quality_profile": "showcase",
+    "title": "Lakehouse ETL: 8 TB Backfill + CDC",
+    "viewBox": [
+      1080,
+      640
+    ]
+  },
+  "nodes": [
+    {
+      "id": "pg",
+      "label": "PostgreSQL",
+      "row": 0,
+      "stage": 0,
+      "sublabel": "orders, billing",
+      "tag": "OLTP",
+      "type": "database"
+    },
+    {
+      "id": "mysql",
+      "label": "MySQL",
+      "row": 1,
+      "stage": 0,
+      "sublabel": "legacy apps",
+      "tag": "OLTP",
+      "type": "database"
+    },
+    {
+      "id": "saas",
+      "label": "SaaS APIs",
+      "row": 3,
+      "stage": 0,
+      "sublabel": "CRM / payments",
+      "tag": "REST",
+      "type": "cloud"
+    },
+    {
+      "id": "debezium",
+      "label": "Debezium CDC",
+      "row": 0,
+      "stage": 1,
+      "sublabel": "snapshot + stream",
+      "tag": "WAL/binlog",
+      "type": "backend"
+    },
+    {
+      "id": "kafka",
+      "label": "Kafka",
+      "row": 2,
+      "stage": 1,
+      "sublabel": "change topics",
+      "tag": "replayable",
+      "type": "messagebus"
+    },
+    {
+      "id": "spark",
+      "label": "Spark Jobs",
+      "row": 0,
+      "stage": 2,
+      "sublabel": "backfill & transforms",
+      "tag": "Databricks",
+      "type": "backend"
+    },
+    {
+      "id": "bronze",
+      "label": "Bronze",
+      "row": 1,
+      "stage": 2,
+      "sublabel": "raw, append-only",
+      "tag": "Delta/Iceberg",
+      "type": "database"
+    },
+    {
+      "id": "quality",
+      "label": "Quality Gates",
+      "row": 3,
+      "stage": 2,
+      "sublabel": "checks + quarantine",
+      "tag": "gate",
+      "type": "security"
+    },
+    {
+      "id": "silver",
+      "label": "Silver",
+      "row": 1,
+      "stage": 3,
+      "sublabel": "clean, deduped",
+      "tag": "MERGE",
+      "type": "database"
+    },
+    {
+      "id": "gold",
+      "label": "Gold",
+      "row": 3,
+      "stage": 3,
+      "sublabel": "business marts",
+      "tag": "curated",
+      "type": "database"
+    },
+    {
+      "id": "bi",
+      "label": "BI Dashboards",
+      "row": 0,
+      "stage": 4,
+      "sublabel": "analyst queries",
+      "tag": "SQL",
+      "type": "backend"
+    },
+    {
+      "id": "consumers",
+      "label": "Data Consumers",
+      "row": 2,
+      "stage": 4,
+      "sublabel": "ML / reverse ETL",
+      "tag": "curated",
+      "type": "backend"
+    }
+  ],
+  "schema_version": 1,
+  "stages": [
+    {
+      "label": "Sources"
+    },
+    {
+      "label": "Ingest & CDC"
+    },
+    {
+      "label": "Bronze & Quality"
+    },
+    {
+      "label": "Silver & Gold"
+    },
+    {
+      "label": "Consume"
+    }
+  ]
+}

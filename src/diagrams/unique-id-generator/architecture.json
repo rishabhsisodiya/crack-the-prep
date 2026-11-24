@@ -1,0 +1,116 @@
+{
+  "meta": {
+    "title": "Unique ID Generator \u2014 Snowflake Workers",
+    "output": ".archify/build/unique-id-generator/architecture.html",
+    "quality_profile": "showcase"
+  },
+  "components": [
+    {
+      "id": "clients",
+      "type": "external",
+      "label": "Clients",
+      "sublabel": "need an ID per request"
+    },
+    {
+      "id": "w1",
+      "type": "backend",
+      "label": "Worker 1",
+      "sublabel": "machine_id = 5 \u00b7 Snowflake"
+    },
+    {
+      "id": "w2",
+      "type": "backend",
+      "label": "Worker 2",
+      "sublabel": "machine_id = 6 \u00b7 Snowflake"
+    },
+    {
+      "id": "id1",
+      "type": "backend",
+      "label": "64-bit ID",
+      "sublabel": "timestamp \u00b7 machine \u00b7 sequence"
+    },
+    {
+      "id": "id2",
+      "type": "backend",
+      "label": "64-bit ID",
+      "sublabel": "timestamp \u00b7 machine \u00b7 sequence"
+    },
+    {
+      "id": "zk",
+      "type": "database",
+      "label": "Coordination Service",
+      "sublabel": "ZooKeeper / etcd \u00b7 assigns machine_id"
+    }
+  ],
+  "connections": [
+    {
+      "id": "c-w1",
+      "from": "clients",
+      "to": "w1",
+      "label": "request"
+    },
+    {
+      "id": "c-w2",
+      "from": "clients",
+      "to": "w2",
+      "label": "request"
+    },
+    {
+      "id": "w1-i1",
+      "from": "w1",
+      "to": "id1",
+      "label": "local clock + local counter"
+    },
+    {
+      "id": "w2-i2",
+      "from": "w2",
+      "to": "id2",
+      "label": "local clock + local counter"
+    },
+    {
+      "id": "w1-zk",
+      "from": "w1",
+      "to": "zk",
+      "label": "registers machine_id",
+      "variant": "dashed"
+    },
+    {
+      "id": "w2-zk",
+      "from": "w2",
+      "to": "zk",
+      "label": "registers machine_id",
+      "variant": "dashed"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "No coordination on the hot path",
+      "items": [
+        "Each worker generates IDs entirely locally",
+        "No request ever crosses the network to get an ID"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "The one coordination point",
+      "items": [
+        "Machine-id assignment, once, via ZooKeeper or etcd",
+        "Two workers must never claim the same machine_id"
+      ]
+    },
+    {
+      "dot": "orange",
+      "title": "Before Snowflake",
+      "items": [
+        "Flickr's ticket server: a central MySQL sequence handing out ID ranges in batches",
+        "Batching recovers most of the throughput, at the cost of a service that must stay up"
+      ]
+    }
+  ],
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "layout": {
+    "mode": "auto"
+  }
+}

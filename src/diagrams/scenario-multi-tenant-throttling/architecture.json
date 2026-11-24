@@ -1,0 +1,139 @@
+{
+  "cards": [
+    {
+      "dot": "cyan",
+      "items": [
+        "Token bucket per tenant, sized by plan: free, pro, enterprise",
+        "Burst allowance absorbs short spikes without raising the sustained rate",
+        "No tenant can consume another tenant's share of capacity"
+      ],
+      "title": "Fairness first"
+    },
+    {
+      "dot": "rose",
+      "items": [
+        "If the limiter store is down, fail open for reads, fail closed for expensive writes",
+        "A limiter outage must never become a full API outage",
+        "Decision is per endpoint class, stated before the incident, not during it"
+      ],
+      "title": "Fail-open vs fail-closed"
+    },
+    {
+      "dot": "emerald",
+      "items": [
+        "Usage events carry a unique request ID so retries never double-count",
+        "Metering is asynchronous: it must never slow down or block the request path",
+        "Billing reads the metered store, never the live counters"
+      ],
+      "title": "Metering accuracy"
+    }
+  ],
+  "components": [
+    {
+      "id": "tenants",
+      "label": "Tenants",
+      "sublabel": "many customers, one noisy batch job",
+      "type": "external"
+    },
+    {
+      "id": "gateway",
+      "label": "API Gateway",
+      "sublabel": "auth, tenant ID, routing",
+      "type": "backend"
+    },
+    {
+      "id": "limiter",
+      "label": "Per-Tenant Rate Limiter",
+      "sublabel": "Redis token buckets, plan config",
+      "type": "backend"
+    },
+    {
+      "id": "reject",
+      "label": "429 Response",
+      "sublabel": "Retry-After + rate-limit headers",
+      "type": "external"
+    },
+    {
+      "id": "services",
+      "label": "API Services",
+      "sublabel": "per-tenant queues, bulkheads",
+      "type": "backend"
+    },
+    {
+      "id": "metering",
+      "label": "Metering Pipeline",
+      "sublabel": "usage events, dedup on request ID",
+      "type": "messagebus"
+    },
+    {
+      "id": "billing",
+      "label": "Billing / Usage Store",
+      "sublabel": "per-tenant usage for invoices",
+      "type": "database"
+    },
+    {
+      "id": "admin",
+      "label": "Admin / Config Service",
+      "sublabel": "plan limits, overrides, kill switches",
+      "type": "cloud"
+    }
+  ],
+  "connections": [
+    {
+      "from": "tenants",
+      "id": "ten-gw",
+      "label": "HTTPS requests",
+      "to": "gateway"
+    },
+    {
+      "from": "gateway",
+      "id": "gw-lim",
+      "label": "check bucket (atomic)",
+      "to": "limiter"
+    },
+    {
+      "from": "limiter",
+      "id": "lim-reject",
+      "label": "bucket empty: reject",
+      "to": "reject",
+      "variant": "dashed"
+    },
+    {
+      "from": "limiter",
+      "id": "lim-svc",
+      "label": "token granted: allow",
+      "to": "services"
+    },
+    {
+      "from": "admin",
+      "id": "adm-lim",
+      "label": "plan limits + overrides",
+      "to": "limiter",
+      "variant": "dashed"
+    },
+    {
+      "from": "services",
+      "id": "svc-meter",
+      "label": "usage events (async)",
+      "to": "metering",
+      "variant": "dashed"
+    },
+    {
+      "from": "metering",
+      "id": "meter-bill",
+      "label": "aggregated usage",
+      "to": "billing",
+      "variant": "dashed"
+    }
+  ],
+  "diagram_type": "architecture",
+  "layout": {
+    "mode": "auto"
+  },
+  "meta": {
+    "output": ".archify/build/scenario-multi-tenant-throttling/architecture.html",
+    "quality_profile": "showcase",
+    "title": "Multi-Tenant Throttling \u2014 Per-Tenant Quotas and Fairness"
+  },
+  "schema_version": 1
+}

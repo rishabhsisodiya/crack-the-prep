@@ -1,0 +1,172 @@
+{
+  "cards": [
+    {
+      "dot": "cyan",
+      "items": [
+        "Hot: SSD, last 7 days, full replicas \u2014 the <2s search promise lives here",
+        "Warm: cheaper disks, fewer replicas, seconds-to-tens-of-seconds search",
+        "Cold: object-storage snapshots, restore-to-search, not directly queryable at speed"
+      ],
+      "title": "Storage tiers"
+    },
+    {
+      "dot": "rose",
+      "items": [
+        "Volume can spike several-fold during an incident \u2014 exactly when search matters most",
+        "Kafka absorbs the burst; indexing lags visibly instead of dropping silently",
+        "Sampling/drop policy applies to low-value debug logs first, never to errors, and is always counted and alerted"
+      ],
+      "title": "Incident bursts"
+    },
+    {
+      "dot": "emerald",
+      "items": [
+        "2 TB/day x 7 hot days is the expensive core; everything older gets cheaper per GB",
+        "ILM rollover, tier migration and deletion are automatic \u2014 retention is a policy, not a hope",
+        "Biggest levers: hot retention days, replica count, and not indexing fields nobody searches"
+      ],
+      "title": "Cost control"
+    }
+  ],
+  "components": [
+    {
+      "id": "services",
+      "label": "500 Services",
+      "sublabel": "app logs, ~2 TB/day",
+      "type": "external"
+    },
+    {
+      "id": "shippers",
+      "label": "Log Shipper Agents",
+      "sublabel": "Fluent Bit / Filebeat, tail + buffer",
+      "type": "backend"
+    },
+    {
+      "id": "kafka",
+      "label": "Kafka Buffer",
+      "sublabel": "partition by service, burst absorber",
+      "type": "messagebus"
+    },
+    {
+      "id": "indexers",
+      "label": "Indexing Workers",
+      "sublabel": "parse, enrich, dedup",
+      "type": "backend"
+    },
+    {
+      "id": "hot",
+      "label": "Search Cluster \u2014 Hot Tier",
+      "sublabel": "SSD, last 7 days, <2s search",
+      "type": "database"
+    },
+    {
+      "id": "warm",
+      "label": "Warm Tier",
+      "sublabel": "HDD, days 8-30, slower search",
+      "type": "database"
+    },
+    {
+      "id": "cold",
+      "label": "Cold / Object Storage",
+      "sublabel": "snapshots + archive, days 31+",
+      "type": "database"
+    },
+    {
+      "id": "engineers",
+      "label": "Engineers",
+      "sublabel": "on-call, debugging",
+      "type": "external"
+    },
+    {
+      "id": "searchapi",
+      "label": "Search UI / API",
+      "sublabel": "query routing hot + warm",
+      "type": "backend"
+    },
+    {
+      "id": "monitor",
+      "label": "Monitoring",
+      "sublabel": "lag, indexing rate, query latency",
+      "type": "cloud"
+    }
+  ],
+  "connections": [
+    {
+      "from": "services",
+      "id": "svc-ship",
+      "label": "tail log files",
+      "to": "shippers",
+      "variant": "dashed"
+    },
+    {
+      "from": "shippers",
+      "id": "ship-kafka",
+      "label": "ship batches (async)",
+      "to": "kafka",
+      "variant": "dashed"
+    },
+    {
+      "from": "kafka",
+      "id": "kafka-idx",
+      "label": "consume (async)",
+      "to": "indexers",
+      "variant": "dashed"
+    },
+    {
+      "from": "indexers",
+      "id": "idx-hot",
+      "label": "bulk index",
+      "to": "hot"
+    },
+    {
+      "from": "hot",
+      "id": "hot-warm",
+      "label": "ILM tier migration",
+      "to": "warm",
+      "variant": "dashed"
+    },
+    {
+      "from": "warm",
+      "id": "warm-cold",
+      "label": "snapshot + delete",
+      "to": "cold",
+      "variant": "dashed"
+    },
+    {
+      "from": "engineers",
+      "id": "eng-api",
+      "label": "search query",
+      "to": "searchapi"
+    },
+    {
+      "from": "searchapi",
+      "id": "api-hot",
+      "label": "query hot",
+      "to": "hot"
+    },
+    {
+      "from": "searchapi",
+      "id": "api-warm",
+      "label": "query warm",
+      "to": "warm",
+      "variant": "dashed"
+    },
+    {
+      "from": "indexers",
+      "id": "idx-monitor",
+      "label": "metrics + lag",
+      "to": "monitor",
+      "variant": "dashed"
+    }
+  ],
+  "diagram_type": "architecture",
+  "layout": {
+    "mode": "auto"
+  },
+  "meta": {
+    "output": ".archify/build/scenario-log-analytics-pipeline/architecture.html",
+    "quality_profile": "showcase",
+    "title": "Log Analytics Pipeline \u2014 Ingesting 2 TB of Logs a Day"
+  },
+  "schema_version": 1
+}

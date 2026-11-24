@@ -1,0 +1,159 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Ride-Sharing Dispatch \u2014 Separate Hot Paths for Location and Matching",
+    "output": ".archify/build/ride-sharing-dispatch/architecture.html",
+    "quality_profile": "showcase"
+  },
+  "layout": {
+    "mode": "auto"
+  },
+  "components": [
+    {
+      "id": "driver",
+      "type": "external",
+      "label": "Driver App",
+      "sublabel": "streams GPS location"
+    },
+    {
+      "id": "ingest",
+      "type": "backend",
+      "label": "Location Ingest Service",
+      "sublabel": "thin, horizontally scaled"
+    },
+    {
+      "id": "geo",
+      "type": "database",
+      "label": "Geospatial Index",
+      "sublabel": "sharded by region / H3 cell"
+    },
+    {
+      "id": "logdb",
+      "type": "database",
+      "label": "Location History Store",
+      "sublabel": "durable, async persist"
+    },
+    {
+      "id": "rider",
+      "type": "external",
+      "label": "Rider App",
+      "sublabel": "requests a trip A to B"
+    },
+    {
+      "id": "matching",
+      "type": "backend",
+      "label": "Matching Service",
+      "sublabel": "stateless \u00b7 query, rank, claim"
+    },
+    {
+      "id": "routing",
+      "type": "backend",
+      "label": "Routing / ETA Service",
+      "sublabel": "real travel time, not distance"
+    },
+    {
+      "id": "trip",
+      "type": "database",
+      "label": "Trip State Store",
+      "sublabel": "durable source of truth"
+    },
+    {
+      "id": "ws",
+      "type": "backend",
+      "label": "WebSocket / Push Gateway",
+      "sublabel": "live trip tracking"
+    }
+  ],
+  "connections": [
+    {
+      "id": "d-ing",
+      "from": "driver",
+      "to": "ingest",
+      "label": "location every 4s, batched"
+    },
+    {
+      "id": "ing-geo",
+      "from": "ingest",
+      "to": "geo",
+      "label": "write latest point"
+    },
+    {
+      "id": "ing-log",
+      "from": "ingest",
+      "to": "logdb",
+      "label": "async persist",
+      "variant": "dashed"
+    },
+    {
+      "id": "r-ms",
+      "from": "rider",
+      "to": "matching",
+      "label": "POST /trips/request"
+    },
+    {
+      "id": "ms-geo",
+      "from": "matching",
+      "to": "geo",
+      "label": "query candidates + atomic claim, short TTL"
+    },
+    {
+      "id": "ms-route",
+      "from": "matching",
+      "to": "routing",
+      "label": "rank by ETA"
+    },
+    {
+      "id": "ms-trip",
+      "from": "matching",
+      "to": "trip",
+      "label": "create trip"
+    },
+    {
+      "id": "trip-ws",
+      "from": "trip",
+      "to": "ws",
+      "label": "trip updates"
+    },
+    {
+      "id": "ws-r",
+      "from": "ws",
+      "to": "rider",
+      "label": "live position + ETA",
+      "variant": "dashed"
+    },
+    {
+      "id": "ws-d",
+      "from": "ws",
+      "to": "driver",
+      "label": "offer + trip updates",
+      "variant": "dashed"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Location write path",
+      "items": [
+        "Location writes dominate \u2014 ingest is a thin write path, separate from matching",
+        "Geo index is sharded by region/H3 cell, so a query never scans another region"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Matching",
+      "items": [
+        "Query candidates in radius, rank by ETA from the routing service",
+        "Atomic claim with short TTL prevents double-booking a driver"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Truth vs cache",
+      "items": [
+        "Trip state store is the durable source of truth",
+        "Geo index is a disposable cache \u2014 it self-heals from the next driver heartbeat"
+      ]
+    }
+  ]
+}

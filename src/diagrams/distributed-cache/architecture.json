@@ -1,0 +1,90 @@
+{
+  "meta": {
+    "title": "Distributed Cache \u2014 Cache-Aside Path",
+    "output": ".archify/build/distributed-cache/architecture.html",
+    "quality_profile": "showcase"
+  },
+  "components": [
+    {
+      "id": "client",
+      "type": "external",
+      "label": "Client"
+    },
+    {
+      "id": "app",
+      "type": "backend",
+      "label": "App Server",
+      "sublabel": "owns the cache-aside logic"
+    },
+    {
+      "id": "cache",
+      "type": "database",
+      "label": "Cache Cluster",
+      "sublabel": "Redis \u00b7 sharded across nodes"
+    },
+    {
+      "id": "db",
+      "type": "database",
+      "label": "Database",
+      "sublabel": "source of truth"
+    }
+  ],
+  "connections": [
+    {
+      "id": "c-a",
+      "from": "client",
+      "to": "app",
+      "label": "request"
+    },
+    {
+      "id": "a-c",
+      "from": "app",
+      "to": "cache",
+      "label": "1 \u00b7 GET key \u2014 3 \u00b7 SET key + TTL on miss"
+    },
+    {
+      "id": "c-a2",
+      "from": "cache",
+      "to": "app",
+      "label": "hit: value returns immediately",
+      "variant": "dashed"
+    },
+    {
+      "id": "a-db",
+      "from": "app",
+      "to": "db",
+      "label": "2 \u00b7 miss: read DB \u2014 write path: DELETE key, then write"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "The app owns consistency",
+      "items": [
+        "The cache is a dumb, fast key-value layer",
+        "Pattern choice matters more than cache technology choice"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "The goal metric",
+      "items": [
+        "High hit ratio for the hot working set \u2014 not 'cache everything'",
+        "Sub-millisecond to low-single-digit-ms latency"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Never a single point of failure",
+      "items": [
+        "If the cache disappears, the database must not fall over with it",
+        "Shard across a cluster to scale beyond one machine's RAM"
+      ]
+    }
+  ],
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "layout": {
+    "mode": "auto"
+  }
+}

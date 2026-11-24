@@ -1,0 +1,140 @@
+{
+  "meta": {
+    "title": "Job Scheduler \u2014 Claim, Enqueue, Execute",
+    "output": ".archify/build/job-scheduler/architecture.html",
+    "quality_profile": "showcase"
+  },
+  "components": [
+    {
+      "id": "clients",
+      "type": "external",
+      "label": "Clients / Services",
+      "sublabel": "define jobs"
+    },
+    {
+      "id": "api",
+      "type": "backend",
+      "label": "Job API",
+      "sublabel": "create / update schedules"
+    },
+    {
+      "id": "db",
+      "type": "database",
+      "label": "Jobs DB",
+      "sublabel": "partitioned by job id"
+    },
+    {
+      "id": "sched",
+      "type": "backend",
+      "label": "Scheduler Nodes",
+      "sublabel": "own a set of partitions"
+    },
+    {
+      "id": "queue",
+      "type": "messagebus",
+      "label": "Execution Queue",
+      "sublabel": "Kafka / SQS"
+    },
+    {
+      "id": "workers",
+      "type": "backend",
+      "label": "Worker Pool",
+      "sublabel": "per job type"
+    },
+    {
+      "id": "reaper",
+      "type": "backend",
+      "label": "Reaper",
+      "sublabel": "reclaims expired leases"
+    },
+    {
+      "id": "ext",
+      "type": "external",
+      "label": "Downstream Systems",
+      "sublabel": "the actual work"
+    }
+  ],
+  "connections": [
+    {
+      "id": "c-a",
+      "from": "clients",
+      "to": "api",
+      "label": "schedule a job"
+    },
+    {
+      "id": "a-db",
+      "from": "api",
+      "to": "db",
+      "label": "persist definition"
+    },
+    {
+      "id": "s-db",
+      "from": "sched",
+      "to": "db",
+      "label": "poll due jobs \u00b7 claim with a lease"
+    },
+    {
+      "id": "s-q",
+      "from": "sched",
+      "to": "queue",
+      "label": "enqueue claimed jobs"
+    },
+    {
+      "id": "q-w",
+      "from": "queue",
+      "to": "workers",
+      "label": "execute"
+    },
+    {
+      "id": "w-db",
+      "from": "workers",
+      "to": "db",
+      "label": "heartbeat \u00b7 result"
+    },
+    {
+      "id": "w-e",
+      "from": "workers",
+      "to": "ext",
+      "label": "do the work"
+    },
+    {
+      "id": "r-db",
+      "from": "reaper",
+      "to": "db",
+      "label": "reclaim expired leases",
+      "variant": "dashed"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Three roles, separately scalable",
+      "items": [
+        "Job API + store: what should run, when",
+        "Scheduler finds due jobs and hands off \u2014 it does no real work",
+        "Workers execute, heartbeat, and record results"
+      ]
+    },
+    {
+      "dot": "orange",
+      "title": "Honest guarantee",
+      "items": [
+        "Exactly-once execution is not achievable in general",
+        "Aim for at-least-once + idempotent handlers, and no concurrent double execution"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Scale shape",
+      "items": [
+        "~100M jobs stored, ~10k due/sec at peak",
+        "No single scheduler node whose death stops all jobs"
+      ]
+    }
+  ],
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "layout": {
+    "mode": "auto"
+  }
+}

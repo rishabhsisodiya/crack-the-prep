@@ -1,0 +1,168 @@
+{
+  "meta": {
+    "title": "Metrics, Monitoring & Alerting \u2014 Pull, Store, Alert",
+    "output": ".archify/build/metrics-monitoring-alerting/architecture.html",
+    "quality_profile": "showcase"
+  },
+  "components": [
+    {
+      "id": "s1",
+      "type": "backend",
+      "label": "Service Instance",
+      "sublabel": "exposes /metrics"
+    },
+    {
+      "id": "s2",
+      "type": "backend",
+      "label": "Service Instance",
+      "sublabel": "exposes /metrics"
+    },
+    {
+      "id": "sd",
+      "type": "cloud",
+      "label": "Service Discovery",
+      "sublabel": "what exists to scrape"
+    },
+    {
+      "id": "sc",
+      "type": "backend",
+      "label": "Scraper",
+      "sublabel": "pull model"
+    },
+    {
+      "id": "tsdb",
+      "type": "database",
+      "label": "Local TSDB",
+      "sublabel": "per region / cluster"
+    },
+    {
+      "id": "lts",
+      "type": "database",
+      "label": "Long-Term Store",
+      "sublabel": "object storage + compactor"
+    },
+    {
+      "id": "rule",
+      "type": "backend",
+      "label": "Alert Rule Evaluator",
+      "sublabel": "fires on thresholds"
+    },
+    {
+      "id": "am",
+      "type": "backend",
+      "label": "Alertmanager",
+      "sublabel": "dedupe \u00b7 group \u00b7 route"
+    },
+    {
+      "id": "pd",
+      "type": "external",
+      "label": "PagerDuty / Slack",
+      "sublabel": "on-call notification"
+    },
+    {
+      "id": "q",
+      "type": "frontend",
+      "label": "Dashboard / Query",
+      "sublabel": "PromQL"
+    },
+    {
+      "id": "global",
+      "type": "backend",
+      "label": "Global Query Layer",
+      "sublabel": "fans out queries"
+    }
+  ],
+  "connections": [
+    {
+      "id": "s1-sc",
+      "from": "s1",
+      "to": "sc",
+      "label": "expose /metrics"
+    },
+    {
+      "id": "s2-sc",
+      "from": "s2",
+      "to": "sc",
+      "label": "expose /metrics"
+    },
+    {
+      "id": "sd-sc",
+      "from": "sd",
+      "to": "sc",
+      "label": "tells scraper what to scrape",
+      "variant": "dashed"
+    },
+    {
+      "id": "sc-t",
+      "from": "sc",
+      "to": "tsdb",
+      "label": "write samples",
+      "variant": "emphasis"
+    },
+    {
+      "id": "t-l",
+      "from": "tsdb",
+      "to": "lts",
+      "label": "remote_write",
+      "variant": "dashed"
+    },
+    {
+      "id": "t-r",
+      "from": "tsdb",
+      "to": "rule",
+      "label": "evaluate rules"
+    },
+    {
+      "id": "r-a",
+      "from": "rule",
+      "to": "am",
+      "label": "firing"
+    },
+    {
+      "id": "a-p",
+      "from": "am",
+      "to": "pd",
+      "label": "page on-call"
+    },
+    {
+      "id": "q-g",
+      "from": "q",
+      "to": "global",
+      "label": "PromQL query"
+    },
+    {
+      "id": "g-t",
+      "from": "global",
+      "to": "tsdb",
+      "label": "recent data"
+    },
+    {
+      "id": "g-l",
+      "from": "global",
+      "to": "lts",
+      "label": "historical data"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Pull model",
+      "items": [
+        "Scrapers pull /metrics from every instance; service discovery keeps the target list current",
+        "Local TSDBs hold recent data per region; remote_write ships it to long-term object storage"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Alerting",
+      "items": [
+        "Rules evaluate against the local TSDB; Alertmanager dedupes, groups and routes before paging a human"
+      ]
+    }
+  ],
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "layout": {
+    "mode": "auto"
+  }
+}

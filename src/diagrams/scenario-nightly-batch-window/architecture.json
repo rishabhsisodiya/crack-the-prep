@@ -1,0 +1,159 @@
+{
+  "cards": [
+    {
+      "dot": "rose",
+      "items": [
+        "One skewed customer key parks most executors idle while one task runs for an hour",
+        "Thousands of tiny files make planning and task overhead \u2014 not bytes \u2014 the bottleneck",
+        "One slow source gates the whole DAG when every downstream task waits for it"
+      ],
+      "title": "Where the window is lost"
+    },
+    {
+      "dot": "cyan",
+      "items": [
+        "Incremental: watermark extraction, only changed rows \u2014 right for large, mostly-static history",
+        "Full refresh: simpler and correct for small or restatement-heavy tables; expensive at 500 GB",
+        "Rule: incremental by default, full refresh on a schedule or after a source restatement"
+      ],
+      "title": "Incremental vs full refresh"
+    },
+    {
+      "dot": "emerald",
+      "items": [
+        "Salt skewed keys, repartition to ~128\u2013256 MB partitions, compact small files on landing",
+        "Per-task retries, SLA alerts at T+60 and T+90, and a pre-computed fallback for reports"
+      ],
+      "title": "Fitting the window"
+    }
+  ],
+  "components": [
+    {
+      "id": "sources",
+      "label": "Source Systems",
+      "sublabel": "CRM, billing, orders, app DBs",
+      "type": "external"
+    },
+    {
+      "id": "slow",
+      "label": "Slow / Late Source",
+      "sublabel": "ready hours after the others",
+      "type": "external"
+    },
+    {
+      "id": "extract",
+      "label": "Extraction",
+      "sublabel": "incremental, watermark-based",
+      "type": "backend"
+    },
+    {
+      "id": "landing",
+      "label": "Object Storage Landing",
+      "sublabel": "raw zone, compacted files",
+      "type": "database"
+    },
+    {
+      "id": "spark",
+      "label": "Spark Cluster",
+      "sublabel": "repartition, salt skewed keys",
+      "type": "backend"
+    },
+    {
+      "id": "warehouse",
+      "label": "Warehouse / Lakehouse",
+      "sublabel": "partitioned, merged tables",
+      "type": "database"
+    },
+    {
+      "id": "reports",
+      "label": "Reports & BI",
+      "sublabel": "morning business reports",
+      "type": "external"
+    },
+    {
+      "id": "orchestrator",
+      "label": "Orchestrator (Airflow)",
+      "sublabel": "DAG, retries, backfills",
+      "type": "cloud"
+    },
+    {
+      "id": "sla",
+      "label": "SLA Alerting",
+      "sublabel": "miss warnings, on-call paging",
+      "type": "cloud"
+    }
+  ],
+  "connections": [
+    {
+      "from": "sources",
+      "id": "src-ext",
+      "label": "changed rows only",
+      "to": "extract",
+      "variant": "dashed"
+    },
+    {
+      "from": "slow",
+      "id": "slow-ext",
+      "label": "late extract, decoupled branch",
+      "to": "extract",
+      "variant": "dashed"
+    },
+    {
+      "from": "extract",
+      "id": "ext-land",
+      "label": "land raw files",
+      "to": "landing",
+      "variant": "dashed"
+    },
+    {
+      "from": "landing",
+      "id": "land-spark",
+      "label": "read + compact",
+      "to": "spark",
+      "variant": "dashed"
+    },
+    {
+      "from": "spark",
+      "id": "spark-wh",
+      "label": "merge / overwrite partition",
+      "to": "warehouse"
+    },
+    {
+      "from": "warehouse",
+      "id": "wh-rep",
+      "label": "SQL queries",
+      "to": "reports"
+    },
+    {
+      "from": "orchestrator",
+      "id": "orch-extract",
+      "label": "schedule + retry",
+      "to": "extract",
+      "variant": "dashed"
+    },
+    {
+      "from": "orchestrator",
+      "id": "orch-spark",
+      "label": "schedule + retry",
+      "to": "spark",
+      "variant": "dashed"
+    },
+    {
+      "from": "orchestrator",
+      "id": "orch-sla",
+      "label": "SLA miss events",
+      "to": "sla",
+      "variant": "dashed"
+    }
+  ],
+  "diagram_type": "architecture",
+  "layout": {
+    "mode": "auto"
+  },
+  "meta": {
+    "output": ".archify/build/scenario-nightly-batch-window/architecture.html",
+    "quality_profile": "showcase",
+    "title": "500 GB Nightly ETL in a Two-Hour Window"
+  },
+  "schema_version": 1
+}

@@ -1,0 +1,177 @@
+{
+  "meta": {
+    "title": "Digital Wallet \u2014 Every Operation Funnels Through One Ledger",
+    "output": ".archify/build/digital-wallet/architecture.html",
+    "quality_profile": "showcase"
+  },
+  "components": [
+    {
+      "id": "app",
+      "type": "frontend",
+      "label": "Wallet Client",
+      "sublabel": "top-up \u00b7 transfer \u00b7 spend"
+    },
+    {
+      "id": "api",
+      "type": "backend",
+      "label": "Wallet API",
+      "sublabel": "validates + routes"
+    },
+    {
+      "id": "ik",
+      "type": "database",
+      "label": "Idempotency Store",
+      "sublabel": "one effect per key"
+    },
+    {
+      "id": "tx",
+      "type": "backend",
+      "label": "Operation Router",
+      "sublabel": "top-up vs transfer/spend"
+    },
+    {
+      "id": "ps",
+      "type": "backend",
+      "label": "Payment System",
+      "sublabel": "charges card / bank"
+    },
+    {
+      "id": "cr",
+      "type": "backend",
+      "label": "Credit Wallet",
+      "sublabel": "on top-up success"
+    },
+    {
+      "id": "dr",
+      "type": "backend",
+      "label": "Debit + Credit Pair",
+      "sublabel": "one local transaction"
+    },
+    {
+      "id": "ledger",
+      "type": "database",
+      "label": "Double-Entry Wallet Ledger",
+      "sublabel": "source of truth"
+    },
+    {
+      "id": "bal",
+      "type": "database",
+      "label": "Cached Balance",
+      "sublabel": "per wallet, for fast reads"
+    },
+    {
+      "id": "recon",
+      "type": "backend",
+      "label": "Reconciliation Job",
+      "sublabel": "ledger vs payment system"
+    }
+  ],
+  "connections": [
+    {
+      "id": "a-api1",
+      "from": "app",
+      "to": "api",
+      "label": "top-up"
+    },
+    {
+      "id": "a-api2",
+      "from": "app",
+      "to": "api",
+      "label": "transfer / spend"
+    },
+    {
+      "id": "api-ik",
+      "from": "api",
+      "to": "ik",
+      "label": "check idempotency key"
+    },
+    {
+      "id": "api-tx",
+      "from": "api",
+      "to": "tx",
+      "label": "route by operation type",
+      "variant": "emphasis"
+    },
+    {
+      "id": "tx-ps",
+      "from": "tx",
+      "to": "ps",
+      "label": "top-up: charge card/bank"
+    },
+    {
+      "id": "ps-cr",
+      "from": "ps",
+      "to": "cr",
+      "label": "success webhook",
+      "variant": "dashed"
+    },
+    {
+      "id": "tx-dr",
+      "from": "tx",
+      "to": "dr",
+      "label": "transfer/spend: move value"
+    },
+    {
+      "id": "cr-l",
+      "from": "cr",
+      "to": "ledger",
+      "label": "credit entry",
+      "variant": "emphasis"
+    },
+    {
+      "id": "dr-l",
+      "from": "dr",
+      "to": "ledger",
+      "label": "balanced debit + credit",
+      "variant": "emphasis"
+    },
+    {
+      "id": "l-b",
+      "from": "ledger",
+      "to": "bal",
+      "label": "refresh cached balance",
+      "variant": "dashed"
+    },
+    {
+      "id": "rc-l",
+      "from": "recon",
+      "to": "ledger",
+      "label": "verify entries"
+    },
+    {
+      "id": "rc-p",
+      "from": "recon",
+      "to": "ps",
+      "label": "fetch charges"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "One ledger",
+      "items": [
+        "Top-up, transfer and spend all end as balanced double-entry postings in a single ledger",
+        "Balances are derived/cached \u2014 the ledger is the truth"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Atomicity",
+      "items": [
+        "A transfer debits the sender and credits the receiver in one local transaction \u2014 money is never in flight inside the wallet"
+      ]
+    },
+    {
+      "dot": "orange",
+      "title": "Top-ups",
+      "items": [
+        "External money enters only on the payment system's success webhook, deduplicated by idempotency key"
+      ]
+    }
+  ],
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "layout": {
+    "mode": "auto"
+  }
+}

@@ -1,0 +1,215 @@
+{
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "Metrics platform",
+      "wraps": [
+        "gateway",
+        "guard",
+        "buffer",
+        "agg",
+        "hot",
+        "cold",
+        "alerting",
+        "cost"
+      ]
+    }
+  ],
+  "cards": [
+    {
+      "dot": "rose",
+      "items": [
+        "user-id as a label made series explode combinatorially",
+        "Cardinality, not event rate alone, drives TSDB cost",
+        "Guard enforces a series budget per metric and team"
+      ],
+      "title": "The blow-up"
+    },
+    {
+      "dot": "cyan",
+      "items": [
+        "Drop or hash high-cardinality labels at ingestion",
+        "Sample low-value streams, never alert-critical ones silently",
+        "Pre-aggregate and downsample: hot tier stays small"
+      ],
+      "title": "Cut cost, keep signal"
+    },
+    {
+      "dot": "emerald",
+      "items": [
+        "Alerts run on pre-aggregated, unsampled critical streams",
+        "Hot shards are split and rebalanced, not left to melt",
+        "Cost monitoring closes the loop back to the guard"
+      ],
+      "title": "Alerting stays reliable"
+    }
+  ],
+  "components": [
+    {
+      "id": "services",
+      "label": "Services & Hosts",
+      "sublabel": "apps, infra, 10M events/sec",
+      "type": "external"
+    },
+    {
+      "id": "agents",
+      "label": "Metric Agents",
+      "sublabel": "OTel / exporters on every node",
+      "tag": "scrape + push",
+      "type": "backend"
+    },
+    {
+      "id": "gateway",
+      "label": "Ingestion Gateway",
+      "sublabel": "auth, validate, tenant quotas",
+      "type": "cloud"
+    },
+    {
+      "id": "guard",
+      "label": "Cardinality Guard",
+      "sublabel": "label policy, sampling, drop user-id",
+      "tag": "budget per metric",
+      "type": "security"
+    },
+    {
+      "id": "buffer",
+      "label": "Stream Buffer",
+      "sublabel": "Kafka, partitioned by metric + tenant",
+      "type": "messagebus"
+    },
+    {
+      "id": "agg",
+      "label": "Stream Aggregation",
+      "sublabel": "pre-aggregate, rollups, hot-shard split",
+      "type": "backend"
+    },
+    {
+      "id": "hot",
+      "label": "Hot TSDB Tier",
+      "sublabel": "raw-ish, hours to days, fast alerts",
+      "type": "database"
+    },
+    {
+      "id": "cold",
+      "label": "Downsampled Tier",
+      "sublabel": "1m / 1h rollups, weeks to months",
+      "type": "database"
+    },
+    {
+      "id": "alerting",
+      "label": "Alerting Engine",
+      "sublabel": "rules on pre-aggregates, SLO burn",
+      "type": "backend"
+    },
+    {
+      "id": "dashboards",
+      "label": "Dashboards",
+      "sublabel": "queries hit the right tier",
+      "type": "frontend"
+    },
+    {
+      "id": "cost",
+      "label": "Cost Monitoring",
+      "sublabel": "series count, cost per team / metric",
+      "type": "backend"
+    }
+  ],
+  "connections": [
+    {
+      "from": "services",
+      "id": "services-to-agents",
+      "label": "emit metrics",
+      "to": "agents"
+    },
+    {
+      "from": "agents",
+      "id": "agents-to-gateway",
+      "label": "push / scrape",
+      "to": "gateway",
+      "variant": "emphasis"
+    },
+    {
+      "from": "gateway",
+      "id": "gateway-to-guard",
+      "label": "check labels",
+      "to": "guard"
+    },
+    {
+      "from": "guard",
+      "id": "guard-to-buffer",
+      "label": "admitted series",
+      "to": "buffer",
+      "variant": "dashed"
+    },
+    {
+      "from": "buffer",
+      "id": "buffer-to-agg",
+      "label": "stream",
+      "to": "agg",
+      "variant": "dashed"
+    },
+    {
+      "from": "agg",
+      "id": "agg-to-hot",
+      "label": "write aggregates",
+      "to": "hot"
+    },
+    {
+      "from": "hot",
+      "id": "hot-to-cold",
+      "label": "downsample",
+      "to": "cold",
+      "variant": "dashed"
+    },
+    {
+      "from": "agg",
+      "id": "agg-to-alerting",
+      "label": "alert stream",
+      "to": "alerting",
+      "variant": "dashed"
+    },
+    {
+      "from": "hot",
+      "id": "hot-to-alerting",
+      "label": "rule queries",
+      "to": "alerting"
+    },
+    {
+      "from": "hot",
+      "id": "hot-to-dashboards",
+      "label": "recent queries",
+      "to": "dashboards"
+    },
+    {
+      "from": "cold",
+      "id": "cold-to-dashboards",
+      "label": "long-range queries",
+      "to": "dashboards",
+      "variant": "dashed"
+    },
+    {
+      "from": "guard",
+      "id": "guard-to-cost",
+      "label": "dropped / sampled counts",
+      "to": "cost",
+      "variant": "dashed"
+    },
+    {
+      "from": "hot",
+      "id": "hot-to-cost",
+      "label": "active series + storage",
+      "to": "cost",
+      "variant": "dashed"
+    }
+  ],
+  "diagram_type": "architecture",
+  "layout": {
+    "mode": "auto"
+  },
+  "meta": {
+    "output": ".archify/build/scenario-metrics-cardinality/architecture.html",
+    "quality_profile": "showcase",
+    "title": "Metrics Cardinality at Scale \u2014 Cutting Cost 10x"
+  },
+  "schema_version": 1
+}

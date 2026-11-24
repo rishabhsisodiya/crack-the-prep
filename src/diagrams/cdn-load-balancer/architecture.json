@@ -1,0 +1,158 @@
+{
+  "meta": {
+    "title": "CDN & Load Balancer \u2014 Request Path to Origin",
+    "output": ".archify/build/cdn-load-balancer/architecture.html",
+    "quality_profile": "showcase"
+  },
+  "components": [
+    {
+      "id": "user",
+      "type": "external",
+      "label": "User",
+      "sublabel": "browser / app"
+    },
+    {
+      "id": "dns",
+      "type": "cloud",
+      "label": "DNS / Anycast Routing",
+      "sublabel": "lands on the nearest PoP"
+    },
+    {
+      "id": "edge",
+      "type": "cloud",
+      "label": "CDN Edge PoP",
+      "sublabel": "serves cacheable content near the user"
+    },
+    {
+      "id": "glb",
+      "type": "cloud",
+      "label": "Global Load Balancer",
+      "sublabel": "cross-region routing"
+    },
+    {
+      "id": "rlb1",
+      "type": "cloud",
+      "label": "Regional LB \u2014 us-east",
+      "sublabel": "L7 \u00b7 health-checked"
+    },
+    {
+      "id": "rlb2",
+      "type": "cloud",
+      "label": "Regional LB \u2014 eu-west",
+      "sublabel": "L7 \u00b7 health-checked"
+    },
+    {
+      "id": "s1",
+      "type": "backend",
+      "label": "Origin Server",
+      "sublabel": "us-east"
+    },
+    {
+      "id": "s2",
+      "type": "backend",
+      "label": "Origin Server",
+      "sublabel": "us-east"
+    },
+    {
+      "id": "s3",
+      "type": "backend",
+      "label": "Origin Server",
+      "sublabel": "eu-west"
+    },
+    {
+      "id": "s4",
+      "type": "backend",
+      "label": "Origin Server",
+      "sublabel": "eu-west"
+    }
+  ],
+  "connections": [
+    {
+      "id": "u-d",
+      "from": "user",
+      "to": "dns",
+      "label": "request"
+    },
+    {
+      "id": "d-e",
+      "from": "dns",
+      "to": "edge",
+      "label": "nearest PoP"
+    },
+    {
+      "id": "e-u",
+      "from": "edge",
+      "to": "user",
+      "label": "cache hit: respond directly",
+      "variant": "dashed"
+    },
+    {
+      "id": "e-g",
+      "from": "edge",
+      "to": "glb",
+      "label": "cache miss"
+    },
+    {
+      "id": "g-r1",
+      "from": "glb",
+      "to": "rlb1",
+      "label": "route by region"
+    },
+    {
+      "id": "g-r2",
+      "from": "glb",
+      "to": "rlb2"
+    },
+    {
+      "id": "r1-s1",
+      "from": "rlb1",
+      "to": "s1"
+    },
+    {
+      "id": "r1-s2",
+      "from": "rlb1",
+      "to": "s2"
+    },
+    {
+      "id": "r2-s3",
+      "from": "rlb2",
+      "to": "s3"
+    },
+    {
+      "id": "r2-s4",
+      "from": "rlb2",
+      "to": "s4"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Layers, coarsest first",
+      "items": [
+        "DNS / Anycast picks the data center before a byte is processed",
+        "The edge absorbs spikes and DDoS before origin ever sees them"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Availability",
+      "items": [
+        "Health checks stop traffic to a dead origin automatically",
+        "Losing an edge node, an origin, or a whole region is not user-visible"
+      ]
+    },
+    {
+      "dot": "orange",
+      "title": "Latency",
+      "items": [
+        "Every extra hop is milliseconds a user feels",
+        "Global users must not all be routed to one region"
+      ]
+    }
+  ],
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "layout": {
+    "mode": "auto"
+  }
+}

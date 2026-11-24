@@ -1,0 +1,198 @@
+{
+  "cards": [
+    {
+      "dot": "cyan",
+      "items": [
+        "CDC and feeds publish one change event per product change to Kafka",
+        "Kafka partitioned by product_id keeps one product's changes in order"
+      ],
+      "title": "Ingestion"
+    },
+    {
+      "dot": "emerald",
+      "items": [
+        "Workers enrich and bulk-index; version check drops duplicates and stale updates",
+        "Bulk reindex builds a new index beside the live one, then swaps the alias atomically"
+      ],
+      "title": "Indexing"
+    },
+    {
+      "dot": "rose",
+      "items": [
+        "At-least-once delivery plus version-guarded writes gives exactly-once effects in the index",
+        "Freshness lag is measured end to end, from source change to searchable"
+      ],
+      "title": "Freshness"
+    }
+  ],
+  "components": [
+    {
+      "id": "catalogue",
+      "label": "Catalogue DB",
+      "sublabel": "PostgreSQL, 50M products",
+      "type": "database"
+    },
+    {
+      "id": "feeds",
+      "label": "Seller & Price Feeds",
+      "sublabel": "price and stock updates",
+      "type": "external"
+    },
+    {
+      "id": "cdc",
+      "label": "CDC Capture",
+      "sublabel": "Debezium, outbox events",
+      "type": "backend"
+    },
+    {
+      "id": "kafka",
+      "label": "Kafka",
+      "sublabel": "partition by product_id",
+      "type": "messagebus"
+    },
+    {
+      "id": "indexer",
+      "label": "Indexing Workers",
+      "sublabel": "enrich, tokenise, build docs",
+      "type": "backend"
+    },
+    {
+      "id": "dedup",
+      "label": "Dedup + Version Check",
+      "sublabel": "product_id + version, drop stale",
+      "type": "backend"
+    },
+    {
+      "id": "versions",
+      "label": "Version Store",
+      "sublabel": "Redis, last applied version",
+      "type": "database"
+    },
+    {
+      "id": "searchcluster",
+      "label": "Search Cluster",
+      "sublabel": "OpenSearch, blue / green indices",
+      "type": "database"
+    },
+    {
+      "id": "alias",
+      "label": "Alias Manager",
+      "sublabel": "atomic alias swap, no downtime",
+      "type": "cloud"
+    },
+    {
+      "id": "searchapi",
+      "label": "Search API",
+      "sublabel": "queries via alias only",
+      "type": "backend"
+    },
+    {
+      "id": "shoppers",
+      "label": "Shoppers",
+      "sublabel": "search and browse",
+      "type": "external"
+    },
+    {
+      "id": "monitor",
+      "label": "Monitoring",
+      "sublabel": "indexing lag, freshness, DLQ",
+      "type": "cloud"
+    },
+    {
+      "id": "dlq",
+      "label": "Dead-Letter Topic",
+      "sublabel": "failed docs, replayable",
+      "type": "messagebus"
+    }
+  ],
+  "connections": [
+    {
+      "from": "catalogue",
+      "id": "cat-cdc",
+      "label": "WAL changes",
+      "to": "cdc",
+      "variant": "dashed"
+    },
+    {
+      "from": "feeds",
+      "id": "feeds-cdc",
+      "label": "feed events",
+      "to": "cdc",
+      "variant": "dashed"
+    },
+    {
+      "from": "cdc",
+      "id": "cdc-kafka",
+      "label": "change events",
+      "to": "kafka"
+    },
+    {
+      "from": "kafka",
+      "id": "kafka-indexer",
+      "label": "consume (async)",
+      "to": "indexer",
+      "variant": "dashed"
+    },
+    {
+      "from": "indexer",
+      "id": "indexer-dedup",
+      "label": "check version",
+      "to": "dedup"
+    },
+    {
+      "from": "dedup",
+      "id": "dedup-versions",
+      "label": "compare + set",
+      "to": "versions"
+    },
+    {
+      "from": "dedup",
+      "id": "dedup-cluster",
+      "label": "bulk index (async)",
+      "to": "searchcluster",
+      "variant": "dashed"
+    },
+    {
+      "from": "indexer",
+      "id": "indexer-dlq",
+      "label": "partial failures",
+      "to": "dlq",
+      "variant": "dashed"
+    },
+    {
+      "from": "searchcluster",
+      "id": "cluster-alias",
+      "label": "new index ready",
+      "to": "alias"
+    },
+    {
+      "from": "alias",
+      "id": "alias-api",
+      "label": "alias points here",
+      "to": "searchapi"
+    },
+    {
+      "from": "searchapi",
+      "id": "api-shoppers",
+      "label": "results in <1 min",
+      "to": "shoppers"
+    },
+    {
+      "from": "indexer",
+      "id": "indexer-monitor",
+      "label": "lag + metrics",
+      "to": "monitor",
+      "variant": "dashed"
+    }
+  ],
+  "diagram_type": "architecture",
+  "layout": {
+    "mode": "auto"
+  },
+  "meta": {
+    "output": ".archify/build/scenario-search-indexing-pipeline/architecture.html",
+    "quality_profile": "showcase",
+    "title": "Keeping a Search Index Fresh in Near-Real-Time \u2014 50M Products"
+  },
+  "schema_version": 1
+}

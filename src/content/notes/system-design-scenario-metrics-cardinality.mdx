@@ -1,0 +1,286 @@
+---
+title: "Scenario — Your Metrics Bill Exploded: Cardinality at Scale"
+track: "system-design"
+kind: "notes"
+order: 79
+slug: "scenario-metrics-cardinality"
+updated: 2026-11-24
+description: "A scenario-based interview problem: internal metrics at 10M events/sec where a user-id label blew up cardinality — cut cost 10x with a cardinality guard, sampling and downsampling, without making alerting unreliable."
+---
+
+import Callout from '../../components/Callout.astro';
+import ArchDiagram from '../../components/ArchDiagram.astro';
+
+Part of the [system design](/prep/system-design) series. This is a **scenario** page: you get the problem the way an interviewer would state it, then a full worked solution. **Level 3 — Lead / Architect.**
+
+> **Original practice scenario** — written for interview preparation; not a question from any specific company's interview.
+
+## 1. The problem statement
+
+Here is how the interviewer puts it. Read it the way you would in the room — nothing in this section is the solution.
+
+> "We run an internal metrics platform. Services, hosts and jobs across the company emit metrics — request counts, latencies, queue depths, business counters — and today we ingest about **10 million metric events per second**.
+>
+> Last quarter the bill for this platform **exploded** — storage and query costs are up roughly an order of magnitude, the time-series database is struggling, and some shards are permanently hot while others sit idle. The trigger, as far as we can tell: a team added a **user-id label** to a few of their most popular metrics, and they are not the only team doing things like this.
+>
+> Leadership wants the platform cost **cut by 10x**. But there is a hard constraint: **alerting must stay reliable.** Pages are fired from this data. A cost cut that silently drops, samples away or delays an alert-critical series is worse than the bill.
+>
+> Design the fix: ingestion, cardinality control, sampling, aggregation and storage — and how you keep alerts trustworthy while you do it."
+
+**Functional requirements**
+
+- Ingest internal metrics at ~10M events/sec from many teams, services and hosts.
+- Detect, attribute and control cardinality: know which metric + label combination created how many series, and who owns it.
+- Reduce total platform cost by ~10x (storage, ingestion and query).
+- Keep alert evaluation correct and timely on the series that paging depends on.
+- Give teams dashboards over both recent (seconds–days) and historical (weeks–months) data.
+
+**Non-functional requirements**
+
+- No silent loss of alert-critical data: anything sampled or dropped must be explicit, labelled and auditable.
+- The fix cannot require every team to redeploy before costs start falling — control must exist at the platform layer.
+- Hot shards must be relieved: load must be spread by series, not concentrated by a few popular metrics.
+- A bad label shipped by one team must not take down ingestion or alerting for everyone else.
+- Every cost decision must be reversible per metric — a team must be able to buy back fidelity for a series that turns out to matter.
+
+## 2. Clarifying questions to ask first
+
+Ask these before drawing anything. Each one changes the design.
+
+| Question | Why it matters |
+|---|---|
+| What exactly is a "series" costing us — how many active series do we have today, and what does the TSDB charge scale with? | Cost in a TSDB scales with **active series × samples**, not just events/sec. 10M events/sec into 10M series is a different planet from 10M events/sec into 100 billion series. This number decides whether sampling or cardinality control is the main lever. |
+| Which metrics are alert-critical, and is there a registry of them? | You cannot protect what you cannot name. If no registry exists, building one (from the alert rules themselves — every series an alert references is critical by definition) is step one. |
+| What is the alert latency budget — how stale can alert input data be? | Seconds means alerting reads the hot, unsampled path. Minutes of tolerance lets you alert on pre-aggregated rollups, which is far cheaper. |
+| Are these metrics counters, gauges and histograms emitted by agents (scrape/push), or raw events we aggregate ourselves? | That decides where aggregation can happen: at the agent (pre-aggregation before transport) or only in the stream layer. Agent-side aggregation is the single biggest transport and ingestion saving. |
+| What retention do teams actually use — how much data is ever queried beyond 7 / 30 days? | In most platforms the honest answer is "almost none at full resolution". That is what makes downsampling safe: full fidelity hot, rollups cold. |
+| Can we change the client libraries / agents centrally, or only the server side? | Central agent control means label policy can be enforced at the edge for everyone at once. Server-side only means the guard lives at the gateway and in the TSDB write path. |
+| Who pays — is there per-team chargeback or showback today? | Cardinality is a commons problem. Without attribution and a budget per team, every technical control gets routed around socially. |
+| What does "10x cheaper" have to preserve — query speed, retention, or both? | Cutting retention is easy and usually wrong. The interesting answer cuts *series* and *resolution over time*, not history. |
+
+<Callout type="tip">
+The single highest-value clarification here is the distinction between **events per second** and **active series**. Candidates who attack the 10M events/sec with bigger ingestion boxes miss the problem: the bill exploded because of the *product of label values* — one `user_id` label with a million users multiplies every affected metric by a million series. Say that arithmetic out loud, early.
+</Callout>
+
+## 3. The solution, in plain language first
+
+The simple version: a metric is cheap; a *series* — one unique combination of a metric name and its label values — is what you pay for, in memory, in index size, in shard load and in query cost. So the fix is not "ingest faster", it is "admit fewer, better series, and keep them at lower resolution as they age".
+
+Concretely: agents pre-aggregate where they can. Everything passes a **cardinality guard** at ingestion that enforces a label policy — `user_id` and its cousins are dropped, hashed down or rejected, per-metric series budgets are enforced, and every drop is counted and attributed to a team. Alert-critical metrics bypass sampling entirely and are pre-aggregated into the exact series the alert rules query. Everything else is sampled or aggregated in a stream layer, written to a **hot tier** at full admitted fidelity for days, and **downsampled** into rollups for months. Cost monitoring closes the loop: every team can see its series count and its bill, because the next `user_id` label is a social problem as much as a technical one.
+
+## 4. Architecture
+
+<ArchDiagram src="scenario-metrics-cardinality/architecture" caption="Metrics cardinality architecture: agents, ingestion gateway, cardinality guard and sampling, stream aggregation, hot and downsampled TSDB tiers, alerting, dashboards and cost monitoring" />
+
+**Component by component**
+
+- **Services, hosts and metric agents.** Applications and infrastructure emit metrics; agents (OpenTelemetry collectors, Prometheus-style exporters) scrape or receive them. Agents are the first aggregation point: a counter incremented a thousand times on one host in 15 seconds is *one* sample leaving the host, not a thousand events. Agents also apply the first label policy — the cheapest place to drop a `user_id` label is before it crosses the network.
+- **Ingestion gateway.** Stateless, horizontally scaled, per-tenant authenticated. Cheap checks only: tenant identity, schema, per-tenant rate and series quotas. It does not query, alert or store — that is what keeps it fast at 10M events/sec.
+- **Cardinality guard and sampling.** The heart of the design. It maintains per-metric label allowlists and series budgets, computes the running active-series count per metric + tenant, and applies policy: drop forbidden labels (`user_id`, `request_id`, raw emails, session IDs), hash-and-bucket medium-cardinality labels where a team genuinely needs a breakdown, sample low-value streams, and reject or shed load when a metric exceeds its budget. Every action emits a meta-metric — `samples_dropped_total{reason="cardinality_budget", metric="...", team="..."}` — so control is never silent.
+- **Stream buffer (Kafka or equivalent).** Decouples the guard from aggregation, absorbs deploy and incident bursts, and makes the aggregation layer replayable after a bug or a crash.
+- **Stream aggregation.** Computes the rollups and pre-aggregates the platform actually queries: per-minute sums / rates for counters, percentile sketches for histograms, and — critically — the exact aggregated series that alert rules reference, computed continuously rather than at query time.
+- **TSDB storage tiers.** A **hot tier** holds admitted series at full resolution for hours to a few days, sized for alert and dashboard queries. A **downsampled tier** holds 1-minute and 1-hour rollups for weeks to months at a tiny fraction of the storage. Queries are routed by time range across the two.
+- **Alerting engine.** Evaluates rules against the pre-aggregated, unsampled alert stream and the hot tier. It never reads sampled data for a paging rule — see the trade-offs section for why, and for what sampling does to an alert if you let it.
+- **Dashboards.** Recent ranges hit the hot tier; long ranges hit rollups automatically. A dashboard that silently mixes resolutions must say so in the UI — a 1-hour rollup cannot show a 30-second spike, and pretending otherwise is how incidents get missed in retrospectives.
+- **Cost monitoring.** Tracks active series, samples written, storage and query cost per metric and per team, fed by the guard's drop/sample counters and the TSDB's own accounting. This is both the chargeback system and the early-warning system for the next cardinality incident.
+
+## 5. End-to-end data flow
+
+1. A service increments a counter or records a histogram observation, labelled with a small, stable label set — service, route, status class, region. (If it also attaches `user_id`, that is the bug this system exists to neutralise.)
+2. The local agent aggregates over a short window (10–60s): counters become deltas, histograms become bucket counts / sketches. One aggregated sample per series per window leaves the host.
+3. The ingestion gateway authenticates the tenant, validates the payload and enforces coarse rate quotas, then hands the batch to the cardinality guard.
+4. The guard checks each series against policy: forbidden label present → label dropped (or the series rejected, per metric policy); metric over its series budget → excess series sampled or shed, with counters emitted; alert-critical metric → admitted unsampled, always. Admitted samples go to the stream buffer.
+5. The stream aggregation layer consumes the buffer: it updates hot-tier writes, computes per-minute rollups, and continuously computes the alert pre-aggregates.
+6. The alerting engine evaluates rules on the pre-aggregates and hot tier within its latency budget. Rollup jobs compact hot data into the downsampled tier as it ages out.
+7. Dashboards query by range: hot tier for recent, rollups for historical, with resolution disclosed.
+8. Cost monitoring continuously reconciles: active series per metric/team, drop and sample rates, storage per tier — and alerts the platform team (and the owning team) when any metric's series count grows abnormally fast. A cardinality incident is detected in minutes, not on the monthly bill.
+
+## 6. Technology choices, and why
+
+| Decision | Choice | Why | Alternative considered |
+|---|---|---|---|
+| Agent / collection | OpenTelemetry collectors or Prometheus-style exporters | Agent-side aggregation and relabelling are built in; the label policy can be pushed centrally as collector config | Raw event shipping from every app — pays full transport and ingestion cost for data that will be summed anyway |
+| Ingestion buffer | Kafka (or Kinesis / Pub/Sub) | Replayable, absorbs bursts, decouples guard from aggregation so either can fail and recover independently | Direct gateway → TSDB writes — a TSDB slowdown becomes an ingestion outage, and there is no replay after an aggregation bug |
+| Stream aggregation | Flink, Kafka Streams, or the TSDB's own recording rules / stream aggregation | Continuous rollups and alert pre-aggregates are exactly this layer's job; pick one and be consistent | Query-time aggregation for everything — the most expensive option at dashboard and alert scale, and the usual hidden cause of "the TSDB is slow" |
+| TSDB | A series-index TSDB (Prometheus-family, VictoriaMetrics, Mimir, Thanos-style, or a commercial equivalent) | The model — series index + compressed samples — matches the problem; clustering/sharding by series hash is the scaling story | A general OLAP store for raw metric events — workable, but you rebuild series indexing, rollups and the query language yourself |
+| Downsampling | Continuous rollup jobs into the same TSDB (separate retention / tenant) or object-storage-backed long-term store | Rollups at 1m/1h cut sample volume 60–3600x for old data while keeping the same query interface | Deleting old data — saves the same money and destroys incident-forensics value; retention is rarely the real cost driver once rollups exist |
+| Cardinality accounting | A dedicated series registry: per metric + tenant active-series counts, maintained by the guard | You cannot budget what you do not count, and the TSDB's own index is too slow a source for admission decisions | Periodic scans of the TSDB index — fine for reporting, too stale for enforcement |
+
+**Where the 10x actually comes from.** Be able to decompose it in the interview: agent-side aggregation (fewer samples shipped), the guard removing the pathological series (in the incident described, this alone can be most of the blow-up — a million-user label on a handful of popular metrics), sampling of genuinely low-value high-volume streams, pre-aggregation so dashboards and alerts stop scanning raw series, and downsampling so old data costs rollup prices. No single lever is 10x; the stack of them is, and saying which lever contributes what is the Lead-level part of the answer.
+
+## 7. Partitioning and parallelism
+
+- **Shard by series, not by metric.** TSDB shards are assigned by a hash of the full series identity (metric name + label set). That spreads a popular metric's series across shards. Sharding *by metric name* is the classic mistake that creates the hot shard in this scenario: one viral metric lands on one shard forever.
+- **The hot-shard problem, precisely.** Two distinct causes, two fixes. (a) *Write hot spots*: a few series receiving a disproportionate share of samples — mitigated by series-hash sharding and, at ingestion, by splitting a tenant's write stream across gateway partitions by series hash. (b) *Query hot spots*: every alert and dashboard hammering the same popular aggregates — mitigated by pre-aggregating those series in the stream layer and caching rule results, so the shard serves reads of one rollup instead of scans of millions of raw series.
+- **Stream layer partitioning:** partition the buffer by tenant + metric (or series hash), so aggregation state for a series lives on one task, scales by adding partitions/tasks, and a single tenant's burst can be quota'd without starving others.
+- **Noisy-neighbour isolation:** per-tenant quotas at the gateway and per-tenant series budgets at the guard. One team's label accident degrades *their* fidelity (their excess series are sampled/shed), not the platform's availability.
+- **Rebalancing:** when a shard is hot, split its series-hash range and migrate half the ranges; because writes are routed by hash at the gateway/aggregation layer, rebalancing is a routing-table change, not an application change. Name the cost honestly: migration temporarily doubles write load for the moving ranges.
+
+## 8. Storage strategy
+
+- **Hot tier:** admitted series at native resolution (typically 15–60s), retained for a short window — commonly 2–15 days depending on alert and dashboard needs. This is the expensive tier, so it holds *aggregated samples per series*, never raw events.
+- **Downsampled tier:** 1-minute rollups retained for weeks, 1-hour rollups for 13+ months if the business wants year-over-year views. A 15-second series kept for a year at full resolution is ~2.1M samples; as 1-hour rollups it is 8,760 — that ratio is the storage argument in one line.
+- **Rollup correctness:** counters roll up by sum (with rate computed at query time from rollup sums where the semantics allow), gauges by avg/min/max (keep all three — an averaged gauge hides exactly the spikes you keep metrics for), histograms by merging bucket counts / sketches, never by averaging percentiles. **You cannot average p99s.** Say it before the interviewer has to.
+- **The series index is storage too.** Every active series costs index memory even if it receives few samples. Churn — series that appear once and never again (a `request_id` label does this at industrial scale) — bloats the index and slows every query. The guard's label policy is therefore also an index-protection policy, and the hot tier should expire idle series aggressively.
+- **Meta-metrics and audit data** (what was dropped, sampled or rejected, per metric/team/reason) are stored like any other metric, with long retention: they are small, and they are how you prove the cost controls did what they claimed.
+
+## 9. Deduplication and idempotency, with a worked example
+
+Metrics pipelines retry: agents resend batches after timeouts, gateways retry buffer writes, stream tasks replay after crashes. Delivery is **at-least-once**, so the same aggregated batch can arrive twice. Naively adding it twice double-counts a counter — and a doubled counter can fire a false page, which is this platform's unforgivable bug in the other direction.
+
+The defence has two parts. First, **batches are self-identifying**: the agent stamps each flush with a stable `batch_id` (agent identity + monotonic flush sequence), created once per flush and never regenerated on retry. Second, **rollup writes are idempotent by construction**: a rollup cell is *recomputed and overwritten* for its (series, window) key from the retained samples, or written with a conditional insert keyed on `batch_id` — never blindly incremented by a consumer that might be replaying.
+
+```python
+# Aggregation consumer: a replayed batch must have exactly-once EFFECT.
+def on_batch(batch, dedup_store, rollup_store):
+    if dedup_store.seen(batch.batch_id):        # agent retry or consumer replay
+        metrics.inc("duplicate_batch_dropped")
+        return                                  # safe: no double count, no false alert
+    for sample in batch.samples:
+        window = floor_to_minute(sample.ts)
+        # Idempotent write: SET the cell's contribution keyed by batch,
+        # so re-applying the same batch overwrites, never adds twice.
+        rollup_store.put_contribution(
+            series=sample.series_key, window=window,
+            batch_id=batch.batch_id, value=sample.value)
+    dedup_store.mark_seen(batch.batch_id, ttl_hours=48)
+    dedup_store.commit_offset(batch.offset)     # only after writes succeed
+```
+
+And when contributions land in a SQL-shaped rollup store, the equivalent is a keyed upsert — the primary key does the dedup:
+
+```sql
+-- One row per (series, window, batch): a replay overwrites itself.
+INSERT INTO rollup_contributions (series_key, window_start, batch_id, value)
+VALUES ($1, $2, $3, $4)
+ON CONFLICT (series_key, window_start, batch_id)
+DO UPDATE SET value = EXCLUDED.value;
+-- The rollup itself is SUM(value) over contributions: replay-safe by construction.
+```
+
+Two rules make this work. First, the `batch_id` is minted **once, by the agent, at flush time** — if a retry mints a new one, dedup is blind and counters double. Second, mark-as-seen / offset-commit happens **after** the writes succeed, so a crash mid-batch causes a redelivery that the keying absorbs, rather than a silent loss. Note what this design deliberately does *not* do: it does not try to deduplicate individual metric samples by content — at 10M/sec that state is unaffordable, and samples from a legitimate next flush of the same counter are supposed to look similar. Identity lives at the batch level; effects are made idempotent at the rollup level.
+
+## 10. Retry, failure handling, checkpointing and recovery
+
+- **Agent/gateway retry:** exponential backoff with jitter; agents buffer aggregated batches locally for a bounded window, so a gateway outage delays metrics rather than losing them — and the delay is itself visible as an ingestion-lag meta-metric when service returns.
+- **Aggregation crash:** the stream job restarts from its last checkpoint (buffer offsets + aggregation state together). Batches after the checkpoint are replayed; the `batch_id` dedup and keyed rollup writes absorb the overlap. This is why checkpointed state beats "commit the offset and hope".
+- **Guard failure mode — decide it out loud:** if the cardinality guard is down, do you fail open (admit everything, cost risk) or fail closed (drop, alerting risk)? The senior answer: fail open for alert-critical tenants/metrics, fail closed (or to a cached last-known policy with conservative budgets) for everything else — and say why: a guard outage must never be the thing that blinds alerting.
+- **Poison payloads** (malformed batches, a client emitting millions of distinct label values in one flush): route to a dead-letter store with the raw payload and reason, count and alert on the rate, and shed that tenant's excess at the gateway. One bad producer must never stall a partition or the guard for everyone.
+- **TSDB / hot-tier unavailable:** aggregation pauses its sink and buffers in the stream buffer; consumers fall behind rather than dropping data. Lag becomes the visible, alertable symptom, and alerting fails over to the pre-aggregate stream for as long as it can.
+- **Downsampling job failure:** rollups lag, hot retention is temporarily extended rather than deleting data that has not been rolled up yet. Deleting un-rolled-up data to keep a schedule is how platforms lose the incident data they exist to keep.
+
+## 11. Monitoring and observability
+
+- **Active series per metric, per tenant, and its rate of change** — the platform's headline metric. Alert on growth rate, not just level: a metric gaining a million series an hour is an incident in progress.
+- **Guard actions:** samples/series dropped, sampled or rejected, by reason, metric and team. Any spike is either an attack, a bug, or a team that needs a conversation — all three need a human.
+- **Ingestion lag and alert-evaluation latency**: time from sample timestamp to alert decision, against the alerting budget. Cost work that quietly adds minutes here has failed its main constraint.
+- **Hot-shard indicators:** per-shard write rate, query latency and index memory; alert on skew between shards, not just absolute load.
+- **Sampling honesty checks:** for sampled streams, continuously compare sampled estimates against a small unsampled control slice, so "the sample is representative" is a measured fact, not a hope.
+- **Cost dashboard:** series count, samples/sec, storage by tier, and estimated cost per team and per metric — the same numbers chargeback uses, visible to the teams themselves.
+- Structured logs carry `batch_id`, tenant and metric end to end, so one batch can be traced across agent, gateway, guard, buffer and aggregation.
+
+## 12. Security
+
+- **Per-tenant identity:** agents and gateways authenticate with per-team/per-service credentials (mTLS or signed tokens); a compromised service can only write as itself, under its own quotas and budgets, and can be revoked individually.
+- **Cardinality as an attack surface:** an unauthenticated or compromised producer emitting unbounded label values is a denial-of-service against the TSDB index — this has a name in the industry, a cardinality attack. Per-tenant series budgets at the guard are therefore a security control, not just a cost control.
+- **Label content is data:** labels leak. `user_id` labels are a cost bug; labels carrying emails, tokens or free-text error messages are a privacy and security incident. The guard's forbidden-label policy should scan for high-entropy and PII-shaped label values, and label data must be access-controlled like any other production data.
+- Encryption in transit and at rest throughout; dashboard, alerting and cost data under role-based access, with per-team data visible to its owners and platform-wide views restricted to the platform team.
+
+## 13. Scalability, the 10x question, and cost
+
+**At 10x (100M events/sec):** the architecture does not change, the pressure points move. Agent-side aggregation matters even more (it is the only lever that reduces work *before* the platform pays for it). The guard must be stateless-fast with its series accounting in a sharded, approximate-then-exact design — exact global series counts at admission time do not scale; budgets enforced per gateway partition with periodic global reconciliation do. The stream layer scales by partitions; the TSDB by series-hash shards. What breaks first is usually the **series index and query fan-out**, not raw ingestion — which is why the guard, not bigger ingestion boxes, remains the main defence.
+
+**Cost, stated as levers with owners:**
+
+| Lever | Saving mechanism | What you must protect |
+|---|---|---|
+| Label policy at the guard | Removes pathological series (the `user_id` class of bug) entirely | Legitimate breakdowns — offer hash-bucketing or exemplars/logs for per-user questions instead |
+| Agent-side aggregation | One sample per series per window instead of one event per observation | Very short spikes inside a window are smoothed — disclose the window size |
+| Sampling low-value streams | 1-in-N sampling cuts samples ~N-fold on those streams | Never sample alert inputs; keep rates unbiased with proper scaling, and keep a control slice |
+| Pre-aggregation / recording rules | Alerts and dashboards read one rollup instead of scanning millions of series | The rollup set must cover the real alert rules — derive it from them |
+| Downsampling + tiering | Old data at 1m/1h resolution costs a fraction of native resolution | Percentile semantics (merge buckets/sketches, never average percentiles) and spike visibility in old data |
+
+**The honest headline:** the 10x is mostly not a storage negotiation — it is removing series that should never have existed, and resolution that was never queried. If a proposed cut cannot name which of those two it is, it is probably a retention cut in disguise.
+
+## 14. Trade-offs, stated honestly
+
+| Choice | You gain | You pay |
+|---|---|---|
+| Dropping high-cardinality labels at the guard | The bill and the index recover immediately, no redeploys needed | Teams lose that breakdown in metrics — per-user questions must go to logs/traces/exemplars, which is where they belonged, but the conversation is real |
+| Sampling low-value streams | Large, fast sample-volume savings | Estimates, not counts: sampled rates are unbiased only if scaled correctly, and rare-event visibility is genuinely reduced |
+| Pre-aggregating alert inputs | Alert evaluation is fast, cheap and stable under load | You can only alert on aggregates you decided to compute — a brand-new alert shape may need a new rollup before it can page |
+| Downsampling old data | Months of history at a fraction of the cost | Old spikes are smoothed; forensic queries over last quarter cannot see a 30-second event |
+| Series budgets per team | The commons is protected; one team's accident is their problem, not everyone's outage | A team with a legitimate growth spurt hits a budget and must ask for more — the budget process must be fast or teams will route around it |
+
+<Callout type="warn">
+Say this sentence in the interview: "This platform does not deliver exactly-once delivery — agents retry and consumers replay, so delivery is at-least-once. What it delivers is exactly-once *effects* on counters and rollups, through batch identity and idempotent, keyed writes — and for alerting, the equivalent discipline is that sampled or dropped data must never silently feed a paging rule." Conflating delivery with effects, and sampling with alerting, are the two senior-level slips in this problem.
+</Callout>
+
+**Delivery semantics, precisely.** At-most-once (fire-and-forget from agents) would lose metrics on every network hiccup — acceptable for a debug gauge, unacceptable for the data pages are fired from. At-least-once plus batch-level dedup and idempotent rollup writes is the sweet spot. "Exactly-once" claims from streaming tools refer to exactly-once *state updates within that system's checkpoints and transactional sinks* — real and useful, but narrower than the end-to-end claim candidates often make. And a separate honesty point specific to this scenario: a **sampled** stream can support an approximately-right dashboard, but an alert evaluated on sampled data has a quantifiably wrong firing probability — which is why alert inputs are kept unsampled by policy, not by preference.
+
+## 15. Interviewer follow-up Q&As
+
+1. **"A team says they genuinely need per-user metrics. What do you tell them?"** — That metrics are the wrong tool for a million-way breakdown: series cost is multiplicative, so per-user anything is unbounded by definition. Offer the right tools instead — logs, traces with exemplars, or a dedicated analytics pipeline for per-user questions — and, if they need a metrics-shaped compromise, hash-bucket users into a small fixed number of cohorts (say 100 buckets) so the breakdown is bounded and budgeted.
+2. **"How do you find out who blew up cardinality, and how fast?"** — The guard maintains active-series counts per metric + tenant with rate-of-change alerting. In practice you know within minutes of the deploy that shipped the label, you know the metric, the label and the owning team, and the guard has already capped the damage at that metric's budget while you talk to them.
+3. **"Why not just buy a bigger TSDB / more shards?"** — Because cardinality growth is multiplicative and unbounded while hardware is neither. A million-user label on a popular metric creates more series than any sane shard count absorbs, and the index cost follows you into every query. Sharding treats the symptom; the guard treats the cause. You may still add shards — after the series count is sane.
+4. **"An alert is defined over a metric that is also being sampled. What do you do?"** — Split the path: the alert's input series are classified alert-critical, exempted from sampling at the guard, and pre-aggregated for the rule. Sampling policy is derived from the alert registry, never applied blindly per metric — the same metric can be sampled for dashboard traffic and unsampled for its alert series.
+5. **"How do you sample a counter stream without biasing the rate?"** — Sample whole batches/series consistently (not individual increments at random), record the sampling rate as a meta-metric alongside the data, and scale at aggregation/query time. Inconsistent sampling — dropping increments of a counter unevenly — produces rates that are not just noisy but wrong in a direction nobody can reconstruct later.
+6. **"One shard is hot and the rest are idle. Walk me through the fix."** — First diagnose which kind of hot: write-hot (series hashing has concentrated writes — re-split the hash range and rebalance) or query-hot (everyone queries the same aggregates — pre-aggregate and cache, the shard stops scanning raw series). Long-term, shard by full series hash, never by metric name, so popularity spreads by construction.
+7. **"A team's deploy adds a bad label at 3 a.m. What happens automatically?"** — The guard sees the metric's series count climbing, enforces its budget — excess series dropped or sampled, all counted and attributed — and fires a platform alert with the metric, label and team. Ingestion and alerting for everyone else are unaffected. The team wakes up to a capped bill and a precise message, not a platform outage.
+8. **"How do you prove alerting did not get worse after the cost cuts?"** — Before/after evidence, not vibes: alert-evaluation latency distributions, a replay test — run historical incident windows through the new pipeline and show the same alerts fire at the same times — and the standing control slices that compare sampled estimates with unsampled truth. If you cannot replay an old incident and reproduce its pages, you do not know alerting survived.
+9. **"Why downsample instead of just deleting data older than 30 days?"** — Because the questions asked of old data are real — capacity trends, year-over-year comparisons, incident forensics — and rollups answer them at 1–2% of the full-resolution cost. Deletion saves little once rollups exist and destroys the long view permanently. Cut resolution with age, not history.
+10. **"What breaks first at 100M events/sec?"** — The series index and query fan-out, not ingestion. Admission-time series accounting has to become partition-local with global reconciliation, pre-aggregation coverage has to grow, and the guard's policy checks must stay O(1)-ish per series. The design's shape survives; its accounting gets more approximate, deliberately and measurably.
+
+## 16. Interview-ready spoken answer
+
+> "First, the requirements I'd pin down: 10 million metric events a second, a bill that grew about 10x, and a hard constraint that alerting stays reliable. The clarification that matters most is the difference between events per second and active series — because cost in a time-series database scales with series, and a series is one metric name times one combination of label values. A user-id label with a million users multiplies a metric by a million series. That arithmetic is the whole problem, so I'd say it first.
+>
+> The bottleneck, then, is not ingestion throughput, it is unbounded series creation plus everything being kept at full resolution forever, plus one popular metric landing on one hot shard. So the architecture is: agents aggregate on the host first — one sample per series per window leaves the machine — then a stateless ingestion gateway, then the piece this design is really about, a cardinality guard.
+>
+> The data flow through the guard is where cost is controlled: it enforces a label policy — user-id, request-id and similar labels are dropped or hash-bucketed — it enforces a series budget per metric and per team, it samples low-value streams, and it never samples anything an alert depends on. Every drop is counted and attributed, so control is auditable, never silent. Admitted data goes through a stream buffer into an aggregation layer that writes a hot TSDB tier, computes rollups into a downsampled tier, and continuously pre-computes the exact aggregates the alert rules query.
+>
+> On reliability and duplicates: delivery is at-least-once — agents retry, consumers replay — so batches carry a stable batch ID minted once by the agent, and rollup writes are keyed and idempotent, so a replay overwrites itself instead of double-counting a counter and firing a false page. Crashes recover from checkpoints and the replay is safe for the same reason.
+>
+> Scaling is sharding by a hash of the full series, never by metric name — that is what kills the hot shard — plus per-tenant quotas so one team's bad label degrades their fidelity, not everyone's platform. At 10x volume the shape survives; what gets harder is the series index and admission accounting, which goes partition-local with reconciliation.
+>
+> The trade-offs I'd flag honestly: dropping labels means per-user questions move to logs and traces, where they belong, but that is a real workflow change for teams. Sampling gives estimates, not counts, which is fine for dashboards and unacceptable for paging inputs — so alert series are exempt by policy, derived from the alert registry itself. And the platform gives exactly-once effects on its rollups, not exactly-once delivery — and a 10x saving that comes mostly from removing series that should never have existed, and resolution nobody ever queried."
+
+## 17. Mock interview mode
+
+**Five hard follow-ups, with expected answers**
+
+1. **"Give me the actual arithmetic of the incident. How does one label cost 10x?"** — Expected: series = the product of label cardinalities. A metric with route (200 values) × status (5) × region (3) is 3,000 series. Add `user_id` with ~1M active users and the same metric is up to 3 billion series — six orders of magnitude from one label, on one metric, before counting the index memory each series costs even at rest. A candidate who cannot do this multiplication does not understand the problem yet.
+2. **"Your guard drops labels. A team pages you: their dashboard broke. Defend the design."** — Expected: the drop was counted, attributed and announced by meta-metrics and the cost dashboard, the policy is per-metric and reversible, and the team has a sanctioned alternative (cohort bucketing, exemplars, logs). Also: the alternative to a broken dashboard was a broken platform — budgets exist precisely so one metric cannot consume the commons. Defensiveness or "they shouldn't have done that" without the audit trail and the escape hatch is a weak answer.
+3. **"Prove your sampling didn't change an alert outcome last month."** — Expected: alert inputs are never sampled — provable from policy config derived from the alert registry — plus the control-slice comparison for the streams that are sampled, plus incident replay: historical windows re-run through the current pipeline reproduce the same alert firings. "We were careful" is not proof.
+4. **"Why not just move everything into a cheap OLAP store and query raw events?"** — Expected: at 10M events/sec the raw-event store becomes the expensive thing — you pay ingest, storage and scan cost on every event forever, and you rebuild series indexing, rollups, retention tiering and a metrics query model on top. Columnar OLAP is a fine home for the *downsampled* tier or for genuinely event-shaped analytics; as the primary metrics store it usually relocates the bill rather than cutting it.
+5. **"The business refuses all sampling and all label drops. You still owe 10x. What now?"** — Expected: work the remaining levers honestly — agent-side aggregation, shorter hot retention with aggressive rollups, pre-aggregation so queries stop scanning, shard rebalancing, reserved/committed-use pricing — and then say plainly which of those gets you partway (often 2–4x) and that the rest of the 10x *is* the series count, so the refusal has a price leadership should see in numbers. Inventing a painless 10x is the failure mode; pricing the constraint is the Lead move.
+
+**Common candidate mistakes**
+
+- Attacking events/sec with bigger ingestion while never computing a series count.
+- Proposing sampling without exempting alert inputs — or not noticing the interaction at all.
+- Averaging percentiles when describing rollups of histograms.
+- Sharding by metric name, recreating the hot shard they were asked to fix.
+- Treating cardinality as purely technical: no budgets, no attribution, no chargeback/showback, so the next team does it again.
+- Claiming "exactly-once delivery" from the streaming layer.
+
+**What a senior candidate mentions unprompted**
+
+- Series = product of label cardinalities; index cost and churn, not just sample storage.
+- The alert registry as the source of truth for what may never be sampled.
+- Control slices to verify sampling honesty, and incident replay to verify alerting after any pipeline change.
+- Guard failure modes: fail open for alert-critical traffic, fail closed for the rest.
+- Exemplars / logs / traces as the correct home for per-user questions.
+- Cost attribution per team as a first-class feature, not a finance afterthought.
+
+**Scoring rubric (out of 10)**
+
+| Score | What it looks like |
+|---|---|
+| 9–10 | Series arithmetic up front, guard + budgets + attribution, alert inputs protected by policy, series-hash sharding, rollup semantics correct (no averaged percentiles), 10x decomposed into named levers, delivery semantics stated precisely |
+| 7–8 | Sound pipeline with a guard and tiering, but sampling/alert interaction or hot-shard diagnosis is shallow |
+| 5–6 | Components named (Kafka, a TSDB, sampling) but cardinality treated as a storage detail; no budgets or attribution |
+| 3–4 | "Scale the TSDB / add shards" as the whole answer; no label policy |
+| 0–2 | Proposes sampling everything uniformly, claims exactly-once delivery, or cannot explain what a series is |
+
+Sources: [Prometheus documentation — instrumentation best practices and cardinality](https://prometheus.io/docs/practices/instrumentation/) · [OpenTelemetry documentation — metrics and semantic conventions](https://opentelemetry.io/docs/) · [Apache Kafka documentation — delivery semantics and design](https://kafka.apache.org/documentation/)

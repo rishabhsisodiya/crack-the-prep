@@ -1,0 +1,152 @@
+{
+  "meta": {
+    "title": "Distributed Message Queue \u2014 Partitions & Replication",
+    "output": ".archify/build/distributed-message-queue/architecture.html",
+    "quality_profile": "showcase"
+  },
+  "components": [
+    {
+      "id": "prod",
+      "type": "backend",
+      "label": "Producers",
+      "sublabel": "publish by key"
+    },
+    {
+      "id": "b1",
+      "type": "messagebus",
+      "label": "Broker 1",
+      "sublabel": "Partition 0 leader \u00b7 Partition 1 follower"
+    },
+    {
+      "id": "b2",
+      "type": "messagebus",
+      "label": "Broker 2",
+      "sublabel": "Partition 1 leader"
+    },
+    {
+      "id": "b3",
+      "type": "messagebus",
+      "label": "Broker 3",
+      "sublabel": "Partition 0 follower"
+    },
+    {
+      "id": "ca1",
+      "type": "backend",
+      "label": "Consumer Group A \u00b7 Member 1",
+      "sublabel": "reads Partition 0"
+    },
+    {
+      "id": "ca2",
+      "type": "backend",
+      "label": "Consumer Group A \u00b7 Member 2",
+      "sublabel": "reads Partition 1"
+    },
+    {
+      "id": "cb",
+      "type": "backend",
+      "label": "Consumer Group B",
+      "sublabel": "independent offset"
+    },
+    {
+      "id": "ctrl",
+      "type": "cloud",
+      "label": "Controller",
+      "sublabel": "metadata quorum \u00b7 leader election"
+    }
+  ],
+  "connections": [
+    {
+      "id": "p-b1",
+      "from": "prod",
+      "to": "b1",
+      "label": "key hash \u2192 Partition 0"
+    },
+    {
+      "id": "p-b2",
+      "from": "prod",
+      "to": "b2",
+      "label": "key hash \u2192 Partition 1"
+    },
+    {
+      "id": "b1-b3",
+      "from": "b1",
+      "to": "b3",
+      "label": "replicate Partition 0"
+    },
+    {
+      "id": "b2-b1",
+      "from": "b2",
+      "to": "b1",
+      "label": "replicate Partition 1",
+      "variant": "dashed"
+    },
+    {
+      "id": "ca1-b1",
+      "from": "ca1",
+      "to": "b1",
+      "label": "reads Partition 0"
+    },
+    {
+      "id": "ca2-b2",
+      "from": "ca2",
+      "to": "b2",
+      "label": "reads Partition 1"
+    },
+    {
+      "id": "cb-b1",
+      "from": "cb",
+      "to": "b1",
+      "label": "reads Partition 0 \u00b7 own offset"
+    },
+    {
+      "id": "ctrl-b1",
+      "from": "ctrl",
+      "to": "b1",
+      "label": "leader election \u00b7 membership",
+      "variant": "dashed"
+    },
+    {
+      "id": "ctrl-b2",
+      "from": "ctrl",
+      "to": "b2",
+      "variant": "dashed"
+    },
+    {
+      "id": "ctrl-b3",
+      "from": "ctrl",
+      "to": "b3",
+      "variant": "dashed"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "The partition is the unit",
+      "items": [
+        "Ordering, parallelism and storage all live at partition level",
+        "Each partition is an append-only, ordered log on disk"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Replication",
+      "items": [
+        "One leader broker takes all reads/writes per partition",
+        "Followers continuously fetch and replay the leader's log"
+      ]
+    },
+    {
+      "dot": "orange",
+      "title": "Pick your guarantees",
+      "items": [
+        "Exactly-once, globally ordered, infinitely durable, infinitely fast \u2014 not all at once",
+        "Consumer groups read independently with their own offsets"
+      ]
+    }
+  ],
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "layout": {
+    "mode": "auto"
+  }
+}

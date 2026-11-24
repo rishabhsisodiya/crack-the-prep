@@ -10,6 +10,7 @@ description: "Designing threaded comments — storing trees (adjacency list vs m
 
 import Callout from '../../components/Callout.astro';
 import Mermaid from '../../components/Mermaid.astro';
+import ArchDiagram from '../../components/ArchDiagram.astro';
 
 Part of the [system design](/prep/system-design) series. This is a **delta page**: the feed of posts is covered by [News Feed](/prep/system-design/news-feed) and vote counts by [Distributed Counter](/prep/system-design/distributed-counter). This page is about the comment tree itself.
 
@@ -68,7 +69,8 @@ Siblings are sorted among themselves; children always stay under their parent.
 
 ## 4. Serving a thread
 
-<Mermaid caption="Thread reads come from a per-post cached tree; writes go to the DB and update the cache" code={`flowchart LR
+<ArchDiagram src="nested-comments/architecture" caption="Thread reads come from a per-post cached tree; writes go to the DB and update the cache">
+<Mermaid code={`flowchart LR
   U[Reader] --> TS[Thread service]
   TS --> TC[(Cache: precomputed thread<br/>top N per sort, per post)]
   TC -. miss .-> DB[(Comments DB<br/>partitioned by post_id)]
@@ -80,6 +82,7 @@ Siblings are sorted among themselves; children always stay under their parent.
   V[Votes] --> VC[Vote counter<br/>batched]
   VC --> DB
 `} />
+</ArchDiagram>
 
 - **Partition comments by `post_id`** so one thread lives on one shard.
 - **Cache the rendered tree per post and sort order** (top ~200 comments with collapsed stubs), rebuilt asynchronously when new comments or vote batches arrive — debounced to at most every few seconds on hot posts.

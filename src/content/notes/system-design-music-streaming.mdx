@@ -10,6 +10,7 @@ description: "Designing Spotify — what it shares with video streaming, and wha
 
 import Callout from '../../components/Callout.astro';
 import Mermaid from '../../components/Mermaid.astro';
+import ArchDiagram from '../../components/ArchDiagram.astro';
 
 Part of the [system design](/prep/system-design) series. This is a **delta page** on top of [Video Streaming (YouTube)](/prep/system-design/video-streaming-youtube): upload/transcode pipelines, CDN delivery and adaptive bitrate all carry over. This page covers what's specific to music.
 
@@ -35,7 +36,8 @@ Part of the [system design](/prep/system-design) series. This is a **delta page*
 
 ## 3. What's different
 
-<Mermaid caption="Playback fetches small encrypted files from the CDN; play events flow to a durable pipeline for royalties" code={`flowchart LR
+<ArchDiagram src="music-streaming/architecture" caption="Playback fetches small encrypted files from the CDN; play events flow to a durable pipeline for royalties">
+<Mermaid code={`flowchart LR
   APP[Client app<br/>local cache + prefetch] --> PB[Playback service<br/>license, signed URL]
   APP --> CDN[CDN: encrypted audio files]
   CDN --> OBJ[(Object storage)]
@@ -45,6 +47,7 @@ Part of the [system design](/prep/system-design) series. This is a **delta page*
   APP --> PL[Playlist service]
   PL --> PDB[(Playlists DB<br/>Cassandra-style)]
 `} />
+</ArchDiagram>
 
 **1. Files are small, so fetch the whole thing.** A 3-minute song at 160 kbps is ~3.5 MB. Instead of segmenting like video, clients fetch in a few large range requests, start playing after the first chunk, and **prefetch the next track in the queue** while the current one plays. Skip latency then disappears. Clients also keep an on-disk cache of recently and frequently played tracks.
 

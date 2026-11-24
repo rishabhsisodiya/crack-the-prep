@@ -1,0 +1,220 @@
+{
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "Cloud platform",
+      "wraps": [
+        "filedrop",
+        "stream",
+        "ingest",
+        "dedup",
+        "streamproc",
+        "batchproc",
+        "warehouse",
+        "dash",
+        "finance",
+        "dlq",
+        "monitor"
+      ]
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "items": [
+        "Stream path gives managers today's running totals within minutes",
+        "Nightly batch recomputes the closed day exactly and overwrites the streamed estimate"
+      ],
+      "title": "Two Views of the Truth"
+    },
+    {
+      "dot": "emerald",
+      "items": [
+        "POS keeps selling offline and replays on reconnect",
+        "Dedup on (store, order id) makes replay and duplicate files harmless"
+      ],
+      "title": "Stores Go Offline \u2014 By Design"
+    },
+    {
+      "dot": "rose",
+      "items": [
+        "Each store's day closes in its own timezone, not in UTC",
+        "Finance only reads closed store-days, so late replays fix history without corrupting reports"
+      ],
+      "title": "A Day Is a Store-Day"
+    }
+  ],
+  "components": [
+    {
+      "id": "stores",
+      "label": "POS Stores",
+      "sublabel": "300 stores",
+      "type": "external"
+    },
+    {
+      "id": "filedrop",
+      "label": "Batch File Drop",
+      "sublabel": "object storage",
+      "tag": "nightly files",
+      "type": "cloud"
+    },
+    {
+      "id": "stream",
+      "label": "Live Order Stream",
+      "sublabel": "Kafka topic",
+      "tag": "orders",
+      "type": "messagebus"
+    },
+    {
+      "id": "ingest",
+      "label": "Ingestion Service",
+      "sublabel": "validate + land raw",
+      "type": "backend"
+    },
+    {
+      "id": "dedup",
+      "label": "Dedup + Store-Day Logic",
+      "sublabel": "idempotent writes",
+      "type": "backend"
+    },
+    {
+      "id": "streamproc",
+      "label": "Stream Processing",
+      "sublabel": "today's running totals",
+      "type": "backend"
+    },
+    {
+      "id": "batchproc",
+      "label": "Nightly Batch Job",
+      "sublabel": "exact day close",
+      "type": "backend"
+    },
+    {
+      "id": "warehouse",
+      "label": "Warehouse",
+      "sublabel": "sales facts, by store-day",
+      "type": "database"
+    },
+    {
+      "id": "dash",
+      "label": "Manager Dashboards",
+      "sublabel": "near-real-time",
+      "type": "frontend"
+    },
+    {
+      "id": "finance",
+      "label": "Finance Reports",
+      "sublabel": "exact, end-of-day",
+      "type": "backend"
+    },
+    {
+      "id": "dlq",
+      "label": "Dead-Letter Queue",
+      "sublabel": "bad records, replayable",
+      "type": "messagebus"
+    },
+    {
+      "id": "monitor",
+      "label": "Monitoring + Alerts",
+      "sublabel": "lag, missing stores",
+      "type": "cloud"
+    }
+  ],
+  "connections": [
+    {
+      "from": "stores",
+      "id": "stores-files",
+      "label": "batch files (async)",
+      "to": "filedrop",
+      "variant": "dashed"
+    },
+    {
+      "from": "stores",
+      "id": "stores-stream",
+      "label": "live orders (async)",
+      "to": "stream",
+      "variant": "emphasis"
+    },
+    {
+      "from": "filedrop",
+      "id": "files-ingest",
+      "label": "file landed",
+      "to": "ingest",
+      "variant": "dashed"
+    },
+    {
+      "from": "stream",
+      "id": "stream-ingest",
+      "label": "order events",
+      "to": "ingest"
+    },
+    {
+      "from": "ingest",
+      "id": "ingest-dedup",
+      "label": "validated records",
+      "to": "dedup"
+    },
+    {
+      "from": "dedup",
+      "id": "dedup-streamproc",
+      "label": "clean orders",
+      "to": "streamproc"
+    },
+    {
+      "from": "dedup",
+      "id": "dedup-batchproc",
+      "label": "full day replay",
+      "to": "batchproc",
+      "variant": "dashed"
+    },
+    {
+      "from": "streamproc",
+      "id": "streamproc-warehouse",
+      "label": "running totals",
+      "to": "warehouse"
+    },
+    {
+      "from": "batchproc",
+      "id": "batchproc-warehouse",
+      "label": "exact totals (overwrite)",
+      "to": "warehouse",
+      "variant": "dashed"
+    },
+    {
+      "from": "warehouse",
+      "id": "warehouse-dash",
+      "label": "today view",
+      "to": "dash"
+    },
+    {
+      "from": "warehouse",
+      "id": "warehouse-finance",
+      "label": "closed day",
+      "to": "finance"
+    },
+    {
+      "from": "ingest",
+      "id": "ingest-dlq",
+      "label": "rejects",
+      "to": "dlq",
+      "variant": "dashed"
+    },
+    {
+      "from": "warehouse",
+      "id": "warehouse-monitor",
+      "label": "freshness checks",
+      "to": "monitor",
+      "variant": "dashed"
+    }
+  ],
+  "diagram_type": "architecture",
+  "layout": {
+    "mode": "auto"
+  },
+  "meta": {
+    "output": ".archify/build/scenario-retail-reporting/architecture.html",
+    "quality_profile": "showcase",
+    "title": "Retail Sales Reporting: Nightly + Real-Time"
+  },
+  "schema_version": 1
+}

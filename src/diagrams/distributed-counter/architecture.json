@@ -1,0 +1,132 @@
+{
+  "meta": {
+    "title": "Distributed Counter \u2014 Likes Pipeline",
+    "output": ".archify/build/distributed-counter/architecture.html",
+    "quality_profile": "showcase"
+  },
+  "components": [
+    {
+      "id": "u",
+      "type": "external",
+      "label": "Like / Unlike",
+      "sublabel": "user taps"
+    },
+    {
+      "id": "api",
+      "type": "backend",
+      "label": "Like Service",
+      "sublabel": "edge first, then event"
+    },
+    {
+      "id": "ldb",
+      "type": "database",
+      "label": "Likes Table",
+      "sublabel": "post_id, user_id \u00b7 idempotent edge"
+    },
+    {
+      "id": "kafka",
+      "type": "messagebus",
+      "label": "Kafka \u2014 Like Events",
+      "sublabel": "keyed by post_id"
+    },
+    {
+      "id": "agg",
+      "type": "backend",
+      "label": "Aggregator",
+      "sublabel": "sums deltas per post per second"
+    },
+    {
+      "id": "cdb",
+      "type": "database",
+      "label": "Counts Store",
+      "sublabel": "one increment per post per flush"
+    },
+    {
+      "id": "rcache",
+      "type": "database",
+      "label": "Redis Count Cache",
+      "sublabel": "hot counts"
+    },
+    {
+      "id": "feed",
+      "type": "external",
+      "label": "Feed / Post Reads",
+      "sublabel": "shows the count"
+    }
+  ],
+  "connections": [
+    {
+      "id": "u-a",
+      "from": "u",
+      "to": "api",
+      "label": "like / unlike"
+    },
+    {
+      "id": "a-l",
+      "from": "api",
+      "to": "ldb",
+      "label": "insert or delete edge \u00b7 idempotent"
+    },
+    {
+      "id": "a-k",
+      "from": "api",
+      "to": "kafka",
+      "label": "emit +1 / \u22121 event"
+    },
+    {
+      "id": "k-g",
+      "from": "kafka",
+      "to": "agg",
+      "label": "one aggregator owns each post"
+    },
+    {
+      "id": "g-c",
+      "from": "agg",
+      "to": "cdb",
+      "label": "flush: one increment per post"
+    },
+    {
+      "id": "c-r",
+      "from": "cdb",
+      "to": "rcache",
+      "label": "serve hot counts"
+    },
+    {
+      "id": "r-f",
+      "from": "rcache",
+      "to": "feed",
+      "label": "read count"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Edge first, count second",
+      "items": [
+        "INSERT \u2026 ON CONFLICT DO NOTHING \u2014 a row inserted means +1",
+        "Double-taps and retries are harmless by construction"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Write coalescing",
+      "items": [
+        "Don't write every increment to the database",
+        "Aggregate deltas in memory, flush one increment per post per second"
+      ]
+    },
+    {
+      "dot": "orange",
+      "title": "Sharded counters",
+      "items": [
+        "Split one logical counter into N sub-counters; a read sums all N",
+        "Contention drops by N; make N dynamic for hot posts"
+      ]
+    }
+  ],
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "layout": {
+    "mode": "auto"
+  }
+}

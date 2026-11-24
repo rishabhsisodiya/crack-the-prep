@@ -1,0 +1,127 @@
+{
+  "meta": {
+    "output": ".archify/build/live-streaming/architecture-1.html",
+    "title": "Live Broadcast \u2014 Ingest Once, Transcode Once, Fan Out via CDN",
+    "quality_profile": "showcase"
+  },
+  "components": [
+    {
+      "id": "streamer",
+      "label": "Streamer (OBS)",
+      "sublabel": "one high-quality stream",
+      "type": "external"
+    },
+    {
+      "id": "ingest",
+      "label": "Ingest Edge",
+      "sublabel": "nearest PoP",
+      "type": "backend"
+    },
+    {
+      "id": "transcoder",
+      "label": "Live Transcoder",
+      "sublabel": "1080p \u00b7 720p \u00b7 480p \u00b7 160p",
+      "type": "backend"
+    },
+    {
+      "id": "packager",
+      "label": "Packager",
+      "sublabel": "HLS / LL-HLS segments + playlists",
+      "type": "backend"
+    },
+    {
+      "id": "origin",
+      "label": "Origin Storage",
+      "sublabel": "live segments",
+      "type": "database"
+    },
+    {
+      "id": "cdn",
+      "label": "CDN Edges",
+      "sublabel": "request coalescing",
+      "type": "cloud"
+    },
+    {
+      "id": "viewers",
+      "label": "Viewers",
+      "sublabel": "up to millions",
+      "type": "external"
+    },
+    {
+      "id": "recording",
+      "label": "Recording Store",
+      "sublabel": "object store for VOD",
+      "type": "database"
+    }
+  ],
+  "connections": [
+    {
+      "id": "s-i",
+      "from": "streamer",
+      "to": "ingest",
+      "label": "RTMP / SRT / WHIP"
+    },
+    {
+      "id": "i-t",
+      "from": "ingest",
+      "to": "transcoder"
+    },
+    {
+      "id": "t-p",
+      "from": "transcoder",
+      "to": "packager"
+    },
+    {
+      "id": "p-o",
+      "from": "packager",
+      "to": "origin"
+    },
+    {
+      "id": "o-c",
+      "from": "origin",
+      "to": "cdn"
+    },
+    {
+      "id": "c-v",
+      "from": "cdn",
+      "to": "viewers"
+    },
+    {
+      "id": "p-r",
+      "from": "packager",
+      "to": "recording",
+      "label": "record for VOD"
+    }
+  ],
+  "cards": [
+    {
+      "title": "Why broadcast scales",
+      "dot": "cyan",
+      "items": [
+        "Every viewer requests the same segment URLs, so the CDN collapses millions of requests into a handful to origin",
+        "HTTP delivery scales to millions in a way per-viewer WebRTC fan-out cannot"
+      ]
+    },
+    {
+      "title": "Latency budget",
+      "dot": "emerald",
+      "items": [
+        "Encode buffer + segment duration x segments buffered (typically 3) + CDN \u2014 6s segments give ~20s latency",
+        "LL-HLS parts (~200ms), chunked transfer and smaller buffers bring it down to a few seconds"
+      ]
+    },
+    {
+      "title": "Real-time constraint",
+      "dot": "rose",
+      "items": [
+        "Transcoding must keep up with real time \u2014 a transcoder that falls behind adds latency forever",
+        "Small channels may get source quality only, to save transcoding cost"
+      ]
+    }
+  ],
+  "diagram_type": "architecture",
+  "layout": {
+    "mode": "auto"
+  },
+  "schema_version": 1
+}

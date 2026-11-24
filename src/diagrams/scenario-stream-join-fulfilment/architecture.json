@@ -1,0 +1,171 @@
+{
+  "cards": [
+    {
+      "dot": "cyan",
+      "items": [
+        "Both topics keyed by order_id with the SAME partition count",
+        "Mismatched partitioning makes the join silently miss matches"
+      ],
+      "title": "Co-partitioning"
+    },
+    {
+      "dot": "emerald",
+      "items": [
+        "30-minute join window plus a grace period for out-of-order events",
+        "Suppress until window closes for one final result, or emit early and retract"
+      ],
+      "title": "Window & Grace"
+    },
+    {
+      "dot": "rose",
+      "items": [
+        "State store backed by a changelog topic \u2014 replay rebuilds local state",
+        "Idempotent fulfilment trigger on order_id gives exactly-once effects, not delivery"
+      ],
+      "title": "State Recovery"
+    }
+  ],
+  "components": [
+    {
+      "id": "ordersvc",
+      "label": "Order Service",
+      "sublabel": "creates orders, keyed by order_id",
+      "type": "backend"
+    },
+    {
+      "id": "paysvc",
+      "label": "Payment Service",
+      "sublabel": "authorises payments, keyed by order_id",
+      "type": "backend"
+    },
+    {
+      "id": "orderstopic",
+      "label": "Orders Topic",
+      "sublabel": "Kafka, partitioned by order_id",
+      "type": "messagebus"
+    },
+    {
+      "id": "paytopic",
+      "label": "Payments Topic",
+      "sublabel": "Kafka, same partition count",
+      "type": "messagebus"
+    },
+    {
+      "id": "join",
+      "label": "Stream Join Processor",
+      "sublabel": "Kafka Streams / Flink, 30-min window",
+      "type": "backend"
+    },
+    {
+      "id": "state",
+      "label": "State Store + Changelog",
+      "sublabel": "RocksDB, changelog topic for recovery",
+      "type": "database"
+    },
+    {
+      "id": "matched",
+      "label": "Matched Output Topic",
+      "sublabel": "order + payment pairs",
+      "type": "messagebus"
+    },
+    {
+      "id": "fulfil",
+      "label": "Fulfilment Service",
+      "sublabel": "idempotent trigger on order_id",
+      "type": "backend"
+    },
+    {
+      "id": "expiry",
+      "label": "Expiry / Late Handler",
+      "sublabel": "unmatched + timeout + late payments",
+      "type": "backend"
+    },
+    {
+      "id": "review",
+      "label": "Refund / Manual Review Queue",
+      "sublabel": "refunds, ops review, alerts",
+      "type": "messagebus"
+    }
+  ],
+  "connections": [
+    {
+      "from": "ordersvc",
+      "id": "ord-topic",
+      "label": "produce order",
+      "to": "orderstopic",
+      "variant": "dashed"
+    },
+    {
+      "from": "paysvc",
+      "id": "pay-topic",
+      "label": "produce payment",
+      "to": "paytopic",
+      "variant": "dashed"
+    },
+    {
+      "from": "orderstopic",
+      "id": "ord-join",
+      "label": "consume (async)",
+      "to": "join",
+      "variant": "dashed"
+    },
+    {
+      "from": "paytopic",
+      "id": "pay-join",
+      "label": "consume (async)",
+      "to": "join",
+      "variant": "dashed"
+    },
+    {
+      "from": "join",
+      "id": "join-state",
+      "label": "window state + changelog",
+      "to": "state"
+    },
+    {
+      "from": "join",
+      "id": "join-matched",
+      "label": "matched pair",
+      "to": "matched",
+      "variant": "dashed"
+    },
+    {
+      "from": "matched",
+      "id": "matched-fulfil",
+      "label": "trigger fulfilment",
+      "to": "fulfil",
+      "variant": "dashed"
+    },
+    {
+      "from": "join",
+      "id": "join-expiry",
+      "label": "unmatched / timeout",
+      "to": "expiry",
+      "variant": "dashed"
+    },
+    {
+      "from": "paytopic",
+      "id": "pay-late",
+      "label": "late payment path",
+      "to": "expiry",
+      "variant": "dashed"
+    },
+    {
+      "from": "expiry",
+      "id": "expiry-review",
+      "label": "refund / review",
+      "to": "review",
+      "variant": "dashed"
+    }
+  ],
+  "diagram_type": "architecture",
+  "layout": {
+    "mode": "auto"
+  },
+  "meta": {
+    "output": ".archify/build/scenario-stream-join-fulfilment/architecture.html",
+    "quality_profile": "showcase",
+    "title": "Stream Join \u2014 Orders and Payments Within a 30-Minute Window"
+  },
+  "schema_version": 1
+}

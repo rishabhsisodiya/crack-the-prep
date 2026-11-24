@@ -1,0 +1,157 @@
+{
+  "cards": [
+    {
+      "dot": "cyan",
+      "items": [
+        "Term \u2192 postings list with term frequency and positions; analysis pipeline is identical at index and query time",
+        "Segments are immutable: refresh flushes near-real-time segments, background merges combine them, deletes are tombstones"
+      ],
+      "title": "Inverted index"
+    },
+    {
+      "dot": "emerald",
+      "items": [
+        "Changes flow from the primary DB via CDC into Kafka, so updates are never missed and can be replayed",
+        "Indexers analyze documents and write them to the owning shard; the index is a derived view, rebuildable from the DB"
+      ],
+      "title": "Indexing path"
+    },
+    {
+      "dot": "rose",
+      "items": [
+        "Document partitioning: coordinator scatters to every shard, each returns local top-K, coordinator merges to global top-K",
+        "Stage 1 BM25 on each shard, then business boosts, then an ML re-ranker on the top few hundred; p99 is the slowest shard"
+      ],
+      "title": "Query path"
+    }
+  ],
+  "components": [
+    {
+      "id": "src",
+      "label": "Primary DB",
+      "sublabel": "source of truth",
+      "type": "database"
+    },
+    {
+      "id": "kafka",
+      "label": "Kafka",
+      "sublabel": "CDC events",
+      "type": "messagebus"
+    },
+    {
+      "id": "indexer",
+      "label": "Indexer Workers",
+      "sublabel": "analyze, build docs",
+      "type": "backend"
+    },
+    {
+      "id": "sh1",
+      "label": "Shard 1",
+      "sublabel": "primary + replicas",
+      "type": "database"
+    },
+    {
+      "id": "sh2",
+      "label": "Shard 2",
+      "sublabel": "primary + replicas",
+      "type": "database"
+    },
+    {
+      "id": "sh3",
+      "label": "Shard N",
+      "sublabel": "primary + replicas",
+      "type": "database"
+    },
+    {
+      "id": "user",
+      "label": "User Query",
+      "sublabel": "keyword search",
+      "type": "external"
+    },
+    {
+      "id": "coord",
+      "label": "Query Coordinator",
+      "sublabel": "scatter-gather + merge",
+      "type": "backend"
+    },
+    {
+      "id": "reranker",
+      "label": "Re-ranker",
+      "sublabel": "ML model on top results",
+      "type": "backend"
+    }
+  ],
+  "connections": [
+    {
+      "from": "src",
+      "id": "src-kafka",
+      "label": "CDC events",
+      "to": "kafka"
+    },
+    {
+      "from": "kafka",
+      "id": "kafka-indexer",
+      "to": "indexer"
+    },
+    {
+      "from": "indexer",
+      "id": "indexer-sh1",
+      "to": "sh1"
+    },
+    {
+      "from": "indexer",
+      "id": "indexer-sh2",
+      "to": "sh2"
+    },
+    {
+      "from": "indexer",
+      "id": "indexer-sh3",
+      "to": "sh3"
+    },
+    {
+      "from": "user",
+      "id": "user-coord",
+      "to": "coord"
+    },
+    {
+      "from": "coord",
+      "id": "coord-sh1",
+      "label": "scatter",
+      "to": "sh1"
+    },
+    {
+      "from": "coord",
+      "id": "coord-sh2",
+      "label": "scatter",
+      "to": "sh2"
+    },
+    {
+      "from": "coord",
+      "id": "coord-sh3",
+      "label": "scatter",
+      "to": "sh3"
+    },
+    {
+      "from": "coord",
+      "id": "coord-reranker",
+      "to": "reranker"
+    },
+    {
+      "from": "reranker",
+      "id": "reranker-user",
+      "label": "ranked results",
+      "to": "user",
+      "variant": "dashed"
+    }
+  ],
+  "diagram_type": "architecture",
+  "layout": {
+    "mode": "auto"
+  },
+  "meta": {
+    "output": ".archify/build/search-engine/architecture.html",
+    "quality_profile": "showcase",
+    "title": "Search Engine \u2014 Write Path Builds Index, Query Path Scatter-Gather"
+  },
+  "schema_version": 1
+}

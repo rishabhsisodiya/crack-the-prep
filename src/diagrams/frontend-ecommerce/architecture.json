@@ -1,0 +1,121 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "layout": {
+    "mode": "auto"
+  },
+  "meta": {
+    "title": "Frontend E-Commerce \u2014 Cached Shell, Dynamic Parts Separately",
+    "output": ".archify/build/frontend-ecommerce/architecture.html",
+    "quality_profile": "showcase"
+  },
+  "components": [
+    {
+      "id": "shopper",
+      "type": "external",
+      "label": "Shopper"
+    },
+    {
+      "id": "cdn",
+      "type": "cloud",
+      "label": "CDN Edge",
+      "sublabel": "cached product HTML"
+    },
+    {
+      "id": "pdp",
+      "type": "frontend",
+      "label": "Product Page Shell",
+      "sublabel": "title \u00b7 images \u00b7 description"
+    },
+    {
+      "id": "price",
+      "type": "backend",
+      "label": "Price & Stock API",
+      "sublabel": "dynamic \u00b7 per request"
+    },
+    {
+      "id": "recs",
+      "type": "backend",
+      "label": "Recommendations API",
+      "sublabel": "personalized"
+    },
+    {
+      "id": "reviews",
+      "type": "backend",
+      "label": "Reviews API",
+      "sublabel": "below the fold"
+    },
+    {
+      "id": "cart",
+      "type": "backend",
+      "label": "Cart Service"
+    }
+  ],
+  "connections": [
+    {
+      "id": "u-cdn",
+      "from": "shopper",
+      "to": "cdn",
+      "label": "requests product page",
+      "variant": "emphasis"
+    },
+    {
+      "id": "cdn-pdp",
+      "from": "cdn",
+      "to": "pdp",
+      "label": "cached HTML: title, images, description"
+    },
+    {
+      "id": "pdp-price",
+      "from": "pdp",
+      "to": "price",
+      "label": "client-fetched or streamed"
+    },
+    {
+      "id": "pdp-recs",
+      "from": "pdp",
+      "to": "recs",
+      "label": "after LCP",
+      "variant": "dashed"
+    },
+    {
+      "id": "pdp-rev",
+      "from": "pdp",
+      "to": "reviews",
+      "label": "lazy, below the fold",
+      "variant": "dashed"
+    },
+    {
+      "id": "pdp-cart",
+      "from": "pdp",
+      "to": "cart",
+      "label": "add to cart"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Shell comes from the edge",
+      "items": [
+        "Title, images and description are static per product, so the HTML shell is cached at the CDN",
+        "The shopper gets a fast first paint without hitting the origin"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Dynamic parts load separately",
+      "items": [
+        "Price and stock change constantly and are fetched per request, client-side or streamed",
+        "Personalized recommendations cannot be in the shared cached page"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Protect the LCP",
+      "items": [
+        "Recommendations load only after the largest contentful paint",
+        "Reviews are lazy-loaded below the fold, off the critical path"
+      ]
+    }
+  ]
+}

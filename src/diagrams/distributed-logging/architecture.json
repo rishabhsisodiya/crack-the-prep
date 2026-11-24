@@ -1,0 +1,152 @@
+{
+  "meta": {
+    "title": "Distributed Logging \u2014 Ship, Buffer, Index, Tier",
+    "output": ".archify/build/distributed-logging/architecture.html",
+    "quality_profile": "showcase"
+  },
+  "components": [
+    {
+      "id": "app",
+      "type": "backend",
+      "label": "App Containers",
+      "sublabel": "JSON logs to stdout"
+    },
+    {
+      "id": "ag",
+      "type": "backend",
+      "label": "Node Agent",
+      "sublabel": "Fluent Bit / Vector / OTel"
+    },
+    {
+      "id": "k",
+      "type": "messagebus",
+      "label": "Kafka Buffer",
+      "sublabel": "absorbs bursts"
+    },
+    {
+      "id": "pr",
+      "type": "backend",
+      "label": "Processors",
+      "sublabel": "parse \u00b7 redact PII \u00b7 enrich \u00b7 sample"
+    },
+    {
+      "id": "hot",
+      "type": "database",
+      "label": "Hot Store",
+      "sublabel": "indexed \u00b7 SSD \u00b7 last 7 days"
+    },
+    {
+      "id": "arc",
+      "type": "database",
+      "label": "Object Storage",
+      "sublabel": "compressed \u00b7 long-term"
+    },
+    {
+      "id": "warm",
+      "type": "database",
+      "label": "Warm / Cold Tier",
+      "sublabel": "aged-out data"
+    },
+    {
+      "id": "q",
+      "type": "frontend",
+      "label": "Query UI / API",
+      "sublabel": "search + dashboards"
+    },
+    {
+      "id": "al",
+      "type": "backend",
+      "label": "Alerting Rules",
+      "sublabel": "on processed stream"
+    }
+  ],
+  "connections": [
+    {
+      "id": "a-ag",
+      "from": "app",
+      "to": "ag",
+      "label": "stdout logs"
+    },
+    {
+      "id": "ag-k",
+      "from": "ag",
+      "to": "k",
+      "label": "batched, compressed",
+      "variant": "emphasis"
+    },
+    {
+      "id": "k-p",
+      "from": "k",
+      "to": "pr",
+      "label": "consume at own pace"
+    },
+    {
+      "id": "p-h",
+      "from": "pr",
+      "to": "hot",
+      "label": "index recent logs",
+      "variant": "emphasis"
+    },
+    {
+      "id": "p-a",
+      "from": "pr",
+      "to": "arc",
+      "label": "archive all logs"
+    },
+    {
+      "id": "h-w",
+      "from": "hot",
+      "to": "warm",
+      "label": "age out",
+      "variant": "dashed"
+    },
+    {
+      "id": "q-h",
+      "from": "q",
+      "to": "hot",
+      "label": "query recent"
+    },
+    {
+      "id": "q-w",
+      "from": "q",
+      "to": "warm",
+      "label": "query older"
+    },
+    {
+      "id": "q-a",
+      "from": "q",
+      "to": "arc",
+      "label": "rehydrate on demand",
+      "variant": "dashed"
+    },
+    {
+      "id": "p-al",
+      "from": "pr",
+      "to": "al",
+      "label": "evaluate alerts"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Buffering",
+      "items": [
+        "Agents ship to a Kafka buffer, so indexers consume at their own pace and log bursts never take the app down",
+        "Processors parse, redact PII, enrich and sample before anything is stored"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Tiers",
+      "items": [
+        "Hot indexed storage for the last 7 days, then warm/cold tiers, with object storage as the long-term archive",
+        "Cold data is rehydrated on demand rather than kept indexed"
+      ]
+    }
+  ],
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "layout": {
+    "mode": "auto"
+  }
+}

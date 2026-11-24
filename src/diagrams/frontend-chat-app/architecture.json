@@ -1,0 +1,133 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "layout": {
+    "mode": "auto"
+  },
+  "meta": {
+    "title": "Frontend Chat App \u2014 One Connection, Outbox Sending",
+    "output": ".archify/build/frontend-chat-app/architecture.html",
+    "quality_profile": "showcase"
+  },
+  "components": [
+    {
+      "id": "ui",
+      "type": "frontend",
+      "label": "Chat UI",
+      "sublabel": "ConversationList \u00b7 MessageThread \u00b7 Composer"
+    },
+    {
+      "id": "store",
+      "type": "database",
+      "label": "Client Store",
+      "sublabel": "conversations, messages by id"
+    },
+    {
+      "id": "outbox",
+      "type": "database",
+      "label": "Outbox",
+      "sublabel": "pending messages \u00b7 IndexedDB"
+    },
+    {
+      "id": "connmgr",
+      "type": "backend",
+      "label": "Connection Manager",
+      "sublabel": "WebSocket \u00b7 heartbeat \u00b7 reconnect"
+    },
+    {
+      "id": "gateway",
+      "type": "cloud",
+      "label": "Chat Gateway",
+      "sublabel": "WebSocket server"
+    },
+    {
+      "id": "sync",
+      "type": "backend",
+      "label": "Sync Service",
+      "sublabel": "fetch since cursor"
+    },
+    {
+      "id": "api",
+      "type": "backend",
+      "label": "REST API",
+      "sublabel": "history \u00b7 gap fill"
+    }
+  ],
+  "connections": [
+    {
+      "id": "ui-store",
+      "from": "ui",
+      "to": "store",
+      "label": "subscribe / read"
+    },
+    {
+      "id": "store-ui",
+      "from": "store",
+      "to": "ui",
+      "label": "state changes re-render"
+    },
+    {
+      "id": "ui-outbox",
+      "from": "ui",
+      "to": "outbox",
+      "label": "send: queue first",
+      "variant": "emphasis"
+    },
+    {
+      "id": "outbox-cm",
+      "from": "outbox",
+      "to": "connmgr",
+      "label": "flush when connected"
+    },
+    {
+      "id": "cm-gw",
+      "from": "connmgr",
+      "to": "gateway",
+      "label": "WebSocket"
+    },
+    {
+      "id": "cm-store",
+      "from": "connmgr",
+      "to": "store",
+      "label": "events: message, ack, receipt, typing"
+    },
+    {
+      "id": "sync-store",
+      "from": "sync",
+      "to": "store",
+      "label": "catch-up messages"
+    },
+    {
+      "id": "sync-api",
+      "from": "sync",
+      "to": "api",
+      "label": "fetch since cursor"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "One socket per app",
+      "items": [
+        "A single connection manager owns the WebSocket, outside React components",
+        "Components subscribe to the store, never to the socket directly"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Sending never loses a message",
+      "items": [
+        "Sends go to an IndexedDB outbox first and appear instantly as pending",
+        "The client-generated id is stable across retries, so re-sends never duplicate"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "REST fills the gaps",
+      "items": [
+        "WebSocket carries live events; REST serves history and catch-up",
+        "After a reconnect, sync fetches everything since the last cursor"
+      ]
+    }
+  ]
+}

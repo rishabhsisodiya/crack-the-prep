@@ -3,12 +3,13 @@ title: "System Design"
 track: "system-design"
 kind: "notes"
 order: 0
-description: "A repeatable framework for any system-design question, the building blocks you must be able to reason about, and three worked problems with diagrams."
-updated: 2026-09-02
+description: "A repeatable framework for any system-design question, the building blocks you must be able to reason about, worked problems with interactive Archify diagrams, and scenario-based interview questions with complete solutions."
+updated: 2026-11-24
 ---
 
 import Callout from '../../components/Callout.astro';
 import Mermaid from '../../components/Mermaid.astro';
+import ArchDiagram from '../../components/ArchDiagram.astro';
 
 Each bullet under [Building blocks](#building-blocks-to-have-crisp) has a full write-up on the [Building Blocks](/prep/system-design/building-blocks) page — what it is, when to reach for it, and the trade-off it forces. This page is the method and the worked examples.
 
@@ -21,6 +22,29 @@ Each bullet under [Building blocks](#building-blocks-to-have-crisp) has a full w
 - **Booking, commerce and money:** [Hotel Reservation](/prep/system-design/hotel-reservation) · [Ticket Booking](/prep/system-design/ticket-booking) · [Flash Sale](/prep/system-design/flash-sale) · [Payment System](/prep/system-design/payment-system) · [Digital Wallet](/prep/system-design/digital-wallet) · [Stock Exchange](/prep/system-design/stock-exchange)
 - **Data and platform:** [Metrics Monitoring & Alerting](/prep/system-design/metrics-monitoring-alerting) · [Distributed Logging](/prep/system-design/distributed-logging) · [Ad Click Aggregation](/prep/system-design/ad-click-aggregation) · [Gaming Leaderboard](/prep/system-design/gaming-leaderboard) · [Distributed Email Service](/prep/system-design/distributed-email-service) · [Webhook Delivery](/prep/system-design/webhook-delivery) · [Online Judge](/prep/system-design/online-judge)
 - **Frontend system design:** [Framework](/prep/system-design/frontend-system-design) · [News Feed UI](/prep/system-design/frontend-news-feed) · [Autocomplete Widget](/prep/system-design/frontend-autocomplete) · [Chat App UI](/prep/system-design/frontend-chat-app) · [Offline-First App](/prep/system-design/frontend-offline-first) · [E-commerce Product & Checkout](/prep/system-design/frontend-ecommerce)
+
+**Scenario-based questions (new).** Realistic, numbers-first scenarios in full interview format — problem statement, clarifying questions, complete solution, Archify diagram, trade-offs, a speakable interview answer and a mock-interview rubric:
+
+- [Telemetry ingestion at 100K events/second](/prep/system-design/scenario-telemetry-ingestion) · Level 2 — Senior
+- [Effectively-once payment event processing](/prep/system-design/scenario-effectively-once-payments) · Level 3 — Lead / Architect
+- [Syncing 2,000 stores under a strict API rate limit](/prep/system-design/scenario-rate-limited-api-sync) · Level 2 — Senior
+- [8 TB historical backfill + CDC into a lakehouse](/prep/system-design/scenario-lakehouse-etl) · Level 3 — Lead / Architect
+- [Nightly + real-time sales reporting for a retail chain](/prep/system-design/scenario-retail-reporting) · Level 1 — Mid-level
+- [Customer 360: five sources, one customer record](/prep/system-design/scenario-customer-360-ingestion) · Level 2 — Senior
+- [Real-time fraud scoring in under 100 ms](/prep/system-design/scenario-realtime-fraud-detection) · Level 3 — Lead / Architect
+- [Surviving a 20x spike: hot partitions and backpressure](/prep/system-design/scenario-hot-partition-flash-events) · Level 2 — Senior
+- [Multi-region event pipeline: RPO 0, RTO 15 minutes](/prep/system-design/scenario-multi-region-dr) · Level 3 — Lead / Architect
+- [Getting events out of a monolith without downtime (CDC + outbox)](/prep/system-design/scenario-cdc-outbox-monolith) · Level 2 — Senior
+- [Ingesting 2 TB of logs a day, searchable](/prep/system-design/scenario-log-analytics-pipeline) · Level 2 — Senior
+- [Proving no transaction was lost: reconciliation](/prep/system-design/scenario-finance-reconciliation) · Level 1 — Mid-level
+- [500 GB nightly ETL in a two-hour window](/prep/system-design/scenario-nightly-batch-window) · Level 1 — Mid-level
+- [Joining orders and payments in a stream](/prep/system-design/scenario-stream-join-fulfilment) · Level 3 — Lead / Architect
+- [One noisy tenant is killing your API](/prep/system-design/scenario-multi-tenant-throttling) · Level 1 — Mid-level
+- [Keeping a search index fresh in near-real-time](/prep/system-design/scenario-search-indexing-pipeline) · Level 2 — Senior
+- [The lake is slow and expensive: a small-files firefight](/prep/system-design/scenario-small-files-lake) · Level 2 — Senior
+- [Erasing one user from everywhere, provably (GDPR)](/prep/system-design/scenario-gdpr-erasure) · Level 3 — Lead / Architect
+- [Inventory that disagrees with itself in three warehouses](/prep/system-design/scenario-inventory-sync-conflicts) · Level 2 — Senior
+- [Your metrics bill exploded: cardinality at scale](/prep/system-design/scenario-metrics-cardinality) · Level 3 — Lead / Architect
 
 ## The framework
 
@@ -66,7 +90,8 @@ When you get a problem you have not seen, still open with the brute-force or na�
 
 **Data model (relational).** `tickets` (status enum, priority, sla_policy_id, assignee, timestamps); `ticket_events` (append-only audit log); `sla_clocks` (policy, target_at, paused_at, elapsed_ms); `inbound_messages` (raw payload plus a dedupe key). Index `(tenant, status, priority, created_at)` and `(assignee, status)`.
 
-<Mermaid caption="Multi-channel intake funnels into one create path" code={`flowchart LR
+<ArchDiagram src="guide/ticketing" caption="Multi-channel intake funnels into one create path">
+<Mermaid code={`flowchart LR
   Web[Web form] --> N[Normalise to a CreateTicket command]
   Email[Email webhook] --> N
   Phone[Telephony webhook] --> N
@@ -79,6 +104,7 @@ When you get a problem you have not seen, still open with the brute-force or na�
   Q --> Notify[Notification worker]
   Q --> SLA[SLA engine]
 `} />
+</ArchDiagram>
 
 **Workflow.** An explicit state machine: an allowed-transitions table plus a guard that checks the actor's role and required fields. An illegal transition returns a conflict and writes nothing. Every valid transition appends a `ticket_events` row — that is both the audit trail and the trigger for the SLA clock.
 
@@ -96,7 +122,8 @@ When you get a problem you have not seen, still open with the brute-force or na�
 
 **Scale.** 50,000 active drivers sending location every 4 seconds is about 12,500 writes per second — location writes dominate, so they do **not** go in a relational database.
 
-<Mermaid caption="Location index in memory, trip state durable" code={`flowchart TD
+<ArchDiagram src="guide/ride-hailing" caption="Location index in memory, trip state durable">
+<Mermaid code={`flowchart TD
   D[Driver app] -->|location every 4s| LI[Location ingest]
   LI --> Geo[(Redis geo index\\nper region)]
   R[Rider app] -->|request ride| M[Matching service]
@@ -107,6 +134,7 @@ When you get a problem you have not seen, still open with the brute-force or na�
   T --> WS[WebSocket gateway]
   WS -->|driver location| R
 `} />
+</ArchDiagram>
 
 **Matching.** On a request, search a radius in the geo index (grow it if empty) for candidates, filter by availability, vehicle type, and rating, rank by estimated time of arrival from a routing service (not straight-line distance), and offer to the top driver with a short accept timeout.
 
@@ -119,6 +147,19 @@ When you get a problem you have not seen, still open with the brute-force or na�
 ## Worked problem 3 — e-commerce checkout with no oversell
 
 **Core invariant.** Never sell more units than exist, even during a flash sale.
+
+<ArchDiagram src="guide/checkout" caption="Reads are almost entirely served from cache">
+<Mermaid code={`flowchart LR
+  U[Client] --> LB[Load balancer]
+  LB --> S[Shortener service]
+  S -->|GET /:code| C[(Redis cache)]
+  C -- hit --> S
+  C -- miss --> DB[(Key-value store)]
+  DB --> C
+  S -->|POST| CNT[ID / counter]
+  S -.click event.-> Q[[Analytics stream]]
+`} />
+</ArchDiagram>
 
 **Reservation model.** On "begin checkout", create a reservation that decrements available stock with a short TTL; a sweeper releases expired reservations. The decrement is an atomic conditional update:
 
@@ -155,16 +196,18 @@ Reservations can briefly show an item as unavailable that later frees up when a 
 
 **Data model.** `urls(code PK, long_url, created_at, expires_at, owner_id)`. A key-value store (DynamoDB, Cassandra) fits: single-key lookups, huge volume, no joins. Analytics events go to a separate append-only store / stream.
 
-<Mermaid caption="Reads are almost entirely served from cache" code={`flowchart LR
-  U[Client] --> LB[Load balancer]
-  LB --> S[Shortener service]
-  S -->|GET /:code| C[(Redis cache)]
-  C -- hit --> S
-  C -- miss --> DB[(Key-value store)]
-  DB --> C
-  S -->|POST| CNT[ID / counter]
-  S -.click event.-> Q[[Analytics stream]]
+<ArchDiagram src="guide/url-shortener" caption="Hybrid fan-out">
+<Mermaid code={`flowchart TD
+  P[User posts] --> W[Post service]
+  W --> DB[(Posts DB)]
+  W --> F{Author a celebrity?}
+  F -- no --> FO[Fan-out worker] --> R[(Redis: feed per follower)]
+  F -- yes --> SKIP[skip fan-out]
+  RD[User opens feed] --> M[Feed service]
+  M --> R
+  M -->|merge celebrity posts| DB
 `} />
+</ArchDiagram>
 
 **Deep dive — read path.** `GET /:code` checks Redis (code → long_url), falls back to the KV store, back-fills the cache with a long TTL. Hit rate is very high because a small fraction of links get most traffic. Use `301` for permanent links (browsers cache it, cutting server load) or `302` if you need every click to hit your server for analytics.
 
@@ -184,16 +227,17 @@ Reservations can briefly show an item as unavailable that later frees up when a 
 
 **Hybrid (what large systems do).** Push for normal accounts; for a handful of "celebrity" accounts, pull their recent posts at read time and merge them into the pushed feed. This caps write cost while keeping reads fast.
 
-<Mermaid caption="Hybrid fan-out" code={`flowchart TD
-  P[User posts] --> W[Post service]
-  W --> DB[(Posts DB)]
-  W --> F{Author a celebrity?}
-  F -- no --> FO[Fan-out worker] --> R[(Redis: feed per follower)]
-  F -- yes --> SKIP[skip fan-out]
-  RD[User opens feed] --> M[Feed service]
-  M --> R
-  M -->|merge celebrity posts| DB
+<ArchDiagram src="guide/news-feed" caption="Message path">
+<Mermaid code={`flowchart LR
+  A[Sender] -- WebSocket --> G1[Gateway A]
+  G1 --> MS[Message service]
+  MS --> DB[(Messages store)]
+  MS --> REG[(Redis: user -> gateway)]
+  MS -->|route| G2[Gateway B]
+  G2 -- WebSocket --> B[Recipient]
+  MS -->|recipient offline| PUSH[Push / APNs / FCM]
 `} />
+</ArchDiagram>
 
 **Data model.** `posts(id, author_id, body, created_at)`; `follows(follower_id, followee_id)`; Redis `feed:{userId}` = sorted set of post ids by timestamp, capped to ~800 entries.
 
@@ -211,15 +255,20 @@ Reservations can briefly show an item as unavailable that later frees up when a 
 
 **Connections.** Clients hold a **WebSocket** to a gateway server. A connection registry (Redis) maps `userId → gatewayNodeId` so a message for an offline-on-this-node recipient can be routed to the right gateway (or to push if they have no live connection).
 
-<Mermaid caption="Message path" code={`flowchart LR
-  A[Sender] -- WebSocket --> G1[Gateway A]
-  G1 --> MS[Message service]
-  MS --> DB[(Messages store)]
-  MS --> REG[(Redis: user -> gateway)]
-  MS -->|route| G2[Gateway B]
-  G2 -- WebSocket --> B[Recipient]
-  MS -->|recipient offline| PUSH[Push / APNs / FCM]
+<ArchDiagram src="guide/chat" caption="Queue-driven, provider-failover">
+<Mermaid code={`flowchart TD
+  SVC[Producers] --> Q[[Queue]]
+  Q --> WK[Notification worker]
+  WK --> PREF[(Preferences)]
+  WK --> DEDUP[(Redis: dedupe + rate limit)]
+  WK --> TPL[Template render]
+  WK --> P1[Primary provider]
+  P1 -- error rate high --> CB{Circuit breaker}
+  CB --> P2[Secondary provider]
+  WK -->|failed N times| DLQ[[Dead-letter queue]]
+  P1 -.webhook.-> STAT[(Delivery status)]
 `} />
+</ArchDiagram>
 
 **Data model.** Messages are write-heavy, read by conversation, never updated → a wide-column store (Cassandra/HBase) partitioned by `conversation_id`, clustered by `message_id` (a time-sortable id like a Snowflake/ULID). `conversations`, `participants`, and per-user `last_read_message_id` for unread counts.
 
@@ -244,18 +293,7 @@ Reservations can briefly show an item as unavailable that later frees up when a 
 4. renders the template,
 5. sends via the channel provider.
 
-<Mermaid caption="Queue-driven, provider-failover" code={`flowchart TD
-  SVC[Producers] --> Q[[Queue]]
-  Q --> WK[Notification worker]
-  WK --> PREF[(Preferences)]
-  WK --> DEDUP[(Redis: dedupe + rate limit)]
-  WK --> TPL[Template render]
-  WK --> P1[Primary provider]
-  P1 -- error rate high --> CB{Circuit breaker}
-  CB --> P2[Secondary provider]
-  WK -->|failed N times| DLQ[[Dead-letter queue]]
-  P1 -.webhook.-> STAT[(Delivery status)]
-`} />
+<ArchDiagram src="guide/notification" caption="Notification service architecture" />
 
 **Reliability.** At-least-once queue + idempotent send (dedupe key) = effectively-once. Failed sends retry with exponential backoff; after N attempts they go to a DLQ with an alert. Per-channel **provider failover**: a circuit breaker on the primary's error rate flips traffic to a secondary, with a half-open probe to recover.
 
@@ -268,6 +306,8 @@ Reservations can briefly show an item as unavailable that later frees up when a 
 See the [full deep dive](/prep/system-design/rate-limiter) for algorithm trade-offs (GCRA vs sliding window), IETF rate-limit headers, and the Redis-down failure mode. Condensed version below.
 
 **Scope.** Cap requests per client (API key / user / IP) across a fleet of stateless servers — e.g. 1,000 requests per minute.
+
+<ArchDiagram src="guide/rate-limiter" caption="Distributed rate limiter architecture" />
 
 **Why it's non-trivial.** Each server sees only its own traffic; the limit is global. State must be shared and updated atomically.
 

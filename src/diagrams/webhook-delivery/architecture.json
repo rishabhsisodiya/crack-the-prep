@@ -1,0 +1,159 @@
+{
+  "meta": {
+    "title": "Webhook Delivery \u2014 Outbox, Fan-Out, Isolated Workers",
+    "output": ".archify/build/webhook-delivery/architecture.html",
+    "quality_profile": "showcase"
+  },
+  "components": [
+    {
+      "id": "app",
+      "type": "backend",
+      "label": "Product Services",
+      "sublabel": "domain changes"
+    },
+    {
+      "id": "ob",
+      "type": "database",
+      "label": "Outbox Table",
+      "sublabel": "same transaction as the change"
+    },
+    {
+      "id": "rel",
+      "type": "backend",
+      "label": "Outbox Relay / CDC",
+      "sublabel": "publishes events"
+    },
+    {
+      "id": "ev",
+      "type": "messagebus",
+      "label": "Kafka \u2014 Events",
+      "sublabel": "durable event stream"
+    },
+    {
+      "id": "fan",
+      "type": "backend",
+      "label": "Fan-Out Service",
+      "sublabel": "looks up subscriptions"
+    },
+    {
+      "id": "dq",
+      "type": "messagebus",
+      "label": "Delivery Queue",
+      "sublabel": "sharded by endpoint"
+    },
+    {
+      "id": "w",
+      "type": "backend",
+      "label": "Delivery Workers",
+      "sublabel": "egress proxy \u00b7 timeouts"
+    },
+    {
+      "id": "ce",
+      "type": "external",
+      "label": "Customer Endpoints",
+      "sublabel": "signed HTTPS POST"
+    },
+    {
+      "id": "rq",
+      "type": "database",
+      "label": "Retry Schedule",
+      "sublabel": "by next_attempt_at"
+    },
+    {
+      "id": "log",
+      "type": "database",
+      "label": "Delivery Attempts Log",
+      "sublabel": "audit trail"
+    }
+  ],
+  "connections": [
+    {
+      "id": "a-o",
+      "from": "app",
+      "to": "ob",
+      "label": "same transaction",
+      "variant": "emphasis"
+    },
+    {
+      "id": "o-r",
+      "from": "ob",
+      "to": "rel",
+      "label": "relay committed rows"
+    },
+    {
+      "id": "r-e",
+      "from": "rel",
+      "to": "ev",
+      "label": "publish events"
+    },
+    {
+      "id": "e-f",
+      "from": "ev",
+      "to": "fan",
+      "label": "consume events"
+    },
+    {
+      "id": "f-d",
+      "from": "fan",
+      "to": "dq",
+      "label": "one delivery per endpoint",
+      "variant": "emphasis"
+    },
+    {
+      "id": "d-w",
+      "from": "dq",
+      "to": "w",
+      "label": "deliver"
+    },
+    {
+      "id": "w-c",
+      "from": "w",
+      "to": "ce",
+      "label": "signed HTTPS POST",
+      "variant": "emphasis"
+    },
+    {
+      "id": "w-rq",
+      "from": "w",
+      "to": "rq",
+      "label": "failure \u2014 schedule retry",
+      "variant": "dashed"
+    },
+    {
+      "id": "rq-d",
+      "from": "rq",
+      "to": "dq",
+      "label": "retry due",
+      "variant": "dashed"
+    },
+    {
+      "id": "w-l",
+      "from": "w",
+      "to": "log",
+      "label": "record attempt"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "No lost events",
+      "items": [
+        "Events are written to the outbox in the same transaction as the domain change \u2014 if it committed, the event exists",
+        "A relay/CDC publishes them to Kafka; fan-out creates one delivery per subscribed endpoint"
+      ]
+    },
+    {
+      "dot": "orange",
+      "title": "Isolation + retries",
+      "items": [
+        "Delivery queues are sharded by endpoint, so one customer's failing endpoint cannot stall others",
+        "Failures schedule retries by next_attempt_at; every attempt is logged"
+      ]
+    }
+  ],
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "layout": {
+    "mode": "auto"
+  }
+}

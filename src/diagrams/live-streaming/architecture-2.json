@@ -1,0 +1,126 @@
+{
+  "meta": {
+    "output": ".archify/build/live-streaming/architecture-2.html",
+    "title": "Video Calls \u2014 SFU with Simulcast",
+    "quality_profile": "showcase"
+  },
+  "components": [
+    {
+      "id": "alice",
+      "label": "Alice",
+      "sublabel": "sender",
+      "type": "external"
+    },
+    {
+      "id": "bob",
+      "label": "Bob",
+      "sublabel": "sender",
+      "type": "external"
+    },
+    {
+      "id": "sfu",
+      "label": "SFU Media Server",
+      "sublabel": "forwards packets, no decoding",
+      "type": "backend"
+    },
+    {
+      "id": "carol",
+      "label": "Carol",
+      "sublabel": "on fast wifi",
+      "type": "external"
+    },
+    {
+      "id": "dan",
+      "label": "Dan",
+      "sublabel": "on 3G",
+      "type": "external"
+    },
+    {
+      "id": "signaling",
+      "label": "Signaling Service",
+      "sublabel": "SDP / session setup",
+      "type": "backend"
+    }
+  ],
+  "connections": [
+    {
+      "id": "a-sfu",
+      "from": "alice",
+      "to": "sfu",
+      "label": "high, mid, low"
+    },
+    {
+      "id": "b-sfu",
+      "from": "bob",
+      "to": "sfu",
+      "label": "high, mid, low"
+    },
+    {
+      "id": "sfu-c1",
+      "from": "sfu",
+      "to": "carol",
+      "label": "Alice high: active speaker"
+    },
+    {
+      "id": "sfu-d1",
+      "from": "sfu",
+      "to": "dan",
+      "label": "Alice low: thumbnail"
+    },
+    {
+      "id": "sfu-c2",
+      "from": "sfu",
+      "to": "carol",
+      "label": "Bob mid"
+    },
+    {
+      "id": "sfu-d2",
+      "from": "sfu",
+      "to": "dan",
+      "label": "Bob low"
+    },
+    {
+      "id": "sig-a",
+      "from": "signaling",
+      "to": "alice",
+      "variant": "dashed"
+    },
+    {
+      "id": "sig-b",
+      "from": "signaling",
+      "to": "bob",
+      "variant": "dashed"
+    }
+  ],
+  "cards": [
+    {
+      "title": "Simulcast",
+      "dot": "cyan",
+      "items": [
+        "Each sender uploads three qualities at once \u2014 high, mid and low",
+        "The SFU picks per receiver from bandwidth and layout: active speaker high, thumbnails low"
+      ]
+    },
+    {
+      "title": "Why SFU, not MCU",
+      "dot": "emerald",
+      "items": [
+        "SFU forwards packets without decoding \u2014 low server cost and flexible client layouts",
+        "MCU decodes, mixes one composite and re-encodes \u2014 very high cost, kept for legacy devices"
+      ]
+    },
+    {
+      "title": "Scaling calls",
+      "dot": "rose",
+      "items": [
+        "Cascade SFUs across regions and forward only visible tiles and the top active speakers",
+        "If an SFU dies, clients rejoin via signaling to another SFU \u2014 room state lives outside it in Redis"
+      ]
+    }
+  ],
+  "diagram_type": "architecture",
+  "layout": {
+    "mode": "auto"
+  },
+  "schema_version": 1
+}

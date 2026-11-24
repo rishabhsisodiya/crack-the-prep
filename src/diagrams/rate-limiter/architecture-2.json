@@ -1,0 +1,98 @@
+{
+  "meta": {
+    "title": "Rate Limiter \u2014 Redis-Backed Request Path",
+    "output": ".archify/build/rate-limiter/architecture-2.html",
+    "quality_profile": "showcase"
+  },
+  "components": [
+    {
+      "id": "client",
+      "type": "external",
+      "label": "Client",
+      "sublabel": "key = user:123"
+    },
+    {
+      "id": "app",
+      "type": "backend",
+      "label": "App Server",
+      "sublabel": "limiter middleware runs first"
+    },
+    {
+      "id": "redis",
+      "type": "database",
+      "label": "Redis",
+      "sublabel": "Lua script \u00b7 atomic check + increment"
+    },
+    {
+      "id": "upstream",
+      "type": "backend",
+      "label": "Protected Handler",
+      "sublabel": "runs only when allowed"
+    }
+  ],
+  "connections": [
+    {
+      "id": "c-a",
+      "from": "client",
+      "to": "app",
+      "label": "request"
+    },
+    {
+      "id": "a-r",
+      "from": "app",
+      "to": "redis",
+      "label": "EVAL rate_limit.lua(key, limit, window)"
+    },
+    {
+      "id": "r-a",
+      "from": "redis",
+      "to": "app",
+      "label": "allow / deny + retry_after",
+      "variant": "dashed"
+    },
+    {
+      "id": "a-u",
+      "from": "app",
+      "to": "upstream",
+      "label": "allowed: proceed"
+    },
+    {
+      "id": "a-c",
+      "from": "app",
+      "to": "client",
+      "label": "denied: 429 + Retry-After",
+      "variant": "dashed"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Atomicity is the whole point",
+      "items": [
+        "A naive GET-then-SET from the app races under concurrent requests",
+        "The Lua script runs inside Redis \u2014 atomic in one round trip, no distributed lock"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Answer like a public API",
+      "items": [
+        "200 + RateLimit-Remaining when allowed",
+        "429 + Retry-After when denied \u2014 the IETF RateLimit-* headers Stripe and GitHub use"
+      ]
+    },
+    {
+      "dot": "orange",
+      "title": "GCRA note",
+      "items": [
+        "For GCRA the script reads/writes one TAT value per key",
+        "Sub-5ms latency at the scale most systems need"
+      ]
+    }
+  ],
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "layout": {
+    "mode": "auto"
+  }
+}

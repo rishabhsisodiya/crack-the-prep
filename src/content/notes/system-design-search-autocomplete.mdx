@@ -10,6 +10,7 @@ description: "Designing a typeahead/autocomplete system from trie-with-top-K thr
 
 import Callout from '../../components/Callout.astro';
 import Mermaid from '../../components/Mermaid.astro';
+import ArchDiagram from '../../components/ArchDiagram.astro';
 
 Part of the [system design](/prep/system-design) series. See the [framework](/prep/system-design) and [building blocks](/prep/system-design/building-blocks) first if you haven't.
 
@@ -29,7 +30,8 @@ Part of the [system design](/prep/system-design) series. See the [framework](/pr
 
 ## 2. Where it sits / high-level architecture
 
-<Mermaid caption="Read path is memory-speed; the ranking pipeline is entirely offline" code={`flowchart TD
+<ArchDiagram src="search-autocomplete/architecture" caption="Read path is memory-speed; the ranking pipeline is entirely offline">
+<Mermaid code={`flowchart TD
   C[Client] -->|debounced keystroke| CDN[CDN / edge cache\\nfor top global prefixes]
   CDN -- miss --> QPS[Query processing service]
   QPS --> CACHE[(Redis: hot prefix cache)]
@@ -40,6 +42,7 @@ Part of the [system design](/prep/system-design) series. See the [framework](/pr
   AGG --> BUILD[Trie builder]
   BUILD -->|swap new trie version| TRIE
 `} />
+</ArchDiagram>
 
 - The **read path never touches a database or does ranking at request time** — it is a pure lookup. That's the core design idea: push all the expensive work (popularity aggregation, ranking) offline, and make the online path a cheap memory read.
 - The **write/build path** is a batch pipeline: query logs stream in, get aggregated into prefix → top-K-completions counts, and periodically rebuild (or incrementally update) the trie, which is then hot-swapped into the serving fleet.

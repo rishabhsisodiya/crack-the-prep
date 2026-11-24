@@ -1,0 +1,284 @@
+---
+title: "Scenario — The Lake Is Slow and Expensive: a Small-Files Firefight"
+track: "system-design"
+kind: "notes"
+order: 76
+slug: "scenario-small-files-lake"
+updated: 2026-11-24
+description: "A troubleshooting scenario: streaming writes created millions of tiny files in a data lake, query latency and cost exploded. Symptoms first, a disciplined diagnosis path, then the fix — compaction, partition design, file-size targets, and preventing regression."
+---
+
+import Callout from '../../components/Callout.astro';
+import ArchDiagram from '../../components/ArchDiagram.astro';
+
+Part of the [system design](/prep/system-design) series. This is a **scenario** page: you get the problem the way an interviewer would state it, then a full worked solution. **Level 2 — Senior engineer.**
+
+> **Original practice scenario** — written for interview preparation; not a question from any specific company's interview.
+
+## 1. The problem statement
+
+Here is how the interviewer puts it. Read it the way you would in the room — nothing in this section is the solution.
+
+> "Six months ago we turned on streaming ingestion into our data lake. Events come in all day from our apps and services, a streaming job writes them into tables in object storage, and analysts query those tables with a SQL engine — think Trino or Athena.
+>
+> At first it was great. Now it is not. The symptoms, in the order the business noticed them:
+>
+> - **The bill climbed.** The query-engine spend is up roughly **4x** in six months. The data volume is up maybe 30%. Nobody can explain the gap.
+> - **Queries got slow.** Dashboards that took a few seconds now take **one to two minutes**. Ad-hoc queries time out. Analysts have started exporting data into spreadsheets again, which tells you everything.
+> - **The streaming job falls behind at peak.** It is not down — it just lags, catches up overnight, and lags again the next day.
+> - **Small jobs fail strangely.** A simple count query over one day of one table occasionally dies with metadata or planning errors, then works on retry.
+>
+> Nothing else changed. Same tables, same dashboards, same team. The data is all there — reports are *correct*, they are just slow and expensive.
+>
+> Diagnose it, fix it, and make sure it does not come back."
+
+**Functional requirements**
+
+- Find the root cause from the symptoms, with evidence — not a guess.
+- Restore query latency and cost to sane levels on the existing tables.
+- Fix the write path so the problem stops being created.
+- Keep ingestion running and data correct throughout: no downtime, no lost events, no duplicated rows.
+
+**Non-functional requirements**
+
+- The fix must not require analysts to change how they query.
+- Remediation on live tables must be safe to run, interrupt and re-run.
+- Prevention must be automatic: if the fix depends on humans remembering, it will regress.
+- Cost of the cure matters: a fix that scans the whole lake every night forever is just the disease wearing a uniform.
+
+## 2. Clarifying questions to ask first
+
+Ask these before changing anything. In a troubleshooting problem, each question is a diagnostic probe.
+
+| Question | Why it matters |
+|---|---|
+| How many files are in the affected tables, and what is the file-size distribution? | This is the first probe and usually the answer. Millions of files with a median size in kilobytes confirms the small-files hypothesis in one query against the table metadata. |
+| How is the streaming job configured to flush — per micro-batch, per time interval, per record count? | A flush every few seconds or every few hundred records *is* the file factory. The write configuration tells you the creation rate. |
+| How are the tables partitioned, and do queries actually filter on the partition columns? | Partitioning by a high-cardinality column (user ID, event ID) creates a directory explosion; partitioning that queries ignore means no pruning, so every query lists and opens everything. |
+| What do the query-engine metrics say — bytes scanned per query, planning time, number of files/splits per query? | Separates "the data got bigger" from "the overhead per query exploded". Planning time and split counts point at files; bytes scanned points at pruning. |
+| When did it start getting worse — gradually, or at a specific deploy? | Gradual degradation that tracks uptime since streaming launch points at accumulation. A step change points at a config change. Both matter; they have different fixes. |
+| Which table format are we on — plain Parquet on object storage, or a table format like Iceberg/Delta? | Decides what remediation tooling exists: snapshot-based compaction and metadata cleanup are table-format features; plain files mean a cruder, riskier rewrite. |
+| Is anything else writing to these tables — backfills, ad-hoc jobs, a second consumer? | A second writer with different habits is a common hidden cause, and compaction that races a writer is how tables get corrupted. |
+
+<Callout type="tip">
+The single highest-value move here is measuring the file-size histogram before proposing anything. "Millions of tiny files" is a hypothesis until the metadata says so — and in this problem the metadata says so loudly: the median file is a few hundred kilobytes in tables that should hold files of a hundred megabytes or more. Diagnose out loud, with numbers, before you fix anything.
+</Callout>
+
+## 3. The solution, in plain language first
+
+The simple version: the lake does not have a data problem, it has a *file count* problem. The streaming job writes a new file every time it flushes — every few seconds, a few hundred events, a file of a few hundred kilobytes. Six months of that is millions of tiny files. Every query then has to *list* those files, *plan* around them, and *open* them one by one — and that overhead, not the data itself, is what got slow and expensive. Object storage charges and latency are per request; a query that opens 200,000 files pays 200,000 openings to read the same bytes a healthy table holds in 200 files.
+
+The fix has three parts, in this order. First, **prove it**: count the files, look at their sizes, look at where query time actually goes. Second, **repair the existing tables**: run compaction — a job that reads many small files and rewrites them as a few large ones — table by table, partition by partition, safely and repeatably. Third, **stop making the problem**: change the writer so it buffers events and flushes large files, fix the partitioning so files and pruning line up, and add automatic guardrails — scheduled compaction and file-size alerts — so the lake stays healthy without anyone remembering to check.
+
+## 4. Architecture
+
+<ArchDiagram src="scenario-small-files-lake/architecture" caption="Small-files lake architecture: streaming writers through a buffered sink into an Iceberg lake, with compaction, a query engine and file-health guardrails" />
+
+**Component by component**
+
+- **Event producers and Kafka.** Apps and services emit events; Kafka buffers them. Kafka is not the problem and not the fix — it is what lets the writer slow down its flushing without losing events, because the events can wait safely in the log.
+- **Streaming writer (the culprit, then the fixed writer).** Originally: a streaming sink flushing one file per micro-batch. After the fix: the writer buffers in memory and in the log, and flushes on a **size-or-time target** — roughly 128 MB of data, or a maximum wait of a few minutes, whichever comes first — so files are born large.
+- **Data lake (object storage + Iceberg tables).** Events land as Parquet files inside Iceberg tables. The table format matters: Iceberg tracks files in manifests and commits changes as atomic snapshots, which is what makes compaction safe to run against a live table.
+- **Table catalog.** Holds table metadata — snapshots, manifests, partition information. When file counts explode, the catalog and manifest layer is where query planning drowns, which is why the count query that fails is a *metadata* failure.
+- **Dedup + merge.** Corrections and replayed events are applied with an idempotent `MERGE` keyed on `event_id`, so compaction, retries and replays never create duplicate rows.
+- **Compaction job (Spark).** The repair crew. It reads a partition's many small files and rewrites them as a small number of right-sized files, committed as a new snapshot. Readers keep querying the old snapshot until the new one commits — compaction never takes the table offline.
+- **Query engine (Trino / Athena).** Where the pain is felt: planning time, split counts, bytes scanned and the bill all live here, and its metrics are the scoreboard for whether the fix worked.
+- **Monitoring + guardrails.** Continuous measurement of file count, file-size percentiles and files-per-partition, with alerts on drift and a scheduler that triggers compaction automatically when a partition crosses a threshold.
+
+## 5. End-to-end data flow
+
+**The diagnosis flow (do this first):**
+
+1. Query the table metadata: total file count, files per partition, and a size histogram (min / median / p90 / max). In the broken lake you find the signature: millions of files, median in the hundreds of kilobytes.
+2. Pull query-engine metrics for a slow dashboard query: planning time, number of splits, bytes scanned vs. bytes the query actually needed. Planning time in tens of seconds and splits in the hundreds of thousands confirms the overhead is per-file, not per-byte.
+3. Inspect the writer's flush configuration and the tables' partition layout. Correlate: flush interval × uptime ≈ file count; partition cardinality ≈ directory count. Now the hypothesis is a proven mechanism, not a hunch.
+4. Rule out the alternatives explicitly (see §14): data volume growth (only +30%), a query-engine regression (same engine version, and bytes-scanned-per-useful-byte is the metric that moved), and hot partitions.
+
+**The repaired steady-state flow:**
+
+1. Producers emit events to Kafka. The writer consumes and buffers them, flushing a file only when the buffer reaches the size target (~128 MB) or the max wait expires — freshness is minutes, not seconds, and that trade is deliberate (see §14).
+2. Files land in partitions the queries actually filter on (event date, plus at most one more low-cardinality column). The commit is a new Iceberg snapshot.
+3. Analysts query through Trino/Athena: the planner reads a compact manifest, prunes to the relevant partitions, and opens hundreds of files instead of hundreds of thousands.
+4. Continuously, the guardrail job measures each partition. New small files still appear (late data, small trickle tables, the time-based flush at low volume) — so scheduled compaction sweeps them up, and the file-size metrics prove the lake stays in the healthy band.
+
+## 6. Technology choices, and why
+
+| Decision | Choice | Why | Alternative considered |
+|---|---|---|---|
+| Table format | Apache Iceberg (or Delta Lake) | Snapshot-isolated compaction, manifest-level file statistics, partition evolution — the remediation toolkit this problem needs | Plain Parquet files with a Hive-style directory layout — compaction becomes a hand-rolled, risky directory rewrite with no atomic commit |
+| File format | Parquet, 128–512 MB per file | Columnar, compressible, splittable; the size band matches object-storage and query-engine sweet spots | Many small Parquet files — same format, wrong size; the format was never the problem |
+| Repair job | Spark compaction (Iceberg `rewrite_data_files` or equivalent) | Parallel, partition-scoped, snapshot-committed, re-runnable | A one-off script moving files in object storage — bypasses the table metadata and corrupts the table's view of itself |
+| Query engine | Keep Trino / Athena | The engine is the victim, not the cause; its metrics prove the fix | Migrating engines mid-incident — enormous cost to treat a symptom |
+| Writer buffering | Size-or-time flush in the streaming sink | Files are born right-sized; Kafka makes the buffering safe | Keeping second-level flushes and compacting harder — paying forever to repair what you keep breaking |
+
+**Batch vs streaming, honestly.** Ingestion stays streaming — the business wants fresh data. What changes is the *flush granularity*: streaming delivery does not require streaming-sized files. And compaction is unapologetically batch: a periodic, partition-scoped batch job is exactly the right shape for repair, and pretending otherwise (some magical continuous optimiser) is how teams end up with an always-on cluster costing more than the queries it saves.
+
+## 7. Partitioning and parallelism
+
+- **Partition design is half the cure.** Partition by what queries filter on and what has low, stable cardinality: event date (day, or hour for the very hottest tables) is the workhorse. The broken lake's classic mistake is partitioning by something high-cardinality or by ingestion minute — thousands of partitions a day, each holding a handful of tiny files, and pruning that helps nobody.
+- **Too many partitions and too many files are the same disease at different levels.** Both multiply metadata, listing and planning work. Target: partitions a query can prune to a handful, each containing a manageable number of right-sized files.
+- **Compaction is parallel by partition.** Spark executors rewrite different partitions concurrently; a partition is the unit of work, of checkpointing and of retry. Prioritise by pain: the most-queried, worst-file-count partitions first, not alphabetical order.
+- **Writer parallelism sets a floor on file size.** Fifty parallel writer tasks each flushing "128 MB" is fine; fifty tasks each flushing every 10 seconds is the original disaster with extra steps. File-size targets must be per-flush across the job's actual parallelism — and reducing needless writer parallelism is a legitimate fix.
+- **Sorting inside the rewrite** (for example by the common filter columns within a partition) improves min/max statistics and lets the engine skip row groups — compaction is the one cheap chance to lay the data out the way queries read it.
+
+## 8. Storage strategy
+
+- **File-size targets, stated as numbers:** aim for **128–512 MB per file** (128 MB is a good default target; go larger for rarely-queried cold partitions). The healthy band matters more than a magic number: a table whose median file is in that band is healthy; one whose median is under a few MB is not.
+- **Object storage economics:** every file is at least one PUT to write and one GET (plus a LIST somewhere) to read. Millions of files means millions of requests on every full-table operation — the cost and the latency are the same root cause. Fewer, larger files are cheaper to store *operationally* even at identical byte volume.
+- **Metadata is storage too.** Manifests and catalog entries grow with file count. Iceberg maintenance includes expiring old snapshots and cleaning orphan files — with the warning that expiring snapshots too aggressively destroys your rollback and time-travel window; agree the retention deliberately.
+- **Tiering:** old partitions can move to colder storage classes once compacted; cold data in a million tiny files is the worst of both worlds, because retrieval and listing overhead dominate.
+- **The catalogue of what "healthy" means,** written down: per table — target file size band, max files per partition, compaction cadence. Without written targets, "we compacted once" decays back into the incident within two quarters.
+
+## 9. Deduplication and idempotency, with a worked example
+
+Nothing in the fix may create duplicate rows: compaction rewrites files, writers retry flushes, streams replay after restarts, and late events arrive for partitions that were already compacted. Delivery into the lake is **at-least-once**, so the write and repair operations must be idempotent.
+
+Compaction itself is naturally safe in a table format — it rewrites the *same rows* into new files and swaps them in one snapshot commit; run it twice and the second run finds right-sized files and does nothing. The dangerous seam is ingestion, where a retried flush can land the same events twice. The defence is an idempotent merge keyed on `event_id`:
+
+```sql
+-- Apply a batch of streamed events exactly once, however many times it runs.
+MERGE INTO events AS target
+USING staged_events AS source
+  ON target.event_id = source.event_id
+WHEN NOT MATCHED THEN
+  INSERT *;   -- updates to an event are new events with new IDs in this model;
+              -- if corrections reuse the ID, add: WHEN MATCHED AND source.version > target.version THEN UPDATE SET *
+```
+
+And the compaction job itself, expressed the way you would run and re-run it safely:
+
+```python
+# Partition-scoped compaction: safe to interrupt, safe to re-run.
+for partition in partitions_sorted_by_file_count(desc=True):
+    stats = table.files(partition)                 # count + size histogram
+    if stats.count < 500 or stats.median_mb >= 64:
+        continue                                   # already healthy — skip
+    spark.sql(f"""
+      CALL system.rewrite_data_files(
+        table => 'lake.events',
+        strategy => 'sort', sort_order => 'event_ts ASC',
+        options => map('target-file-size-bytes', '134217728'),  -- 128 MB
+        where => "event_date = DATE '{partition}'")
+    """)   # commits as ONE new snapshot; readers never see a half-rewritten partition
+    checkpoint.done(partition)                     # record AFTER the snapshot commits
+```
+
+Two rules make this work. First, every repair operation commits **atomically per partition** (one snapshot), so an interrupted run leaves the table exactly as it was before that partition — never half-rewritten. Second, checkpoints advance **after** the commit, so a crash causes a re-run of that partition, and the re-run is a no-op or a clean repeat because the operation is idempotent — never a duplicated or corrupted partition.
+
+## 10. Retry, failure handling, checkpointing and recovery
+
+- **Compaction job failure halfway:** completed partitions stay compacted (each committed independently); the failed partition is untouched; the job resumes from its checkpoint list. This is why compaction is scoped per partition rather than run as one giant table rewrite.
+- **Compaction racing the live writer:** snapshot isolation is the protection — the writer commits new snapshots on top, compaction rewrites files as of the snapshot it read, and the table format reconciles the commit. What you must still avoid operationally is compacting a partition while a backfill is rewriting it; coordinate writers per partition, and let the format's optimistic concurrency surface conflicts as retryable failures, not corruption.
+- **Writer crash with a full buffer:** unflushed events are still in Kafka, uncommitted; the writer restarts, re-reads them, and flushes again. The merge on `event_id` (§9) absorbs any overlap where a flush half-committed.
+- **Poison events** (schema-broken payloads): routed to a dead-letter location with the error, counted and alerted — one bad event must never stall the stream or, worse, force a tiny "just this one" file per retry.
+- **Rollback:** because compaction commits as a new snapshot and old snapshots are retained for an agreed window, a bad compaction (wrong sort, wrong target) can be rolled back by restoring the previous snapshot. Expire snapshots only after that window — the retention setting *is* the recovery plan.
+- **Query-side failures** (the planning/metadata errors in the symptoms) resolve as file counts fall; if one appears during remediation, it is a signal to check manifest health for that table, not to retry-loop the query.
+
+## 11. Monitoring and observability
+
+- **File health, per table and per partition:** file count, median and p10 file size, files created per hour. This dashboard is the early-warning system whose absence allowed six months of silent decay — building it is part of the fix, not an optional extra.
+- **Alert thresholds:** median file size below a floor (say 8–16 MB) on a major table, or files-per-partition above a ceiling, pages the data team *before* analysts notice. Alert on the trend, not the incident.
+- **Query economics:** bytes scanned per query, planning time, splits per query, and cost per dashboard. These are the numbers that prove the fix worked — capture them before remediation so the improvement is demonstrable, not asserted.
+- **Writer metrics:** flush size distribution and flush interval actually achieved (not just configured), plus consumer lag — because the size-or-time flush trades a little freshness for file health, and lag is where that trade shows up.
+- **Compaction metrics:** partitions compacted, files before/after, bytes rewritten, duration, and failures — compaction that silently stops running is the regression path, so its absence must alert too.
+
+## 12. Security
+
+- Compaction and maintenance jobs run with a dedicated identity that can rewrite the tables it maintains — and nothing else. A job that can rewrite every file in the lake is a powerful identity; scope it per table group.
+- Snapshot rollback and snapshot expiry are destructive-adjacent operations: restrict who can run them, log them, and keep the retention window long enough that a mistaken expiry is discovered while recovery is still possible.
+- The diagnosis itself touches metadata, not data — keep it that way. File counts and size histograms answer this incident without anyone reading event payloads, which matters when the events contain user data.
+- Encryption at rest and in transit is unchanged by the fix — but note that compaction rewrites files, so it must preserve the table's existing encryption and access-control configuration; a rewrite that silently lands data in a less-protected layout is a security incident disguised as maintenance.
+
+## 13. Scalability, the 10x question, and cost
+
+**At 10x event volume:** the healthy design scales *better* than the broken one, because cost now tracks bytes, not files. The writer's size-based flushing produces the same file sizes at higher rate (it just flushes more often); compaction workload grows with the number of *new* small files, which the fixed writer keeps near zero. What breaks first is partition count if volume tempts the team back to finer partitioning — resist: partition by day and let files, not partitions, absorb growth.
+
+**At 10x tables:** the guardrails are the scaling story. Per-table manual compaction does not scale to hundreds of tables; threshold-triggered, scheduled maintenance with a registry of per-table targets does.
+
+**Cost, stated plainly:** the incident's arithmetic is that the team paid per-file overhead on every query for six months — planning time, split scheduling, object-storage requests, and engine billing on scanned overhead. Remediation costs one deliberate pass of rewrites (compute proportional to table size, once, partition-prioritised), and prevention costs a modest, predictable compaction cadence on recent partitions only. Compare that with the alternative actually on the table — a 4x query bill, forever, growing with every day the writer keeps minting small files. The cheapest day to fix the writer was the day it launched; the second cheapest is today.
+
+## 14. Trade-offs, stated honestly
+
+| Choice | You gain | You pay |
+|---|---|---|
+| Size-or-time writer flush (minutes of buffering) | Files born at 128 MB+; file count collapses | Data freshness worsens from seconds to a few minutes — say so, and check the business actually needs seconds |
+| Compaction of live tables | Latency and cost recovered without downtime or query changes | A real compute bill for the rewrite pass, and a maintenance job to own forever |
+| Coarser partitioning (day, not minute/hour-by-default) | Pruning works, metadata shrinks, files can be large | Very selective queries scan a full day partition; the finest-grained time queries get slower even as everything else gets faster |
+| Keeping a table format (Iceberg/Delta) | Atomic compaction, rollback, safe concurrency | Metadata and snapshot housekeeping become your job; expiring snapshots trades recovery window for storage |
+
+**Alternative explanations — rule them out before committing.** A senior troubleshooter names what else could cause these symptoms and why the evidence rejects it: data growth (real, but +30% volume does not produce 4x cost — per-file overhead does); a query-engine version regression (would be a step change, not a six-month slope, and would not inflate split counts); one badly-behaved dashboard (would not slow the streaming job or break count queries); a hot partition (would skew one table's partitions, not every table the writer touches). The small-files mechanism explains *all four* symptoms with one cause — including the odd one, the streaming job lagging, because its sink spends its time on file commits and manifest updates instead of consuming.
+
+<Callout type="warn">
+Say this sentence in the interview: "Nothing in this fix claims exactly-once *delivery* into the lake — the stream delivers at-least-once, writers retry, and replays happen. What the design guarantees is exactly-once *effects*: the merge on `event_id` makes a redelivered event a no-op, and compaction rewrites rows without ever changing them, so applying any part of this pipeline twice leaves the tables exactly as one correct application would." Conflating delivery with effects is the most common senior-level slip in data-pipeline problems.
+</Callout>
+
+**Delivery semantics, precisely.** At-most-once ingestion (drop the buffer on crash) would trade the incident for silent data loss — worse. At-least-once plus idempotent merges is the honest standard. "Exactly-once" labels on streaming sinks describe transactional commits *within that sink's contract with one table format* — real, useful, and narrower than the end-to-end claim candidates often make for them.
+
+## 15. Interviewer follow-up Q&As
+
+1. **"How do you know it is small files and not just data growth?"** — Two numbers: the file-size histogram (median file in kilobytes) and the query metrics (planning time and split count exploded while bytes-per-query grew only with the +30% volume). Growth makes queries read more bytes; small files make queries *open more files* — different signatures, both measurable before touching anything.
+2. **"Why did the streaming job itself get slower? It only writes."** — Writing is not free at this granularity: every flush is an object-storage PUT plus a manifest/catalog commit. At a flush every few seconds across many parallel tasks, commit overhead and metadata contention consume the job's throughput — it spends its time administering files instead of moving events.
+3. **"Why 128 MB? Why not 1 GB files, or 10 MB?"** — It is a balance, not a law: large enough that per-file overhead is negligible and object-storage requests stay few; small enough that a query can parallelise across files, a rewrite is cheap, and a single file's loss or corruption is a small blast radius. The standard band is roughly 64–512 MB; 128 MB is the common default. What matters is having a target band and measuring against it.
+4. **"Compaction is running and an analyst queries the table. What do they see?"** — The old snapshot, complete and consistent, until the compaction snapshot commits — then the new layout, atomically. Snapshot isolation means maintenance is invisible to readers; that property is a large part of why the table format is in the design.
+5. **"A backfill needs to reload last month. Does it recreate the problem?"** — Only if it writes the way the old writer did. The backfill runs through the same size targets and the same merge, partition by partition, and the guardrails verify file health afterwards. Any writer — streaming, backfill, ad-hoc — that bypasses the file-size policy is a regression vector; that is a platform rule, not a per-job preference.
+6. **"Athena/Trino charges by bytes scanned. Small files don't change bytes. Why did the bill rise?"** — Partly minimum-per-query and per-request economics, mostly this: broken partitioning meant no pruning, so queries scanned whole tables instead of single partitions — and per-file overhead shows up as longer-running, larger-cluster engine time. Press the candidate's own numbers here: bytes scanned per query is the metric that connects file layout to money.
+7. **"What do you do about the tables nobody queries any more?"** — Compact them once, tier them cold, or delete them under the retention policy — but do not let the maintenance schedule burn nightly compute re-compacting dead tables. The registry of targets (§8) is per table precisely so effort follows usage.
+8. **"How do you stop this regressing when a new team adds a new streaming table?"** — Platform defaults, not documentation: the shared sink library ships with size-or-time flushing as the default, the table-creation path requires a partition design from the approved patterns, and the file-health alerts apply to every new table automatically. Prevention that depends on a wiki page is not prevention.
+9. **"Freshness: the business says they need data visible within 30 seconds. Your flush waits minutes. Now what?"** — Then the honest design is two-tier: recent data is queried with the understanding that the newest partition holds smaller files, and compaction runs frequently on just the recent partitions — you pay a standing compaction cost to buy freshness, and you say that is what you are doing. What you cannot have is second-level freshness, giant files, and zero maintenance; pick two and name the third as the cost.
+10. **"How do you prove the fix worked?"** — Before/after on the scoreboard metrics, per table: file count and median file size, planning time and splits for the worst dashboard queries, bytes scanned per query, and the query-engine bill over a comparable week. If those numbers did not move, the diagnosis or the fix was wrong — the metrics are the acceptance test.
+
+## 16. Interview-ready spoken answer
+
+> "First, the requirements I'd pin down — though in a troubleshooting problem, the first requirement is evidence: I'd get the file count and size histogram for the affected tables, the writer's flush configuration, and the query engine's planning time, split counts and bytes scanned per query, before I changed anything. My leading hypothesis, from the symptoms, is a small-files problem, but I'd want the metadata to prove it.
+>
+> And it does: the bottleneck is not data volume — that grew 30% — it is per-file overhead. A streaming writer flushing every few seconds has minted millions of files with a median size in the hundreds of kilobytes. Every query lists them, plans around them and opens them one by one; that is why latency, cost and even the writer's own throughput all degraded together, and why a simple count query can die in planning.
+>
+> The fix has three parts. Repair: run partition-scoped compaction with Spark and the table format's rewrite operation, worst partitions first, each partition committed as one atomic snapshot so analysts keep querying throughout and any interrupted partition is simply re-run. Fix the writer: buffer in the streaming sink and flush on size-or-time — about 128 MB or a few minutes — with Kafka making that buffering safe. And fix the layout: partition by event date, the column queries actually filter on, instead of high-cardinality or minute-level partitions.
+>
+> The data flow afterwards is boring, which is the goal: events buffer, land as right-sized files in prunable partitions, and queries open hundreds of files instead of hundreds of thousands.
+>
+> On reliability: delivery into the lake is at-least-once, so ingestion applies an idempotent merge on the event ID, compaction never changes rows — only their layout — and every maintenance step commits atomically per partition with its checkpoint written after the commit. Re-running anything is safe.
+>
+> It scales because cost goes back to tracking bytes instead of files, and the prevention is automatic: file-health metrics per table with alerts, scheduled compaction triggered by thresholds, and platform defaults so a new table is born healthy.
+>
+> The trade-off I'd flag honestly: I am buying file health with a few minutes of freshness and a permanent, modest compaction bill. If the business truly needs 30-second freshness, we compact the recent partitions aggressively and pay more — but nobody gets freshness, giant files and zero maintenance all at once, and I would say which two we picked."
+
+## 17. Mock interview mode
+
+**Five hard follow-ups, with expected answers**
+
+1. **"Your compaction has been running for a week and query latency has only improved 20%. What did you miss?"** — Expected: check what compaction actually covered (the worst partitions by query traffic, not just by file count), then check the other half of the disease — partitioning and pruning: if queries still cannot prune, they still scan everything, just in bigger files. Also check manifest/metadata health and whether old snapshots are bloating planning. The lesson: file size and partition design are separate knobs, and the incident usually needs both.
+2. **"The writer team refuses to change the flush interval — 'freshness is a product requirement'. Your move?"** — Expected: do not fight it head-on; quantify the cost of the requirement (the 4x bill, in currency, attributed to the flush policy), propose the two-tier compromise (small recent partition + aggressive recent-partition compaction), and let the business choose with numbers in front of them. Also note the size-or-time flush can keep a short *time* bound at peak volume, when data arrives fast enough to fill 128 MB quickly — freshness is worst at low volume, which is usually when it matters least.
+3. **"During compaction of the biggest table, the job fails repeatedly on one partition. Diagnose it."** — Expected: look for a partition that is an outlier — vastly more data (a backfill landed there), a corrupt file the rewrite keeps tripping on, or a writer actively fighting over that partition. Isolate it: quarantine the corrupt file via table metadata if that is the cause, run that partition alone with more resources, and keep the rest of the table's remediation moving. Per-partition scoping is what makes this a local problem instead of a stalled programme.
+4. **"Why not solve this by moving to a warehouse / a real-time OLAP store instead?"** — Expected: it might be the right *long-term* answer for the dashboard workload, and a senior candidate can say so — but it does not fix the lake every other consumer uses, it is a migration measured in quarters during an incident measured in weeks, and the same write-pattern mistake recreates the same disease in the new system. Fix the pattern, then evaluate platforms calmly.
+5. **"Six months from now, how do you know — before the analysts do — that it is coming back?"** — Expected: the file-health dashboard and alerts (median file size, files per partition, files created per hour per table), compaction job success monitoring, and a periodic review of new tables against the platform defaults. The answer must be a mechanism, not "we'll keep an eye on it".
+
+**Common candidate mistakes**
+
+- Jumping to a fix ("just compact it") without diagnosing — no file counts, no metrics, no mechanism.
+- Proposing a bigger query engine or a new platform to treat a layout disease.
+- Compacting once and declaring victory, with no writer fix and no guardrails — the problem regrows from day one.
+- Ignoring partitioning, and compacting millions of small files into large files inside a broken partition layout.
+- Claiming the stream gives exactly-once delivery into the lake.
+- Forgetting the writer's own symptoms — not explaining why ingestion lagged too.
+
+**What a senior candidate mentions unprompted**
+
+- Measure first: file-size histogram, planning time, splits, bytes scanned — before proposing anything.
+- One mechanism that explains all four symptoms, and the alternatives explicitly ruled out.
+- File-size targets as numbers (128–512 MB), and partitions designed around query filters.
+- Snapshot isolation making compaction safe on live tables; per-partition checkpointing making it resumable.
+- Prevention as platform defaults and alerts, not documentation and good intentions.
+- The freshness-vs-file-size trade-off, priced honestly.
+
+**Scoring rubric (out of 10)**
+
+| Score | What it looks like |
+|---|---|
+| 9–10 | Evidence-led diagnosis, one mechanism explaining all symptoms, compaction + writer fix + partition fix + automatic guardrails, idempotency and delivery semantics stated precisely, before/after metrics as the acceptance test |
+| 7–8 | Correct small-files diagnosis and compaction plan, but prevention or partitioning is thin |
+| 5–6 | Names small files and compaction, but no diagnosis path, no numbers, no regression prevention |
+| 3–4 | Treats symptoms in isolation — bigger engine, query tuning — with no root cause |
+| 0–2 | Guesses a cause with no way to verify it, or proposes a full platform migration as the incident response |
+
+Sources: [Apache Iceberg documentation — maintenance, compaction and `rewrite_data_files`](https://iceberg.apache.org/docs/latest/maintenance/) · [Delta Lake documentation — OPTIMIZE and file compaction](https://docs.delta.io/latest/optimizations-oss.html) · [Apache Parquet documentation](https://parquet.apache.org/documentation/) · [Trino documentation — query planning and object storage connectors](https://trino.io/docs/current/) · [Apache Kafka documentation — delivery semantics](https://kafka.apache.org/documentation/)

@@ -1,0 +1,285 @@
+---
+title: "Scenario — Surviving a 20x Spike: Hot Partitions and Backpressure"
+track: "system-design"
+kind: "notes"
+order: 67
+slug: "scenario-hot-partition-flash-events"
+updated: 2026-11-24
+description: "A scenario-based interview problem: a flash ticket drop sends one hot key to ~500K events/sec, melting one Kafka partition while others idle — key salting, two-stage merge, load shedding, tenant isolation and backpressure."
+---
+
+import Callout from '../../components/Callout.astro';
+import ArchDiagram from '../../components/ArchDiagram.astro';
+
+Part of the [system design](/prep/system-design) series. This is a **scenario** page: you get the problem the way an interviewer would state it, then a full worked solution. **Level 2 — Senior engineer.**
+
+> **Original practice scenario** — written for interview preparation; not a question from any specific company's interview.
+
+## 1. The problem statement
+
+Here is how the interviewer puts it. Read it the way you would in the room — nothing in this section is the solution.
+
+> "We run an events and ticketing platform. On a normal day we process about **25,000 events per second** across thousands of events — inventory holds, orders, payments, seat-map updates. Next month a major artist's tickets drop at 10:00 a.m. sharp. Based on past drops, total traffic will spike to roughly **20x normal for about 30–45 minutes**, and almost all of it will be about **one event**: one inventory stream, one set of orders. At peak we expect around **500,000 events per second aimed at that single event's data**, while the rest of the platform — other events, other sellers — still needs to keep working normally.
+>
+> Our current pipeline is a Kafka-based order and inventory stream, partitioned by event ID. It handles normal days fine. The last big drop did not go well, and we do not want a repeat.
+>
+> Design how this pipeline survives the drop: the spike itself, and the fact that it is concentrated on one event rather than spread evenly."
+
+**Functional requirements**
+
+- Ingest and process order, hold and inventory events at ~25K events/sec normally, ~500K events/sec at peak.
+- Handle one hot event (one key) generating ~500K events/sec on its own, without that event's data corrupting or double-selling inventory.
+- Keep all other events and sellers (tenants) working at normal latency during the drop.
+- Give buyers a fast, honest answer — a confirmed order, a place in line, or a clear rejection — never a hanging request.
+- Preserve a complete, auditable order record after the drop: who got what, in what order, with no oversell.
+
+**Non-functional requirements**
+
+- No overselling: inventory decrements must be exactly right even under retries and consumer crashes.
+- The spike lasts 30–45 minutes; the system must degrade gracefully inside it, not fall over and recover after it.
+- Other tenants' p99 latency must not blow up because of one tenant's flash event (noisy-neighbour isolation).
+- Autoscaling alone is not an acceptable answer: the spike rises in seconds to minutes, new capacity takes minutes to arrive.
+- Cost matters: you cannot permanently provision for 20x peak to serve a 45-minute drop.
+
+## 2. Clarifying questions to ask first
+
+Ask these before drawing anything. Each one changes the design.
+
+| Question | Why it matters |
+|---|---|
+| Is the 500K/sec mostly reads (people refreshing the seat map) or writes (holds and orders)? | Reads can be cached and served stale-by-seconds; writes hit the partitioned log and the inventory store. The read/write split decides where the real bottleneck is. |
+| Must orders for the hot event be processed in strict order, or is a fair, approximately-ordered outcome acceptable? | Strict global ordering for one key caps you at one partition's throughput. If fairness can come from a queue/waiting-room position instead, you are free to parallelise the key. |
+| What is the actual inventory? Thousands of seats, or millions of general-admission tickets? | Scarce inventory (say 20K seats against 500K buyers/sec) means most requests must be rejected — cheaply and early. Abundant inventory means most must be processed. |
+| What may we shed? Are page views, recommendations and analytics droppable, while orders are not? | Load shedding needs a pre-agreed priority list. Deciding what to drop during the incident is too late. |
+| How stale can the seat map / availability display be — 1 second, 10 seconds? | Staleness tolerance is what lets you cache and pre-aggregate instead of reading the hot store per request. |
+| Are other tenants contractually entitled to isolation — separate SLAs, paid tiers? | That decides whether tenant isolation is logical (quotas, partitions) or physical (separate topics, clusters, consumer groups). |
+| How much warning do we get — is the drop scheduled? | A scheduled spike can be pre-scaled and pre-warmed minutes before. An unscheduled one (a viral moment) must be survived on standing headroom and shedding alone. |
+
+<Callout type="tip">
+The single highest-value clarification here is ordering. The moment the interviewer agrees that fairness comes from the waiting-room position rather than from strict per-key processing order, the hot key becomes parallelisable — and that one concession unlocks salting, sharding and most of the design. Ask for it explicitly.
+</Callout>
+
+## 3. The solution, in plain language first
+
+The simple version: the problem is not total volume, it is concentration. 500K events/sec spread evenly is a scaling exercise; 500K events/sec on one key is a physics problem, because one Kafka partition is served by one consumer at a time. So the design does four things. It keeps most traffic from ever reaching the hot path (cache the reads, queue the buyers in a waiting room). It spreads the hot key itself across many partitions by salting it, then merges the partial results back into one correct answer. It protects everyone else by giving the hot event its own topic, quotas and consumer capacity, so its backlog cannot starve other tenants. And when load still exceeds capacity, it sheds deliberately — dropping the cheap traffic, queueing the valuable traffic, and rejecting the rest fast with a 429 instead of letting requests pile up until everything times out.
+
+Why does that work? Because a system under a spike fails by queueing, not by load: unbounded queues turn a 45-minute spike into hours of processing stale work. Every mechanism here is really about bounding queues and deciding, in advance, what the system will refuse to do.
+
+## 4. Architecture
+
+<ArchDiagram src="scenario-hot-partition-flash-events/architecture" caption="Hot partition and backpressure architecture: salting spreads the hot key, a two-stage merge restores one correct inventory answer, and tiered shedding protects other tenants" />
+
+**Component by component**
+
+- **Clients and the edge / load balancer.** The first line of defence. Static content and the seat map are served from cache/CDN; the edge enforces per-IP and per-user rate limits and is where fast 429 rejections (with `Retry-After`) are issued when admission control says no. A waiting-room / virtual queue sits here for the drop: buyers get a position and are admitted at a controlled rate, which converts a 500K/sec stampede into a flow the pipeline can actually process.
+- **Ingestion API.** Stateless and horizontally scaled. Cheap checks only: authenticate, validate schema, check the tenant's quota, classify the request's priority (order vs hold vs telemetry vs analytics). It writes to Kafka and acks — it never touches the inventory store synchronously, which is what keeps it fast when the store is hot.
+- **Key salter / router.** Detects hot keys (the drop event is known in advance; detection is also automatic from per-key rate metrics) and rewrites the hot key into N salted sub-keys — `event_42#0` … `event_42#31` — chosen by hashing the buyer/session ID, so one buyer's events stay together. Normal keys pass through unsalted.
+- **Kafka.** Separate topics by tier: a dedicated hot-event topic, standard topics for everyone else. Partitioning by the (possibly salted) key means the hot event's load spreads across all partitions of its topic instead of melting one. Retention is short and deliberate — this is a buffer, not an archive.
+- **Stream workers (stage 1).** Consume salted partitions in parallel — this is where the parallelism the hot key was denied is recovered. Each worker validates, dedups, and produces *partial* results: per-salt inventory holds, per-salt order counts. No worker needs the global total to do its job.
+- **Dedup service / state.** Checkpointed keyed state (or a fast KV store) holding seen `event_id`s and idempotency keys, checked before any inventory effect is applied. Under a retry storm, this is what stands between the platform and a double-sell.
+- **Merge / aggregator (stage 2).** Combines the salted partials into the single authoritative view: total sold, remaining inventory, per-event order stream in a defined order. Because partials are commutative aggregates (counts, hold sets keyed by hold ID), the merge is a sum and a union, not a reconciliation nightmare.
+- **Inventory and orders store.** The system of record. Inventory changes land as conditional, idempotent writes (see section 9); the authoritative remaining-count is maintained here by the merge stage, not by hundreds of workers racing on one row.
+- **Dead-letter queue.** Poison events and deliberately shed overflow land here with their payloads and the reason. Shed does not mean silently lost: droppable classes are dropped by policy and counted; order-class events are never shed into the void — they are queued or rejected at the edge, before acceptance.
+- **Monitoring.** Per-partition (not just per-topic) lag and throughput, per-key rates, shed/reject counts by class, consumer lag *age*. Partition skew is invisible in topic-level averages — the monitoring has to look where the failure lives.
+
+## 5. End-to-end data flow
+
+1. The drop opens. The waiting room admits buyers at a configured rate; the edge serves the cached seat map to everyone else. Requests beyond admission capacity get a fast 429 with `Retry-After`, or a queue position — never a hanging socket.
+2. An admitted buyer places a hold/order. The request carries a client-generated idempotency key. The ingestion API authenticates, checks the tenant quota, classifies priority, and hands the event to the router.
+3. The router sees the hot key, salts it — `event_42` becomes `event_42#17` by hashing the buyer ID — and produces to the hot-event topic. The event lands on one of many partitions instead of the single doomed one.
+4. A stage-1 worker consumes it, checks the dedup state for the `event_id`/idempotency key (a retry of the same order stops here), validates it against its salted shard's rules, and emits a partial: a hold recorded against sub-key 17, with a TTL.
+5. The merge stage continuously combines partials from all 32 salts into the authoritative inventory view: total held, total sold, remaining. Oversell protection lives here and in the store's conditional writes — a hold that would take the merged total past capacity is rejected at merge time and the buyer is notified.
+6. The buyer gets a definitive answer: confirmed, or sold out. Confirmations, rejections and the merged counts feed the dashboards and the buyer's order-status view.
+7. Meanwhile, other tenants' events flow through their own topics and consumer groups, untouched by the hot topic's lag. Analytics and recommendation events — the lowest priority class — are being sampled or shed at the edge for the duration of the drop, by policy, and the shed counters say exactly how many.
+
+## 6. Technology choices, and why
+
+| Decision | Choice | Why | Alternative considered |
+|---|---|---|---|
+| Buffer / log | Kafka, tiered topics | Partitioned, replayable, and consumer groups give natural isolation between the hot path and everyone else | A single shared topic for everything — simpler, and exactly how the hot key starves the platform |
+| Spreading the hot key | Key salting (N sub-keys) + two-stage merge | Recovers parallelism for one key while keeping the merge cheap (commutative partials) | One partition consumed faster / a bigger consumer — a single partition has a hard throughput ceiling no instance size removes |
+| Admission control | Waiting room + edge rate limits + 429 with `Retry-After` | Converts an unprocessable spike into a processable flow; fast rejection is kinder (and cheaper) than timeouts | Letting everything in and relying on autoscaling — capacity arrives minutes after the spike, into queues already full of stale work |
+| Inventory writes | Conditional writes / compare-and-set in the store | The last line of oversell defence, correct even if every upstream check races | Distributed locks per event — lock contention on the hot key recreates the serial bottleneck you just removed |
+| Stream processing | Flink or Kafka Streams for stage 1 + merge | Keyed state for dedup, checkpointing, and native two-stage aggregation patterns | Hand-rolled consumers — you re-implement checkpointed state and recovery under incident pressure |
+| Read path for seat map | Cache with seconds-level TTL + merged aggregates | 90%+ of spike traffic is refresh reads; serving them from the hot store melts it | Strongly consistent reads per request — unaffordable and unnecessary; the map is advisory, the order confirmation is the truth |
+
+**Batch vs streaming.** The order path is streaming, unavoidably — buyers need answers in seconds. But the drop's *accounting* is finished in batch: after the event, a reconciliation job replays the raw event log, recomputes inventory and orders from scratch, and compares against the streaming result. Streaming gives speed under fire; the batch replay is how you prove, afterwards, that no oversell or lost order slipped through while you were shedding load. Reports and payouts run off the reconciled data, not the wartime numbers.
+
+## 7. Partitioning and parallelism
+
+- **The core fact:** in Kafka, a partition is consumed by exactly one member of a consumer group at a time. Partition by `event_id` and one viral event = one partition = one consumer = a hard ceiling of (typically) a few thousand to tens of thousands of events/sec, while 199 other partitions idle. Total cluster capacity is irrelevant; the *distribution* is the failure.
+- **Salting** rewrites the hot key into N sub-keys, spreading its events over N partitions and N consumers. Choose N from the arithmetic: 500K/sec ÷ a conservative ~25K/sec per partition-consumer ≈ 20, so 32 salts gives headroom. Salting is applied only to keys detected (or scheduled) as hot — salting everything would destroy per-key ordering for keys that never needed it.
+- **What salting costs:** strict per-key ordering. Events for the event are now interleaved across 32 streams. That is acceptable here precisely because of the clarifying answer in section 2: fairness comes from waiting-room admission order, inventory correctness from the merge stage's totals, and each individual buyer's events stay ordered because the salt is a hash of the buyer ID, not random.
+- **Two-stage aggregation** is the standard pattern: stage 1 computes partial aggregates per salt (counts, hold sets), stage 2 merges partials. It works because the operations are commutative and associative. Anything that is not — "the 10,000th buyer wins a prize" — cannot be salted this way and must be handled by a small serialised side path; name that limit honestly.
+- **Skew monitoring:** alert on max-partition lag vs median-partition lag. A topic can look healthy in aggregate while one partition is 20 minutes behind — that gap *is* the incident.
+- Partition count for the hot topic is set for the drop in advance (you can add partitions, but repartitioning mid-spike rebalances consumers at the worst possible moment).
+
+## 8. Storage strategy
+
+- **Kafka retention:** short — hours to a couple of days on the hot topic. It is a shock absorber and a replay source for the post-drop reconciliation, not a store of record.
+- **Inventory store:** the authoritative counts and hold records. Holds carry TTLs (an unpaid hold expires and returns inventory — during a drop, expired-hold release is a significant source of "suddenly available" seats, and the merge stage must process expiries as first-class events). Hot rows for the drop event will be contended; keep the per-write work minimal — conditional counter updates and hold inserts, no joins, no reporting queries against this store during the drop.
+- **Orders store:** append-only order records keyed by idempotency key (unique constraint — see section 9). Append-only writes scale and audit well; corrections are new records, not updates.
+- **Raw event archive:** all accepted events to object storage (Parquet, partitioned by hour) for the reconciliation replay and for dispute handling ("I clicked buy at 10:00:03 — what happened?"). At 500K/sec for 45 minutes this is a real but bounded volume; lifecycle it to cold storage after the dispute window.
+- **Dashboards / read models:** pre-aggregated counts from the merge stage, refreshed continuously; never computed by scanning the orders store live during the drop.
+
+## 9. Deduplication and idempotency, with a worked example
+
+Under a spike, retries multiply everything: clients retry timed-out orders, producers retry sends, consumers redeliver after rebalances. Delivery is **at-least-once** at every hop, so the same order *will* arrive more than once. The defence is that processing an order twice must have the same effect as processing it once — and inventory is where that stops being abstract: a duplicate that decrements twice is an oversell.
+
+Every order carries two identifiers, created once and never regenerated on retry: an `event_id` (UUID per event) and a client-supplied **idempotency key** per purchase intent (one key for "this buyer buying these seats", reused across all its retries). The stage-1 worker's processing state machine per order is `RECEIVED → HELD → CONFIRMED / REJECTED`, and transitions are applied with conditional writes:
+
+```sql
+-- Idempotent order insert: a retried order is the same row, not a second order.
+INSERT INTO orders (idempotency_key, event_id, buyer_id, seats, state)
+VALUES ($1, $2, $3, $4, 'HELD')
+ON CONFLICT (idempotency_key) DO NOTHING
+RETURNING order_id;
+-- No row returned = we have seen this purchase intent before:
+-- fetch and return the existing order's current state instead.
+```
+
+```sql
+-- Conditional inventory decrement: the write itself refuses to oversell.
+UPDATE inventory
+SET remaining = remaining - $seats
+WHERE event_pk = $event AND salt = $salt AND remaining >= $seats
+RETURNING remaining;
+-- Zero rows updated = this salt's shard cannot satisfy the hold.
+-- The merge stage then checks the global total before confirming or rejecting.
+```
+
+And the consumer-side shape, in pseudocode:
+
+```python
+def on_order(event, state, db):
+    if state.seen(event.event_id):            # exact duplicate delivery
+        metrics.inc("duplicate_dropped")
+        return
+    existing = db.get_order(event.idempotency_key)
+    if existing:                               # retry of a known purchase intent
+        reply(existing.state)                  # same answer as before, no new effect
+        state.mark_seen(event.event_id)
+        return
+    result = db.place_hold(event)              # conditional writes above do the guarding
+    reply(result.state)                        # HELD / REJECTED (sold out)
+    state.mark_seen(event.event_id)
+    state.commit_offset(event.offset)          # only after the effect is durable
+```
+
+Two rules make this work. First, identifiers are created **once, at the source** — if a retry generates a fresh idempotency key, every layer below is blind and the buyer can be charged or allocated twice. Second, the state transition and the offset commit are ordered so a crash causes redelivery (absorbed by the checks above), never a lost-but-acked order.
+
+## 10. Retry, failure handling, checkpointing and recovery
+
+- **Client retries:** bounded, with exponential backoff and jitter, always carrying the same idempotency key. The edge's 429 + `Retry-After` is part of this contract: it tells clients *when* to come back instead of letting thousands of them guess in sync (a retry storm is a second, self-inflicted spike).
+- **Backpressure, explicitly:** consumers signal overload by lagging in Kafka — that is the safe place for work to wait. What must never happen is unbounded in-memory queues inside workers or the ingestion API: when internal queues hit their bound, the service sheds its lowest-priority class and returns 429s upstream. Bounded queues everywhere, with a named policy at every bound.
+- **Load shedding policy (agreed before the drop):** *queue* — orders and holds (valuable, latency-tolerant by seconds-to-minutes inside the waiting room); *drop* — analytics events, recommendations, view-tracking (sampled first, then dropped, always counted); *reject fast* — new sessions beyond admission capacity, with a queue position or a 429, never a slow timeout.
+- **Consumer crash / rebalance:** the worker restarts from its last checkpoint; in-flight events redeliver; dedup and conditional writes absorb the overlap. Rebalances during the drop are minimised by static partition assignment / cooperative-sticky rebalancing — a full rebalance storm mid-spike is a self-inflicted outage.
+- **Poison events:** a schema-broken event goes to the DLQ after a few attempts with the raw payload and error; one bad event must never stall a hot partition while 500K events/sec queue behind it.
+- **Broker loss:** replication factor 3, `min.insync.replicas=2` — a broker failure during the drop is a non-event by design, because there is no time to improvise one.
+- **Autoscaling lag vs spike speed:** the spike rises in under a minute; new consumers/brokers take minutes to provision, join, and rebalance. So the plan is: pre-scale for a *scheduled* drop (capacity in place before 10:00), keep standing headroom of ~2–3x normal, and let shedding + the waiting room absorb the gap for unscheduled spikes. Autoscaling is the recovery mechanism, not the survival mechanism — say that plainly.
+
+## 11. Monitoring and observability
+
+- **Per-partition throughput and lag**, with skew alerts (max vs median). Topic-level dashboards hide the only failure that matters here.
+- **Lag age in seconds**, per consumer group: how old is the oldest unprocessed order? That is the buyer-visible delay, and the number the incident call watches.
+- **Per-key event rates** — the hot-key detector. A key crossing a rate threshold triggers salting automatically for unscheduled spikes.
+- **Shed and reject counters by class**: how many analytics events dropped, how many 429s issued, waiting-room depth and admission rate. Shedding you cannot count is shedding you cannot defend afterwards.
+- **Inventory invariant monitor**: sold + held + remaining = total capacity, checked continuously by the merge stage. A violation pages immediately — it means oversell or lost inventory, the two unforgivable outcomes.
+- **Per-tenant latency and lag**, so "other tenants unaffected" is a measured claim, not a hope.
+
+## 12. Security
+
+- **Bot and scalper defence is a drop-day security control, not an afterthought:** per-account and per-IP rate limits, device/session signals, and purchase limits per buyer enforced at the ingestion API (one buyer, max N seats — enforced again by a unique constraint shape in the orders store, not only by a check that races).
+- Authenticated sessions required to hold or buy; the waiting room issues signed, non-transferable admission tokens so queue positions cannot be farmed or resold.
+- Idempotency keys and order APIs are authorised per buyer — a key only ever returns the state of *your* order.
+- Tenant isolation is also a security boundary: quotas and separate topics mean one tenant's flood (malicious or accidental) cannot read, starve or corrupt another tenant's stream.
+- Payment data never flows through the event pipeline; orders carry payment references, not card data.
+
+## 13. Scalability, the 10x question, and cost
+
+**At 10x again (5M events/sec on the hot key):** the honest answer is that the shape holds but the emphasis flips — at that point almost nobody can be admitted, and the system becomes primarily a *fair queueing and rejection* system with a small processing core. Salts go from 32 to a few hundred, the waiting room does nearly all the work, and the read path is almost entirely cache. What breaks first: the merge stage (keep it hierarchical — merge groups of salts, then merge the merges), and the inventory store's write rate (shard inventory itself by seat block / section, so no single row or shard carries the event).
+
+**Cost levers:** the big one is *not* provisioning for peak — pre-scaled capacity for a scheduled drop is rented for hours, not owned forever, and shedding policy is what makes unscheduled spikes survivable without standing 20x headroom. Cache hit ratio on the read path is the second lever: every seat-map refresh served from CDN is a request the expensive path never sees. Short Kafka retention on hot topics and lifecycle-tiering the raw archive close out the list.
+
+## 14. Trade-offs, stated honestly
+
+| Choice | You gain | You pay |
+|---|---|---|
+| Salting the hot key | Parallelism: the hot key stops being capped by one partition | Strict per-key ordering is gone; merge logic and salt-count tuning are new moving parts |
+| Waiting room + admission control | A spike becomes a manageable flow; fairness is explicit | Some buyers wait minutes and some never get in — a product decision, surfaced honestly rather than hidden as timeouts |
+| Load shedding by class | The valuable traffic survives; capacity goes to orders, not analytics | Dropped analytics are gone (counted, but gone); stakeholders must agree the priority list in advance |
+| Tiered topics / tenant isolation | Other tenants keep their latency during the drop | More topics, quotas and consumer groups to operate; the hot tier sits underused 360 days a year |
+| Fast 429 rejection | Cheap, honest failure; protects everything downstream | A rejected buyer is a visible failure — support and comms must be ready for it |
+
+<Callout type="warn">
+Say this sentence in the interview: "This design does not deliver exactly-once delivery — no design over a network that retries can. It delivers at-least-once delivery with idempotent processing and conditional inventory writes, which gives exactly-once *effects*: one order, one decrement, no oversell. The moment I claim exactly-once delivery, I have stopped describing the system I actually built."
+</Callout>
+
+**Delivery semantics, precisely.** At-most-once (fire and forget) would lose orders silently under exactly the conditions — crashes, rebalances, timeouts — that a drop guarantees. At-least-once plus dedup and idempotent conditional writes is the sweet spot: duplicates are expected, detected, and rendered harmless. "Exactly-once" features in Kafka/Flink refer to exactly-once *state updates within that system's checkpoints and transactional sinks* — real, useful, and narrower than an end-to-end delivery guarantee. The inventory invariant (sold + held + remaining = capacity) is checkable precisely because effects, not deliveries, are what the design makes exactly-once.
+
+## 15. Interviewer follow-up Q&As
+
+1. **"Total traffic is only 500K/sec and your cluster handles 2M/sec. Why are you worried?"** — Because throughput is not the binding constraint; distribution is. One key maps to one partition maps to one consumer. The cluster's other capacity is unreachable for that key until the key is spread.
+2. **"How do you pick the salt count?"** — Arithmetic, then headroom: expected hot-key rate ÷ safe per-partition consumer rate, rounded up to a power of two (500K ÷ ~25K ≈ 20 → 32). Too few salts and you are still hot; too many and the merge stage and per-salt overhead grow for nothing.
+3. **"Salting breaks ordering. A buyer places a hold, then cancels. What if the cancel is processed first?"** — Both events carry the same buyer ID, and the salt is a hash of the buyer ID — so one buyer's events stay on one salt, in order. Cross-buyer ordering is what was given up, and inventory correctness does not depend on it.
+4. **"Why not just add more consumers to the hot partition's group?"** — Kafka assigns each partition to exactly one group member. Extra consumers sit idle. The only ways to parallelise a key are more partitions for it (salting) or processing outside the group model — salting is the honest version of the first.
+5. **"What exactly do you shed first, and who decides?"** — Lowest business value per unit of capacity first: view analytics and recommendations (sample, then drop), then non-essential reads. Orders and holds are never shed after acceptance — they are queued, or rejected at admission before acceptance. The list is agreed with product *before* the drop; mid-incident invention is how order traffic gets dropped by accident.
+6. **"A 429 is a failed request. Isn't that just failing users more cheaply?"** — It is failing them *honestly and recoverably*: a fast 429 with `Retry-After` (or a queue position) costs the client milliseconds and tells it what to do. The alternative — accepting the request and timing out after 30 seconds — costs more, tells the client nothing, and the work still is not done. Under genuine overload, the choice is between controlled rejection and uncontrolled collapse.
+7. **"How do other tenants stay unaffected — concretely?"** — Separate topics and consumer groups for the hot tier, per-tenant quotas at ingestion, and consumer capacity reserved per tier. The hot topic can lag by minutes while standard topics sit at zero lag, because they share neither partitions nor consumers.
+8. **"Your autoscaler adds consumers at minute 3 of the spike. Problem solved?"** — No — and that is the point. By minute 3 the queues already hold minutes of work, and a rebalance briefly stalls consumption further. Autoscaling helps the *tail* of the drop and the next one; survival in minute 1 comes from pre-scaling (scheduled drop), standing headroom, admission control and shedding.
+9. **"How do you know you didn't oversell?"** — Three layers: conditional writes make the decrement itself refuse oversell; the merge stage continuously checks sold + held + remaining = capacity; and the post-drop batch reconciliation replays the raw log and recomputes everything. If the numbers disagree, payouts and settlements use the reconciled numbers.
+10. **"The drop is announced mid-interview to be 10x bigger than expected. What changes?"** — Ratios, not architecture: more salts, a slower admission rate, a longer waiting-room wait, earlier and deeper shedding of non-order classes — and the honest statement that at some multiple, the correct product answer is a lottery or a longer queue, not more infrastructure.
+
+## 16. Interview-ready spoken answer
+
+> "First, the requirements I'd pin down: about 25K events a second normally, spiking 20x for under an hour, with roughly 500K a second aimed at one event — and other tenants who must not notice. The clarification that matters most is ordering: if fairness can come from a waiting-room position rather than strict per-key processing order, I can parallelise the hot key, and the whole design follows from that.
+>
+> The bottleneck is not volume, it's concentration. Partitioned by event ID, the hot event lands on one Kafka partition, and one partition means one consumer — a hard ceiling — while the rest of the cluster idles. So my architecture attacks concentration at three points: a waiting room and edge caching keep most of the spike from ever reaching the pipeline; a salting layer spreads the hot key across 32 sub-keys; and tiered topics with per-tenant quotas keep the hot event's backlog away from everyone else.
+>
+> The data flow is two-stage. Stage-one workers consume the salted partitions in parallel, dedup on the event ID and idempotency key, and emit partial results — holds and counts per salt. A merge stage combines those partials into the single authoritative inventory view, and the store's conditional writes make the final decrement refuse to oversell.
+>
+> On reliability: delivery is at-least-once everywhere, retries multiply during a spike, so every effect is idempotent — the same order processed twice is one order and one decrement. Backpressure is handled with bounded queues everywhere: orders queue, analytics gets sampled and dropped, and excess demand is rejected fast with a 429 and a Retry-After instead of being accepted and timed out.
+>
+> Scaling is mostly arithmetic — salt count from the per-partition rate, pre-scaling because a scheduled drop is known, and autoscaling treated as recovery rather than survival, because new capacity arrives minutes after a spike that rises in seconds.
+>
+> The trade-offs I'd flag honestly: salting gives up strict per-key ordering, shedding means deliberately dropping low-value data by a policy agreed in advance, and the system delivers exactly-once effects — one order, one decrement — not exactly-once delivery. That's the distinction the whole design rests on."
+
+## 17. Mock interview mode
+
+**Five hard follow-ups, with expected answers**
+
+1. **"Your salt count is 32. Mid-drop, one salt's partition is still hot. Why, and what now?"** — Expected: the salt hash is skewed (for example, a botnet or one reseller's buyers hashing together), or one salt drew the VIP sale sub-stream. Response: re-salt the hot sub-key further (hierarchical salting), or shed harder at admission — and the detection is per-partition lag skew, which is why monitoring is per-partition, not per-topic.
+2. **"Prove the waiting room is fair."** — Expected: admission tokens are issued in arrival order, signed and non-transferable, admitted at a published rate; fairness is defined and auditable at the queue, which is exactly why ordering was moved there from the processing pipeline. Also name the limits: bots and multi-accounting attack fairness at the identity layer, not the queue layer.
+3. **"The merge stage falls 5 minutes behind. Buyers see stale 'seats available'. Oversell?"** — Expected: no oversell, because the store's conditional writes are the authority, not the merged view — the view is advisory. What degrades is accuracy of the display and the speed of definitive sold-out answers; holds continue against per-salt shards with their own conditional limits, and the invariant monitor catches any drift.
+4. **"Why not shard the inventory database instead and skip Kafka salting entirely?"** — Expected: the database is not the first bottleneck — the single-partition consumer ceiling is hit before any store limit, and direct-to-store writes couple the spike straight into the system of record with no buffer, no replay and no shedding point. The log is what makes the spike survivable; store sharding may *also* be needed, and the design says so at 10x.
+5. **"It's 10:07, lag age is 90 seconds and rising, autoscaling is pending. What do you do, in order?"** — Expected: tighten admission rate, deepen shedding of non-order classes, verify the lag is the hot topic only (tenants unaffected), page on the inventory invariant if it twitches — and explicitly *not* trigger a consumer-group rebalance or a partition change mid-spike. Calm, pre-agreed levers, in order.
+
+**Common candidate mistakes**
+
+- Treating 500K/sec as a capacity problem and never noticing it is one key.
+- Proposing more consumers for the hot partition's group.
+- Relying on autoscaling as the spike answer, ignoring provisioning and rebalance lag.
+- Shedding "some traffic" without a priority list — or shedding accepted orders.
+- Claiming salting is free, without naming the ordering it gives up.
+- No oversell defence beyond "the code checks remaining first" — a check that races.
+
+**What a senior candidate mentions unprompted**
+
+- Partition = parallelism ceiling; per-partition lag skew as the real health signal.
+- Salting plus two-stage merge, with the commutativity requirement stated.
+- A pre-agreed shedding table: what queues, what drops, what gets a fast 429.
+- The inventory invariant (sold + held + remaining = capacity) as a monitored assertion.
+- Post-drop batch reconciliation as the proof step, not an afterthought.
+- Autoscaling lag vs spike rise time, with pre-scaling for scheduled events.
+
+**Scoring rubric (out of 10)**
+
+| Score | What it looks like |
+|---|---|
+| 9–10 | Names concentration (not volume) as the problem, salts + merges correctly, protects tenants with tiers/quotas, has an explicit shedding policy, states delivery semantics precisely, handles autoscaling lag honestly |
+| 7–8 | Salting present and tenant isolation mentioned, but shedding policy or the merge's ordering cost is hand-wavy |
+| 5–6 | Knows Kafka partitions matter but proposes vague "scale consumers / add partitions" without the per-key mechanism |
+| 3–4 | Designs for total throughput only; the hot key melts the system while the candidate watches the cluster averages |
+| 0–2 | Claims exactly-once delivery, or proposes accepting all traffic and letting queues grow unboundedly |
+
+Sources: [Apache Kafka documentation — topic partitioning, consumer groups and delivery semantics](https://kafka.apache.org/documentation/) · [KIP-848 / Kafka consumer rebalance protocol background](https://cwiki.apache.org/confluence/display/KAFKA) · [AWS Architecture Blog — load shedding and admission control patterns](https://aws.amazon.com/blogs/architecture/)

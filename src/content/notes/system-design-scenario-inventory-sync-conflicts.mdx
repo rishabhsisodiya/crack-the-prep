@@ -1,0 +1,279 @@
+---
+title: "Scenario — Inventory That Disagrees with Itself in Three Warehouses"
+track: "system-design"
+kind: "notes"
+order: 78
+slug: "scenario-inventory-sync-conflicts"
+updated: 2026-11-24
+description: "A scenario-based interview problem: handheld scanners in three warehouses work offline and sync conflicting stock updates — why last-write-wins loses units, how version vectors detect real conflicts, and how the central authority prevents oversell."
+---
+
+import Callout from '../../components/Callout.astro';
+import ArchDiagram from '../../components/ArchDiagram.astro';
+
+Part of the [system design](/prep/system-design) series. This is a **scenario** page: you get the problem the way an interviewer would state it, then a full worked solution. **Level 2 — Senior engineer.**
+
+> **Original practice scenario** — written for interview preparation; not a question from any specific company's interview.
+
+## 1. The problem statement
+
+Here is how the interviewer puts it. Read it the way you would in the room — nothing in this section is the solution.
+
+> "We run three warehouses. Staff count, receive, pick and move stock with handheld scanners. The warehouses have dead zones — cold storage, metal racking, a basement level — so the scanners **regularly work offline**, sometimes for a couple of hours, recording everything locally.
+>
+> When a scanner comes back online it syncs. And that's when the numbers stop agreeing. The same SKU was counted in two warehouses while both were offline. A pallet was moved at 10:00 but the sync arrives at 13:00, after someone else already adjusted the same stock. Our current system just takes whichever update arrives last, and the stock numbers quietly lose units — or invent them.
+>
+> The business consequences are real: the storefront sells against these numbers, and **overselling** — promising stock we don't have — is the one error the business will not tolerate. Under-selling because the count is stale is annoying; overselling is refunds and angry customers.
+>
+> Design the offline recording and sync system so the three warehouses converge on one correct stock count, conflicts are handled deliberately instead of by arrival order, and the storefront can never sell what isn't there."
+
+**Functional requirements**
+
+- Scanners must keep recording receives, picks, moves and counts while fully offline, for hours.
+- On reconnect, offline work syncs to the centre without losing or duplicating events.
+- The three warehouses and the centre must converge on one stock count per SKU per location.
+- Conflicts — concurrent updates to the same stock — must be detected and resolved by a stated rule, never silently by sync arrival order.
+- The storefront's availability check and sale must never oversell.
+
+**Non-functional requirements**
+
+- No silent stock drift: any unit the system gains or loses must be explainable from the event history.
+- Sync must survive crashes and retries mid-batch without double-applying events.
+- Warehouse staff are not engineers: a conflict that needs a human must arrive as a simple task ("recount shelf B4"), not an error code.
+- The centre being down must not stop warehouse work; the storefront being unable to verify stock must fail towards not selling, not towards selling.
+
+## 2. Clarifying questions to ask first
+
+Ask these before drawing anything. Each one changes the design.
+
+| Question | Why it matters |
+|---|---|
+| Are stock updates absolute counts ("there are 42") or deltas ("received +10", "picked −3")? | This decides whether merging is even possible. Deltas from concurrent updates can be summed; two absolute counts taken concurrently cannot be merged by any rule — one of them is simply about a different reality. Most of the design follows from this answer. |
+| Can the same physical stock be touched by two warehouses, or is each SKU's stock partitioned by location? | If stock is strictly per-location, most "conflicts" are actually within one warehouse (two scanners, same shelf). True cross-warehouse concurrency is mostly transfers — which are two events (out of A, into B), not one shared counter. |
+| How long is "offline" — minutes in a dead zone, or a whole shift? | Hours of offline work means hundreds of queued events per scanner and a real chance two people counted the same shelf. It sizes the local outbox and the conflict rate you must handle routinely, not exceptionally. |
+| What does the storefront actually need — the exact count, or a safe availability answer? | If selling only needs "at least N available, reserved atomically", the sale path can be strongly consistent at the centre while counting stays eventually consistent. That split is the key simplification in this design. |
+| How accurate is physical reality — do counts get verified? | Scanners record what humans do, and humans miscount, mis-scan and drop things. No sync protocol fixes that; you need cycle-count reconciliation as a first-class part of the design, not an afterthought. |
+| Do scanner clocks matter, and are they trustworthy? | Handheld clocks drift and get reset. Any design whose correctness depends on device wall-clock timestamps is broken before it ships — this is exactly why last-write-wins fails here. |
+| What happens to a pick that was recorded offline against stock the centre has since sold? | The offline world and the selling world genuinely diverge. Someone must own that collision: usually the pick fails at sync/fulfilment time and becomes an exception task — but the interviewer wants to hear you surface it. |
+
+<Callout type="tip">
+The single highest-value clarification here is delta vs absolute count. The moment updates are expressed as signed deltas with unique event IDs, most concurrent updates stop being conflicts at all — they commute, and can be applied in any order. Absolute counts are where conflicts are real and unmergeable. Say that out loud, and design the event format accordingly.
+</Callout>
+
+## 3. The solution, in plain language first
+
+The simple version: scanners never edit a shared number. They record **events** — "received +10 of SKU X at Warehouse A", "picked −3" — each with a unique ID, into a durable local outbox, and work happily offline. On reconnect, the outbox syncs to the centre, events are appended to a log, and a central engine applies them to the stock database. Because the events are deltas, events from different warehouses mostly just add up, in any order. For the cases that genuinely collide, each stock record carries a **version vector** so the system can tell "this update is newer and includes that one" from "these two updates are concurrent — neither saw the other" — and only the second kind is treated as a conflict, resolved by a stated rule or a human recount, never by whichever sync happened to arrive last. Selling is kept separate and stricter: the storefront reserves stock against the central database with an atomic decrement, so no matter how stale the warehouse counts are, the centre can never promise the same unit twice.
+
+Why not just take the latest update — last-write-wins? Because "latest" here means "latest wall-clock timestamp from an untrustworthy scanner clock, applied in sync-arrival order". Two scanners count the same shelf offline — 40 and 38, both honest counts of a moving shelf — and LWW keeps one and silently destroys the other, with no record that a conflict ever existed. The units don't just go wrong; they go wrong *invisibly*, which is worse.
+
+## 4. Architecture
+
+<ArchDiagram src="scenario-inventory-sync-conflicts/architecture" caption="Inventory sync architecture: offline scanners record events on per-warehouse edge nodes, sync to a central event log and conflict engine over a version-vector stock database, with a separate atomic reservation path for the storefront" />
+
+**Component by component**
+
+- **Handheld scanners.** Record stock events locally first — the scan is committed to the device/edge store before the worker moves on. The scanner shows local stock (clearly a local view), never claims to show the global truth.
+- **Warehouse edge node.** One per warehouse (a small local server, or the scanner fleet's local store-and-forward service): holds the durable outbox of unsynced events and the warehouse's last-known stock state. If the centre is down for a day, the warehouse still works.
+- **Sync gateway.** The centre's front door for sync: authenticates the warehouse/device, accepts batches, validates schema, and acknowledges only what it has durably accepted. Batches are resumable — a connection drop mid-sync loses nothing.
+- **Inventory event log (Kafka).** Every accepted event, partitioned by SKU + warehouse. This is the replayable history from which the stock database can always be rebuilt — and the reason every unit gained or lost is explainable.
+- **Conflict engine.** Applies events to the stock database in log order per SKU. It maintains each record's version vector, distinguishes causally-ordered updates from concurrent ones, merges what can be merged (deltas), and raises conflict tasks for what cannot (concurrent absolute counts, negative-stock results).
+- **Central stock DB.** The authority for selling: per SKU-per-location counts, version vectors, and reservations. Relational, because the operations that matter here — atomic conditional decrements — are exactly what it is good at.
+- **Reservation / oversell guard.** The storefront's only path to stock: an atomic "decrement available if enough remains" against the central DB. Warehouses never sell; only this guard promises stock.
+- **Reconciliation job.** Compares system counts against physical cycle counts (staff periodically recount a rotating sample of shelves), and posts correction events — through the same event pipeline, visibly labelled as corrections — when they disagree.
+- **Monitoring.** Sync lag per warehouse, conflict rate, negative-stock attempts, reservation failures, reconciliation variance.
+
+## 5. End-to-end data flow
+
+1. A worker scans a receive: the scanner creates `{ event_id (UUID), sku, location, delta: +10, type: receive, device_seq: 1187, device_ts, vector_at_scan }` and writes it to the local outbox. The scan succeeds locally, offline or not.
+2. The scanner/edge applies the event to its *local* stock view, so the warehouse's own numbers stay self-consistent during the shift.
+3. On reconnect, the edge syncs the outbox in `device_seq` order, in batches. The gateway validates, appends to the event log, and acks the batch; the edge marks those events synced (but retains them until the centre confirms application — see checkpointing).
+4. The conflict engine consumes the log per SKU partition. For each event it checks the event's version vector against the record's: if the event causally follows the current state, apply the delta. If it is concurrent with an already-applied update to the same record, go to the conflict path (Section 9's worked example).
+5. Deltas commute: a +10 receive in Warehouse A and a −3 pick in Warehouse B (or even the same warehouse, concurrently) apply in any order and converge to the same total. No conflict is raised.
+6. Concurrent **absolute counts** of the same shelf do not commute: the engine keeps the record flagged, applies the stated resolution rule (for example, trust neither — schedule a recount — and meanwhile use the *lower* count for selling, because under-selling is the safe direction), and creates a recount task for warehouse staff.
+7. Independently, the storefront asks the oversell guard before selling: the guard atomically decrements the central available count if sufficient stock remains, creating a reservation. Warehouse sync state never gates this — the central DB is the only seller.
+8. Cycle counts land as reconciliation events; variance beyond a threshold creates an investigation task and a correction event, so physical reality periodically re-anchors the system.
+
+## 6. Technology choices, and why
+
+| Decision | Choice | Why | Alternative considered |
+|---|---|---|---|
+| Update representation | Immutable delta events with UUID `event_id`s | Deltas commute, so most concurrency dissolves; the event history explains every unit; replays are detectable by ID | Syncing absolute counts — concurrent counts are unmergeable and force last-write-wins-style data loss |
+| Conflict detection | Version vectors per stock record (per SKU-location) | They answer the exact question that matters — "did update X already include update Y, or are they concurrent?" — without trusting any clock | Wall-clock timestamps / last-write-wins — scanner clocks drift and reset, and sync order is not event order; LWW silently discards honest updates |
+| Full CRDT? | CRDT-lite: a grow-only event set + delta summation (effectively a PN-counter per record), not a general CRDT framework | Stock deltas are one of the few cases where a counter CRDT fits naturally; you get convergence without adopting a CRDT database or paying for general-purpose merge machinery | A CRDT database end-to-end — solves convergence but gives up the strongly consistent central authority the selling path needs, and oversell prevention is not a CRDT property |
+| Central stock store | Relational DB (PostgreSQL) with atomic conditional updates | Reservations need `UPDATE ... WHERE available >= n` semantics and transactions; counts and vectors are small, structured, and hot | An eventually consistent NoSQL store as the seller's authority — availability math on a converging-late counter is how you oversell |
+| Transport / log | Kafka, partitioned by SKU + warehouse | Durable, replayable, per-key ordering where it matters; rebuild the stock DB from the log after any bug | Direct DB writes from the sync gateway — no replay, no rebuild, and the gateway becomes the conflict engine under load |
+| Local storage on edge/scanner | Embedded store (SQLite) as outbox + local view | ACID on the device, survives app crashes and flat batteries, trivially queryable for "unsynced events" | A JSON file or in-memory queue — the first dropped scanner takes the morning's receives with it |
+
+**Central authority vs full distribution.** This design deliberately splits the problem: *counting* is distributed and eventually consistent (offline-first, convergent), while *selling* is centralised and strongly consistent (one DB, atomic reservations). A fully peer-to-peer design (pure CRDT, no centre) can converge the counts but cannot promise "never oversell" during a network partition — during a partition, two sides can both sell the last unit, and no merge rule un-sells it. Naming that boundary is the core of the problem.
+
+## 7. Partitioning and parallelism
+
+- The event log is partitioned by `sku + warehouse`: all events for one stock record land on one partition, in order, so the conflict engine's per-record decisions need no cross-partition coordination.
+- Warehouses sync independently and in parallel; one warehouse's backlog never blocks another's. Within a warehouse, sync preserves `device_seq` per device; across devices, order doesn't matter for deltas.
+- The conflict engine scales with partition count; its state is per-record (count + version vector), sharded by the same key.
+- **Hot SKU problem:** a promotion can make one SKU extremely hot. Its partition and its stock-DB row become the bottleneck for reservations. Mitigations: keep the reservation operation a single short conditional update, and if needed pre-split the sellable pool into per-channel allocations (storefront pool, marketplace pool) that are reconciled periodically — accepting that pooled allocation trades a little utilisation for a lot of throughput.
+- The local side needs no partitioning cleverness: one warehouse's daily event volume is small (thousands, not millions) — this problem is about correctness under concurrency, not throughput.
+
+## 8. Storage strategy
+
+- **On the scanner/edge:** the outbox (unsynced events) is sacred — retained until the centre confirms *application*, not just receipt. The local stock view is a cache of the edge's own events plus the last synced central state, and is labelled as such in the UI.
+- **Event log:** retained long (months to indefinitely, storage is cheap at this volume) — it is the audit trail and the rebuild source. Stock history questions ("where did these 5 units go in March?") are answered from the log, not from archaeology.
+- **Central stock DB:** one row per SKU-location: `on_hand`, `reserved`, `version_vector`, `updated_at`. Small enough to be boring — thousands to millions of rows, hot rows cached, all mutations through the conditional-update path.
+- **Conflict store:** unresolved conflicts and recount tasks are first-class rows with state, not log lines; they age visibly until a human closes them.
+- **Snapshots for rebuild:** periodic snapshots of the stock DB plus the log from that point make rebuilds fast; the snapshot is a convenience, the log is the truth.
+
+## 9. Deduplication and idempotency, with a worked example
+
+Sync is **at-least-once**: connections drop mid-batch, gateways retry, the edge resends anything unacknowledged. So duplicates are the steady state, and every event carries a device-generated `event_id` that is applied at most once:
+
+```sql
+-- Idempotent apply: the unique event_id does the dedup, in the same
+-- transaction as the stock change. A redelivered event is a no-op.
+INSERT INTO applied_events (event_id, sku, location)
+VALUES ($1, $2, $3)
+ON CONFLICT (event_id) DO NOTHING
+RETURNING event_id;   -- zero rows back = duplicate delivery: skip the stock update
+
+-- If (and only if) the insert returned a row, in the same transaction:
+UPDATE stock
+SET on_hand = on_hand + $4,            -- the event's signed delta
+    version_vector = merge_vector(version_vector, $5)
+WHERE sku = $2 AND location = $3;
+```
+
+And here is the conflict logic the interviewer is really probing — why last-write-wins fails, and what replaces it:
+
+```python
+# Version vectors: {device_or_warehouse_id: counter}
+# A dominates B if every counter in A >= B's and at least one is greater:
+# A happened *after* (and had seen) B. Neither dominates => concurrent.
+
+def apply_event(record, event):
+    if dominates(event.vector, record.vector):
+        apply_delta(record, event)            # causally newer: safe, no conflict
+    elif dominates(record.vector, event.vector):
+        pass                                  # already included: stale replay, ignore
+    else:                                     # CONCURRENT: neither saw the other
+        if event.is_delta and record.pending_are_deltas:
+            apply_delta(record, event)        # deltas commute: +10 and -3 merge in any order
+        else:
+            flag_conflict(record, event)      # concurrent absolute counts cannot merge:
+                                              # schedule a recount, sell from the LOWER count
+    record.vector = merge(record.vector, event.vector)
+```
+
+**The last-write-wins failure, concretely.** Shelf count for SKU X is 40. Scanner 1 recounts the shelf offline and gets 38 (two units were picked mid-count). Scanner 2, also offline, receives a delivery and sets the count to 50 — an absolute number that already includes its own view. Both sync later; LWW keeps whichever carries the later timestamp and deletes the other from history. Depending on arrival order you end at 38 or 50, the true figure (48, or a recount's answer) is unreachable, and *nothing in the system records that two updates ever collided*. With delta events (+10 receive; a recount expressed as an adjustment against a stated base) plus version vectors, the concurrency is at least *detected*, the receive is never lost, and the count discrepancy becomes a recount task instead of silent drift.
+
+## 10. Retry, failure handling, checkpointing and recovery
+
+- **Sync retry:** the edge retries with exponential backoff and jitter; batches carry sequence ranges so a resumed sync continues where the acknowledgement stopped, and the gateway's idempotent apply makes resending a whole batch safe.
+- **Checkpointing:** two distinct acknowledgements — *accepted* (gateway has the events durably in the log) and *applied* (conflict engine has consumed them). The edge only prunes its outbox on *applied* confirmations (or accepted + a bounded retention), so a centre-side crash between accept and apply cannot lose events.
+- **Centre down:** warehouses keep working locally for hours-to-days; the storefront's guard, if it cannot reach the central DB, fails closed — it stops selling rather than selling on faith. That asymmetry is deliberate and stated to the business up front.
+- **Conflict engine crash:** it consumes from the log with committed offsets; on restart it replays from the last offset, and idempotent apply (Section 9) absorbs the overlap. The stock DB can be rebuilt from scratch by replaying the full log onto a snapshot.
+- **Poison events** (a scanner firmware bug emitting malformed events): rejected at the gateway into a quarantine queue with the device ID — visible and fixable — never silently dropped and never allowed to stall a partition.
+- **Scanner lost/destroyed with unsynced events:** the honest answer — those events are gone, and the design's defence is reconciliation: the next cycle count of the affected locations detects the variance and corrects it via a labelled correction event. Pretending otherwise would be dishonest; bounding the blast radius (sync early and often when connectivity exists) is the mitigation.
+
+## 11. Monitoring and observability
+
+- **Sync lag per warehouse** (oldest unsynced event age): a warehouse silent for hours is either a dead zone or a dead edge node — both worth knowing before the numbers drift.
+- **Conflict rate** per warehouse/SKU: a spike usually means a process problem (two teams counting the same zone) or a hot SKU being touched by many hands — operational signal, not just a system metric.
+- **Negative-stock attempts:** any apply that would drive `on_hand` below zero is flagged immediately; it is the canary for lost receives or double picks.
+- **Reservation failure rate** at the guard: rising failures mean the storefront is promising against stock the centre doesn't believe exists — the oversell early-warning.
+- **Reconciliation variance:** system vs physical count deltas by location, trended. This is the ground-truth metric for the whole system; if variance grows, no amount of sync elegance is saving you.
+- Every event carries `event_id`, device, and warehouse end to end, so any single unit's history can be traced through the log.
+
+## 12. Security
+
+- Per-device identity (provisioned certificates/keys): a scanner can only submit events for its warehouse, signed with its device sequence — a stolen credential cannot forge another warehouse's stock.
+- The gateway authenticates every batch and validates schema and plausibility (a receive of +1,000,000 units is quarantined for human review, not applied — fat-finger and fraud look similar at the API).
+- Correction and recount-resolution actions require an authenticated staff role and are themselves events in the log — the audit trail covers humans overriding the system, not just the system.
+- Stock data is commercially sensitive (it reveals sales velocity); central DB and log access is role-based, and exports are logged.
+
+## 13. Scalability, the 10x question, and cost
+
+**At 10x** (30 warehouses, 10x SKUs, or a peak-season surge): the shape holds. More log partitions, more conflict-engine consumers, more edge nodes — all horizontal. The two things that genuinely strain are the hot-SKU reservation row (addressed by pool-splitting, Section 7) and conflict *volume* if offline windows grow: conflicts are handled by humans at the end, and humans don't scale 10x — so at scale the investment goes into *preventing* concurrency (zone assignment so one shelf has one owner per shift, scanners warning "this shelf was counted 20 minutes ago by Ana") rather than resolving more conflicts.
+
+**Cost levers:** this system is cheap by design — event volumes are human-scale (a scan per human action), the log is small, the central DB is small. The real costs are operational: edge-node maintenance across warehouses, scanner fleet management, and the staff time for cycle counts. A design that spends those budgets well beats one that saves pennies on infrastructure. Delta events over absolute counts also cut cost in a subtle way: fewer conflicts means fewer recounts, and recounts are paid in wages.
+
+## 14. Trade-offs, stated honestly
+
+| Choice | You gain | You pay |
+|---|---|---|
+| Delta events instead of absolute counts | Concurrent updates commute; convergence without coordination; every unit explainable | Staff and tooling must think in movements, not numbers; a true physical recount needs care to express (count against a stated base vector, difference becomes the adjustment) |
+| Version vectors instead of last-write-wins | Real concurrency is detected; nothing is silently overwritten; no dependence on device clocks | Vector size grows with the number of writers per record (bounded here by warehouses/devices per location — small); merge logic and staff training are real work |
+| CRDT-lite (event set + delta sums) instead of a full CRDT stack | Convergence for the counting problem with ordinary infrastructure | It only works because stock deltas commute; the moment an operation doesn't commute (absolute counts, "set bin location"), you're back to explicit conflict handling |
+| Central authority for selling | Oversell becomes preventable with one atomic check | The centre is a hard dependency for sales: partition or outage means no selling (fail-closed), which the business must accept as the price of the no-oversell guarantee |
+| Eventual consistency for counts | Warehouses work offline for hours; no coordination tax on every scan | The count the centre shows is sometimes stale; anyone reading it must know it's "true as of the last sync", and the UI must say so |
+
+<Callout type="warn">
+Say this sentence in the interview: "This design does not deliver exactly-once delivery of sync events — no design over a flaky warehouse network that retries can. It delivers at-least-once sync with idempotent application keyed on the event ID, which gives exactly-once *effects* on the stock count. And separately: convergence of the counts is an eventual-consistency property, but oversell prevention is a strong-consistency property, and it lives in exactly one place — the central reservation." Conflating delivery with effects — or convergence with correctness of sales — is the most common senior-level slip in this problem.
+</Callout>
+
+**Delivery semantics, precisely.** At-most-once sync (fire and forget) would lose offline work on the first dropped connection — unacceptable when the whole point is offline working. At-least-once plus idempotent apply is the sweet spot for counting. Note what at-least-once does *not* give you: it does not resolve concurrent absolute counts, and it does not stop oversell — those need version vectors/conflict handling and the central guard respectively. Each guarantee in this design comes from a named mechanism; none comes free from the transport.
+
+## 15. Interviewer follow-up Q&As
+
+1. **"Why exactly does last-write-wins lose units here? Give me a concrete case."** — Two offline scanners touch the same record with absolute values: a recount of 38 and a post-delivery count of 50, both honest, neither aware of the other. LWW keeps the later-timestamped one and erases the other from history — the final number is 38 or 50 depending on clocks and arrival order, the receive or the picks vanish silently, and there is no record a conflict occurred. Deltas plus version vectors either merge the updates or surface the collision.
+2. **"Scanner clocks are all over the place. Doesn't that break your ordering?"** — No — ordering never depends on wall clocks. Causality comes from version vectors and per-device sequence numbers; device timestamps are kept for display and debugging only. A scanner with a clock set to 1970 can still sync correctly.
+3. **"Two warehouses both go offline, and both sell the last unit locally. Now what?"** — They can't sell — selling doesn't happen at warehouses at all. Only the central guard creates reservations, atomically, so the last unit is promised once. If the business demanded offline selling, the honest answer is that no-oversell becomes impossible during a partition; you'd switch to pre-allocated per-warehouse selling pools, accepting that a pool can strand stock.
+4. **"A pick was recorded offline for stock the centre has since sold and shipped. Who wins?"** — Reality wins, and the system must surface it: at fulfilment/sync, the pick cannot be satisfied from that location — it becomes an exception task (pick from elsewhere, or escalate). The event is still recorded (the physical action happened), the count goes negative-flagged, and reconciliation investigates. Hiding it by clamping to zero is how drift becomes permanent.
+5. **"Why not just give every warehouse a real-time connection and skip all this?"** — Because the premise is that the physics don't allow it: cold storage and metal racking kill signal. A design that requires connectivity the building can't provide fails every shift. Offline-first with honest sync beats online-only with daily workarounds on paper spreadsheets — which then never reconcile at all.
+6. **"How do you rebuild the central stock DB after a bug corrupts it?"** — Replay the event log: load the last snapshot, re-apply events after it through the same idempotent apply path, and diff against the corrupted DB to understand the bug's blast radius before switching over. The log being the source of truth is what makes this a procedure instead of a disaster.
+7. **"A scanner syncs the same batch three times after a flaky connection. Stock impact?"** — None. Every event ID is claimed once in the applied-events table inside the same transaction as the stock change; deliveries two and three insert nothing and skip. The batch is acknowledged idempotently, so the edge can safely resend until it hears back.
+8. **"When is a full CRDT actually the right answer here, then?"** — If there were no centre at all — warehouses must converge peer-to-peer, indefinitely, with no authority — a PN-counter-style CRDT per stock record is exactly right for the *counting*. You'd still have to give up hard oversell prevention, or rebuild a consensus/authority layer for selling. CRDTs solve convergence; they were never the tool for allocation guarantees.
+9. **"Your version vectors grow with every device. Does that blow up?"** — Vectors are per stock record and keyed by writer (device or warehouse edge). In practice a record is touched by a handful of writers — one warehouse's devices — so vectors stay tiny. If a record genuinely had thousands of writers, you'd compact by aggregating at the warehouse edge: the edge becomes the single writer identity per warehouse, bounding the vector by warehouse count.
+10. **"How do you know the system count matches physical reality — not just that all replicas agree?"** — Agreement is not accuracy: all replicas can converge on a wrong number if a receive was never scanned. That's what cycle-count reconciliation is for — rotating physical recounts, variance tracking, and labelled correction events. Convergence is a systems property; accuracy is an operational discipline the system must support and measure.
+
+## 16. Interview-ready spoken answer
+
+> "First, the requirements I'd pin down: scanners offline for hours in three warehouses, sync that can't lose or double-apply work, one converged count per SKU per location, conflicts resolved by rule rather than arrival order, and a hard guarantee — no overselling. The clarifications that matter most are whether updates are deltas or absolute counts, and whether selling needs the exact count or just a safe availability answer, because those two split the problem in half.
+>
+> The bottleneck isn't throughput — scan volumes are human-scale. It's correctness under concurrency with untrustworthy clocks. So the architecture is offline-first: scanners record immutable delta events with unique IDs into a durable local outbox on a per-warehouse edge node, and sync when they can. Events land in a central log partitioned by SKU and warehouse, and a conflict engine applies them to a central stock database.
+>
+> The data flow handles most concurrency by construction: deltas commute, so a receive in one warehouse and a pick in another just add up in any order. Each stock record carries a version vector, so the engine can tell a causally-newer update from a truly concurrent one. Only concurrent non-commuting updates — two absolute counts of the same shelf — become conflicts: flagged, sold from the lower number, and turned into a human recount task. Nothing is ever resolved by last-write-wins, because scanner clocks and sync order say nothing about what actually happened.
+>
+> On reliability: sync is at-least-once, application is idempotent on the event ID inside the same transaction as the stock change, and the edge keeps its outbox until the centre confirms application, so crashes and retries can't lose or double-count. The stock database can be rebuilt by replaying the log.
+>
+> Scaling is partitions and consumers; the honest constraint at 10x is humans — conflicts end in recounts — so the design invests in preventing concurrency through zone ownership and scanner warnings, not just resolving it.
+>
+> The trade-off I'd flag: counting is eventually consistent and distributed, selling is strongly consistent and centralised, and that split is deliberate. Warehouses can count offline forever, but only the central guard can promise stock, with an atomic decrement — and if the centre is unreachable, we fail closed and stop selling rather than oversell. The system gives exactly-once effects on the count, not exactly-once delivery — and convergence of counts, never oversell, and physical accuracy via cycle counts are three separate guarantees from three separate mechanisms."
+
+## 17. Mock interview mode
+
+**Five hard follow-ups, with expected answers**
+
+1. **"Your delta events commute — until a manager does a stock adjustment in the admin panel as an absolute 'set to 500'. Reconcile that with your design."** — Expected: an absolute set is a non-commuting operation and must be handled as one: it is recorded as an event carrying the version vector it was based on; if concurrent deltas have landed since that base, the set does not silently win — it either converts to an adjustment computed against the current state with human confirmation, or raises a conflict. The rule is "absolute operations must name their base", which is what makes their concurrency detectable.
+2. **"During a network partition, Warehouse A's local view says 20, the centre says 5. A worker picks 15 against the local view. Walk me through the consequences."** — Expected: the picks are recorded (physical truth), sync applies them, the centre's count goes to −10 and flags immediately; selling was never based on the local view, so no customer was promised those 15; the negative flag triggers investigation — the centre's 5 was itself probably wrong (a missed receive), which reconciliation then proves and corrects with a labelled event. The design contains the error instead of denying it can happen.
+3. **"Convince me version vectors beat a single central sequence number for ordering."** — Expected: a central sequence orders events by *arrival at the centre*, which is sync order, not causality — it cannot distinguish "B saw A's update then acted" from "B acted concurrently", and that distinction is exactly what decides merge-vs-conflict. If all events flowed through the centre in real time, a central sequence would suffice — but offline working is precisely the case where they don't.
+4. **"The business says fail-closed on selling is unacceptable — the storefront must keep selling during a centre outage. What do you offer?"** — Expected: pre-allocated selling pools: each channel/warehouse gets a bounded stock allocation it may sell from while partitioned, sized so total allocations never exceed physical stock. Oversell stays impossible, availability drops (pools strand stock, and a sold-out pool can't borrow), and sync reconciles pools afterwards. Name the cost honestly: utilisation and complexity, in exchange for partition-tolerant selling.
+5. **"Reconciliation keeps finding Warehouse B is short by ~1% every week, always small, never zero. Your move?"** — Expected: that's not a sync bug — sync bugs are bursty and correlate with outages; a steady 1% shrink is process or shrinkage (mis-picks, damage unrecorded, theft). The system's job is to make it visible per SKU/location with event-level traceability; the fix is operational (pick verification, double-scan on high-value SKUs, targeted cycle counts). A senior candidate resists "fixing" it in the merge logic.
+
+**Common candidate mistakes**
+
+- Reaching for last-write-wins with timestamps — on devices whose clocks can't be trusted.
+- Syncing absolute counts and then wondering why conflicts are unmergeable.
+- Claiming a CRDT (or eventual consistency generally) prevents oversell.
+- Letting the storefront read the same eventually consistent count the warehouses write.
+- No idempotency on sync, so the first flaky connection double-applies a morning's receives.
+- Treating reconciliation as out of scope — replicas agreeing is not the same as the count being right.
+
+**What a senior candidate mentions unprompted**
+
+- Delta events as the move that dissolves most conflicts before they exist.
+- Why "latest" is meaningless without causality: version vectors vs wall clocks.
+- The counting/selling split: eventual consistency for one, a central atomic authority for the other.
+- Fail-closed selling during a centre outage, stated as a business trade-off, not a bug.
+- Cycle-count reconciliation as the ground-truth mechanism; convergence ≠ accuracy.
+- Lost-scanner honesty: unsynced work on a destroyed device is gone, and reconciliation is the net that catches it.
+
+**Scoring rubric (out of 10)**
+
+| Score | What it looks like |
+|---|---|
+| 9–10 | Offline-first delta-event design, version vectors used precisely (causal vs concurrent), LWW failure explained with a concrete case, counting/selling consistency split with an atomic central guard, idempotent sync, reconciliation as ground truth |
+| 7–8 | Sound event-sync design with dedup and some conflict handling, but the oversell path or the absolute-count case is shaky |
+| 5–6 | Components named (queue, sync service, database) but conflicts resolved by timestamps and the storefront reads the same stale count |
+| 3–4 | Assumes connectivity, or a single shared database the scanners write to directly |
+| 0–2 | Last-write-wins presented as correct, or claims eventual consistency prevents overselling |
+
+Sources: [Apache Kafka documentation — delivery semantics and design](https://kafka.apache.org/documentation/) · [PostgreSQL documentation — transaction isolation and atomic UPDATE](https://www.postgresql.org/docs/current/transaction-iso.html) · [Shapiro et al. — Conflict-free Replicated Data Types (INRIA research report)](https://inria.hal.science/inria-00609399) · [Terry et al. / Bayou — version vectors and eventual consistency background, via the Dynamo paper (Amazon)](https://www.allthingsdistributed.com/files/amazon-dynamo-sosp2007.pdf)

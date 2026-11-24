@@ -1,0 +1,263 @@
+---
+title: "Scenario — Syncing 2,000 Stores Under a Strict API Rate Limit"
+track: "system-design"
+kind: "notes"
+order: 62
+slug: "scenario-rate-limited-api-sync"
+updated: 2026-11-24
+description: "A scenario-based interview problem: keep orders and inventory for 2,000 marketplace stores in sync when the API allows only 40 requests/minute per store token, including a 500 GB historical backfill, 429 handling and per-tenant fairness."
+---
+
+import Callout from '../../components/Callout.astro';
+import Mermaid from '../../components/Mermaid.astro';
+import ArchDiagram from '../../components/ArchDiagram.astro';
+
+Part of the [system design](/prep/system-design) series. See also the [rate limiter](/prep/system-design/rate-limiter) page — this scenario is about living under someone else's limit, not building one. This is a **scenario** page: the problem as an interviewer states it, then a full worked solution. **Level 2 — Senior engineer.**
+
+> **Original practice scenario** — written for interview preparation; not a question from any specific company's interview.
+
+## 1. The problem statement
+
+Nothing in this section is the solution.
+
+> "We sell a dashboard for sellers on a large marketplace. A seller connects their store, and we continuously sync their **orders and inventory** into our system so the dashboard is current.
+>
+> We now have **2,000 connected stores**, and the marketplace API has hard limits: **40 requests per minute per store token**, and a **global cap across all our tokens** that the marketplace enforces on our app as a whole. If we exceed limits, the API returns **429s**, and repeated abuse can get our app throttled or suspended — which would break sync for every customer at once.
+>
+> Two kinds of sync are needed. When a store first connects, we must **backfill roughly 500 GB of historical orders and inventory** across all stores. After that, **incremental sync must keep every store's data less than 15 minutes stale**.
+>
+> Design the sync system: scheduling, rate limiting, retries, backfill, and how you keep it fair — one huge store must not be able to starve 1,999 small ones."
+
+**Functional requirements**
+
+- Continuously sync orders and inventory for 2,000 stores via a third-party API.
+- Initial historical backfill per store (~500 GB in aggregate) without breaking live sync.
+- Incremental sync keeping data under 15 minutes stale for every store.
+- Respect per-token and global rate limits; handle 429s gracefully.
+
+**Non-functional requirements**
+
+- Never get the app suspended: staying under the limit is a hard constraint, not a target to average out.
+- Fairness: every store makes progress; no tenant can monopolise the shared global budget.
+- Crash-safe: a worker dying mid-sync must not lose or corrupt a store's data, and must not restart the sync from zero.
+- Observable per store: you can answer "how stale is store X, and why?" at any moment.
+
+## 2. Clarifying questions to ask first
+
+| Question | Why it matters |
+|---|---|
+| What does one API response page contain, and can we filter by "modified since"? | Incremental sync is only feasible if the API supports a `since` filter or change feed. Without it, you are re-fetching everything and the maths collapses — surfacing that is the point of the question. |
+| What exactly is the global cap, and how is it measured (per second? per minute? leaky bucket)? | The global cap, not the per-store cap, is usually the binding constraint. You cannot budget what you have not quantified. |
+| Does the API send `Retry-After` headers or a token-bucket allowance in response headers? | It decides whether 429 handling is guided (wait exactly this long) or blind (exponential backoff). |
+| Does the marketplace offer webhooks or a bulk/export API for history? | Many marketplaces do — and using the bulk export for backfill instead of the paginated API is often the single best design decision available. |
+| How much data changes per store per 15 minutes, typically and at peak (sale events)? | This is the feasibility arithmetic: change volume per window vs the request budget. Peak, not average, decides whether the 15-minute SLA is even possible for the largest stores. |
+| What does "stale" mean exactly — last successful sync completion, or data modified-time coverage? | Defines the metric you will monitor and alert on. |
+| Are all stores equal, or do paying tiers get fresher data? | Fairness is a policy decision before it is an algorithm: strict round-robin vs weighted by tier or store size. |
+
+**Do the arithmetic early — interviewers reward it.** Per store: 40 requests/min. If one request returns a page of 100 orders, one store can pull 4,000 orders/min — plenty for incremental changes at almost any realistic store size. The global picture is different: if the global cap were, say, 10,000 requests/min across the app, then 2,000 stores syncing every 15 minutes get an average budget of 75 requests per store per sync cycle (10,000 × 15 ÷ 2,000). Comfortable for incremental, hopeless for backfill — which is exactly why backfill must be a separate, lower-priority, budget-capped lane. Stating this maths unprompted is a senior signal.
+
+## 3. The solution, in plain language first
+
+Simple version: never let a worker decide on its own when to call the API. A central **rate-limit governor** holds token buckets — one per store, one global — and a worker must take a token before every single call. A scheduler enqueues sync jobs per store; a fair queue hands jobs to workers so every store gets its turn. Workers fetch a page, save it, record a **cursor** saying "this store is synced up to here", and only then move on — so a crash just resumes from the cursor. Backfill runs through the same machinery but in a separate, low-priority lane with its own capped share of the budget, so history can never starve live sync. When the API says 429, the worker believes it: it reads `Retry-After`, backs off, and the governor temporarily lowers that store's rate.
+
+## 4. Architecture
+
+<ArchDiagram src="scenario-rate-limited-api-sync/architecture" caption="Rate-limited multi-store API sync architecture" />
+
+
+**Component by component**
+
+- **Scheduler.** Emits sync jobs: an incremental job per store on a cadence matched to the staleness SLA (for example every 10 minutes against a 15-minute SLA, leaving retry headroom), plus backfill jobs when a store connects. Jobs carry a priority: incremental outranks backfill, always.
+- **Fair job queue.** Per-tenant lanes with weighted round-robin dispatch. A store with a million historical orders gets more than a store with a hundred — weighted by backlog — but the round-robin structure guarantees every lane is served; nobody's share is zero. A single global FIFO queue fails this requirement: whoever enqueues the most jobs wins.
+- **Rate-limit governor.** The heart of the design. Token buckets in Redis (atomic take via a Lua script or a single-threaded command): one bucket per store token refilling at 40/min, one global bucket refilling at the app cap. A worker must acquire **both** tokens before a call. If either bucket is empty, the worker waits (or re-queues the job with a delay) instead of calling and eating a 429.
+- **Sync workers.** Stateless and horizontally scaled. Loop: lease a job → take tokens → fetch a page → land it in staging → upsert into the main DB → advance the cursor → repeat until caught up. Worker count is almost irrelevant to throughput — the token buckets are the throughput — which is a feature: you cannot accidentally out-scale the limit.
+- **Staging + main DB.** Raw pages land in staging first, then merge into the orders/inventory tables with idempotent upserts keyed on `(store_id, external_id)`. Overlapping pages and re-fetched windows are therefore harmless.
+- **Checkpoint store.** One row per store per resource: the cursor (last `modified_since` watermark or page token) and the timestamp of the last successful sync — which is also your staleness metric.
+- **Dead-letter queue.** Jobs that exhaust retries land here with their error history, for inspection and manual or scheduled replay — separated by cause (a store that revoked its token should not be retried forever next to a store that had a transient 500).
+
+## 5. End-to-end data flow
+
+**Incremental sync (steady state)**
+
+1. Scheduler enqueues "sync orders for store S" (high priority).
+2. A worker leases it, reads store S's cursor: `modified_since = 10:00`.
+3. Worker takes a per-store token and a global token from the governor, then calls the API for orders modified since 10:00, page 1.
+4. Page lands in staging; upsert into the orders table; **only after the commit succeeds**, the worker fetches page 2 (tokens again) — and so on to the last page.
+5. After the final page commits, the cursor advances to the sync's start time (not the end time — see the checkpointing section for why), and the store's staleness clock resets.
+
+**Backfill (store just connected)**
+
+1. If the marketplace offers a bulk export, request it and ingest the files directly — bypassing the paginated API entirely for history.
+2. Otherwise, the backfill is chunked into small jobs (one job per date range, for example per day of history) in the low-priority lane, capped at a fixed share of the global budget (say 20%), so it trickles for hours or days without touching the incremental lane's budget.
+3. Backfill and incremental overlap safely: both write through the same idempotent upsert, so an order fetched by both appears once.
+
+**429 handling, step by step**
+
+1. Worker receives 429. It reads `Retry-After` if present; otherwise it backs off exponentially with jitter.
+2. It reports the 429 to the governor, which temporarily drains/shrinks that store's bucket (and the global bucket if the 429 was global) — the system's model of the limit adapts to the API's actual behaviour, because documented limits and enforced limits are not always the same.
+3. The job is re-queued with a delay, not retried in a hot loop. Repeated 429s across many stores trip a circuit breaker: all workers pause briefly rather than hammering a struggling API and risking suspension.
+
+## 6. Technology choices, and why
+
+| Decision | Choice | Why | Alternative considered |
+|---|---|---|---|
+| Rate limiting | Centralised token buckets in Redis, checked before every call | One authority for a shared budget; atomic take operations; buckets model both the per-store and global caps directly | Per-worker in-memory limits — each worker knows only its own usage, so N workers overshoot by N times. The classic failure in this problem |
+| Scheduling / queue | Queue with per-tenant lanes + weighted round-robin (or a priority queue with tenant fairness in the dispatcher) | Fairness is structural, not hoped for | One FIFO queue (starvation), or cron-per-store (2,000 cron jobs, no global coordination, thundering herds) |
+| Sync state | Cursor per store per resource in a relational store | Tiny, critical, transactional with the data it describes | Storing cursors in the queue/job payload — a lost or duplicated job then corrupts your picture of what is synced |
+| Writes | Staging + idempotent upsert on `(store_id, external_id)` | Re-fetching an overlapping window is the normal recovery move; upserts make it safe | Insert-only writes with "careful" checkpointing — the first crash creates duplicates you must then clean by hand |
+| Backfill transport | Marketplace bulk export if offered, else chunked API jobs in a capped lane | Keeps ~500 GB of history off the scarce request budget | Running backfill through the same priority as incremental — the day a big store connects, everyone's SLA dies |
+
+**Batch vs streaming.** This is scheduled micro-batch by nature: each sync is a small batch over a `since` window. True streaming would require the marketplace to push changes (webhooks) — if it offers them, take them as a latency optimisation for the hottest stores, but keep the polling sync as the correctness backbone, because webhooks get lost and the cursor-based pull is self-healing.
+
+## 7. Partitioning and parallelism
+
+- Work is partitioned by store — the natural tenant boundary. Different stores sync fully in parallel (subject to the global bucket); one store's sync is largely serial page-by-page, because page N's cursor depends on page N−1 having committed.
+- Parallelism inside one huge store: split by resource (orders and inventory are independent cursors) or by disjoint date ranges during backfill, merging into the same upsert. Do not parallelise pages of one `since` window blindly — page tokens are usually sequential.
+- Worker scaling: add workers for CPU/IO headroom, but repeat the mantra — throughput is set by tokens, not workers.
+
+## 8. Storage strategy
+
+- **Staging** holds raw API pages briefly (days) — invaluable when a parsing bug means you must re-merge without re-spending API budget.
+- **Main DB** holds current orders/inventory, keyed and indexed by `(store_id, external_id)` and modification time. Historical backfill lands in the same tables, partitioned by store or month if volume demands.
+- **Checkpoint store** is small and precious: back it up like it is money, because losing cursors means re-syncing 2,000 stores from scratch — within the same rate limits. That is a very bad week.
+
+## 9. Deduplication and idempotency, with a worked example
+
+Sync jobs are retried, pages are re-fetched, backfill overlaps incremental — duplicates are guaranteed. The defence is the same as everywhere in this series: a stable natural key and an idempotent write. Here the key is the marketplace's own ID for the order, scoped by store:
+
+```sql
+-- Idempotent upsert: re-fetching the same order updates it, never duplicates it.
+INSERT INTO orders (store_id, external_id, status, total, modified_at, payload)
+VALUES ($1, $2, $3, $4, $5, $6)
+ON CONFLICT (store_id, external_id)
+DO UPDATE SET status = EXCLUDED.status,
+              total = EXCLUDED.total,
+              modified_at = EXCLUDED.modified_at,
+              payload = EXCLUDED.payload
+WHERE orders.modified_at <= EXCLUDED.modified_at;
+```
+
+The `WHERE` clause matters: it stops a stale page (fetched earlier, merged late) from overwriting fresher data — last-writer-wins by the source's modification time, not by arrival time.
+
+And the governor's token take, which must be atomic or two workers can both take the "last" token:
+
+```python
+# Redis token bucket take (Lua script in production, so check-and-take is atomic):
+def take_token(bucket, rate_per_min, now):
+    tokens, last = redis.hmget(bucket, "tokens", "ts")
+    tokens = min(rate_per_min, float(tokens) + (now - float(last)) * rate_per_min / 60)
+    if tokens < 1:
+        return False                      # caller waits or re-queues; never calls the API
+    redis.hmset(bucket, {"tokens": tokens - 1, "ts": now})
+    return True
+
+def can_call_api(store_id):
+    return take_token(f"rl:store:{store_id}", 40, time.time()) \
+       and take_token("rl:global", GLOBAL_RATE_PER_MIN, time.time())
+```
+
+## 10. Retry, failure handling, checkpointing and recovery
+
+- **Retries:** exponential backoff with jitter for 5xx and network errors; `Retry-After`-driven waits for 429s; a retry budget per job, after which the job goes to the DLQ rather than retrying forever.
+- **Checkpointing rule:** the cursor advances **only after the page's data is committed**, and an incremental window's cursor is set to the time the sync *started*, not when it finished. Advancing to finish time creates a gap: orders modified while you were fetching pages 1–9 would be skipped forever. Overlapping windows are safe (upserts), gaps are not — always choose overlap.
+- **Worker crash mid-page:** the page was not committed, the cursor did not move, the job is re-leased after a visibility timeout and re-fetches the page. Tokens were spent; correctness was not.
+- **Token revoked / store disconnected:** the API returns 401/403. That job class goes straight to a "needs reconnect" state — no retries, customer notified. Retrying a dead token wastes global budget.
+- **API outage:** circuit breaker opens on a high 429/5xx rate; workers pause, jobs accumulate harmlessly in the queue, staleness alerts fire honestly, and sync drains in priority order when the API recovers.
+
+## 11. Monitoring and observability
+
+- **Per-store staleness**: now minus last-successful-sync, per store — the SLA metric, with alerts as a store approaches 15 minutes.
+- **Budget utilisation**: token consumption vs both caps; sustained near-100% global utilisation means the SLA is living on borrowed time as stores are added.
+- **429 rate** per store and global — the early-warning signal for suspension risk.
+- **Fairness view**: sync completions and staleness distribution across stores (worst-store staleness matters more than the average).
+- DLQ depth by cause; backfill progress per store; cursor lag per resource type.
+
+## 12. Security
+
+- Store tokens are credentials: encrypted at rest (KMS-backed), decrypted only in the worker at call time, never logged, never present in job payloads (jobs carry the store ID; workers fetch the token from the vault).
+- Least privilege: request only the API scopes sync needs (read orders/inventory).
+- Tenant isolation: every query and upsert is scoped by `store_id`; a bug that mixes two sellers' orders is a trust-destroying incident, so the scoping lives in the data layer, not in callers' good intentions.
+
+## 13. Scalability, the 10x question, and cost
+
+**At 10x (20,000 stores):** the architecture survives, the budget maths gets tight — and saying so is the correct answer. The global cap becomes the system: you respond by (a) negotiating a higher app cap with the marketplace, showing your governor and 429 stats as evidence you are a good citizen; (b) tightening efficiency — wider pages, `since` filters everywhere, syncing quiet stores less often (adaptive cadence: a store with no changes in a day does not need a 10-minute cadence); (c) adopting webhooks for change notification if offered, so polling becomes reconciliation rather than discovery. The governor, fair queue and cursor machinery do not change at all.
+
+**Cost:** worker compute is minor; the real costs are database storage for 500 GB+ of history (partition and tier it) and engineering time. The expensive failure mode is not infrastructure — it is app suspension, which is why the governor exists.
+
+## 14. Trade-offs, stated honestly
+
+| Choice | You gain | You pay |
+|---|---|---|
+| Central governor consulted on every call | The limit is never overshot by accident; suspension risk is engineered down | A Redis dependency on the hot path and a small latency per call; if the governor is down, sync must fail closed (pause) rather than call blind |
+| Polling with cursors (vs webhooks only) | Self-healing, complete, simple to reason about | Up to one cadence of inherent staleness; request budget spent on "nothing changed" responses |
+| Backfill in a capped low-priority lane | Live SLA is protected when big stores connect | Backfill takes hours to days; sales must set that expectation at onboarding |
+| Overlap-safe windows (cursor = sync start) | No gaps, ever | Some orders are fetched twice; you pay a little budget for correctness |
+
+<Callout type="warn">
+On delivery semantics: this system is a pull-based synchroniser, so the at-least-once question appears as "pages and jobs will be executed more than once". There is no exactly-once fetch of a remote API page — a timeout can mean "the API processed it and the response was lost". The design's answer is the same as in the other scenarios: assume re-execution, make the write idempotent (the upsert), and make progress resumable (the cursor). Exactly-once *effects* in your database, honestly labelled.
+</Callout>
+
+## 15. Interviewer follow-up Q&As
+
+1. **"What happens if a worker crashes mid-sync?"** — The uncommitted page is re-fetched on job re-lease; the cursor never moved past uncommitted data, so nothing is lost and the upsert makes the overlap harmless.
+2. **"How do you prevent duplicate records when pages overlap?"** — Upsert on `(store_id, external_id)` with a modification-time guard, so a re-fetched or stale page cannot duplicate or regress a record.
+3. **"One store has 50x the orders of the median store. How is this fair?"** — Weighted round-robin lanes: it receives a larger share because its backlog is larger, but the lane structure caps its share and guarantees every other store a turn; incremental jobs for all stores outrank its backfill.
+4. **"The API starts returning 429s even though you are under the documented limit. What do you do?"** — Believe the API, not the docs: honour `Retry-After`, let the governor adaptively shrink the effective rate, open the circuit breaker if it is widespread, and use the logged evidence when raising it with the marketplace.
+5. **"How do you handle backpressure?"** — The queue is the buffer and the token buckets are the throttle: jobs accumulate visibly, staleness metrics show the cost, and dispatch order (incremental before backfill, worst-staleness first) decides who feels it least unfairly.
+6. **"Why not just add more workers to sync faster?"** — Because throughput is capped by tokens, not workers. More workers only increase contention for the same buckets — and in a naive design without a governor, they are precisely how you get suspended.
+7. **"How do you guarantee no store's changes are missed?"** — Cursor discipline: windows overlap by construction (cursor set to sync start, advanced only after commit), plus a periodic full-reconciliation pass per store (a slow, low-priority sweep comparing counts/checksums per day) that catches any residual gap.
+8. **"The global cap drops by half tomorrow (marketplace policy change). What breaks?"** — Nothing structurally; the governor's global bucket is configuration. The SLA conversation changes: adaptive cadence for quiet stores and webhook adoption move from optimisation to necessity, and you can show exactly which stores would breach 15 minutes, from your staleness data.
+9. **"How do you prioritise when the API recovers from a 2-hour outage?"** — Drain by staleness: most-stale stores first, incremental before backfill, so the worst SLA breaches heal first instead of first-come-first-served.
+10. **"Where does the 500 GB backfill actually go, and how long does it take?"** — Ideally through the marketplace's bulk export into staging files, merged by the same upsert. Via the API at a 20% budget share it is a days-long trickle — do that maths in the interview rather than promising an hour.
+11. **"How do you test this without hitting the real API?"** — A fake marketplace server that enforces the same limits and injects 429s, token revocations and overlapping pages; the governor and cursor logic are exactly the parts that must be proven before production finds the edge cases.
+
+## 16. Interview-ready spoken answer
+
+> "Let me start with the arithmetic, because it shapes everything: per store, 40 requests a minute is generous for incremental changes; the binding constraint is the global cap shared by 2,000 stores, and the hard rule is that exceeding limits risks suspension for every customer at once. So my first design principle is that no worker ever calls the API on its own judgement.
+>
+> The architecture: a scheduler enqueues a sync job per store per resource. Jobs sit in per-tenant lanes dispatched by weighted round-robin, so fairness is structural. Workers lease a job and, before every API call, take two tokens from a central governor in Redis — one from the store's bucket at 40 a minute, one from the global bucket. No token, no call; the job waits instead of eating a 429.
+>
+> The data flow per sync: read the store's cursor, fetch pages of changes since that cursor, land each page, upsert it into our database keyed by store and the marketplace's order ID, and advance the cursor only after the commit — and set it to when the sync started, not finished, so windows overlap instead of gapping. Overlaps are safe because the upsert is idempotent; gaps would be silent data loss.
+>
+> Backfill is a separate, low-priority lane capped at a fixed slice of the global budget — or better, the marketplace's bulk export if one exists — so a big store connecting never starves live sync. For failures: 429s are believed, `Retry-After` is honoured, the governor adapts the effective rate down, and a circuit breaker pauses everything if the API is struggling. Worker crashes just re-lease the job from the last cursor.
+>
+> The trade-off I'll name: I am spending some budget on polling that finds nothing, and backfill is slow by design. What I get for that is a system that cannot overshoot the limit by accident, treats every store fairly, and can prove per-store staleness at any moment."
+
+## 17. Mock interview mode
+
+**Five hard follow-ups, with expected answers**
+
+1. **"Your governor is in Redis and Redis dies. What happens to sync?"** — Expected: fail closed. Workers cannot take tokens, so they pause rather than call the API ungoverned; sync stalls, staleness alerts fire, nothing gets suspended. Anyone who says "fail open, keep syncing" has optimised for the wrong disaster.
+2. **"Show me the SLA is actually achievable for the biggest store during its sale day."** — Expected: reach for the numbers — changes per 15 minutes at peak × pages per change-batch vs 40 requests/min and the store's fair share of the global budget. If the maths fails, say so and name the levers (webhooks, negotiated cap, relaxed SLA for extreme peaks) instead of bluffing.
+3. **"A store's sync has been 'succeeding' for a week but its dashboard is missing orders. How?"** — Expected: cursor advanced past uncommitted or filtered-out data — for example the cursor set to sync *end* time, or a `since` filter mismatch (timezone, modification vs creation time). The periodic reconciliation sweep exists to catch exactly this class.
+4. **"Why weighted round-robin and not strict priority by store size?"** — Expected: strict priority starves the tail whenever big stores are busy, which is always. Weighted round-robin bounds every store's wait while still giving large backlogs more throughput.
+5. **"The marketplace offers webhooks tomorrow. Redesign?"** — Expected: adopt them as the fast path for freshness, keep polling as the backbone: webhooks have no delivery guarantee you control, cursors make polling self-healing, and the webhook handler just triggers an out-of-cycle incremental job through the same governor and queue.
+
+**Common candidate mistakes**
+
+- Rate limiting per worker, in memory — overshooting the global cap by the worker count.
+- Retrying 429s immediately, or ignoring `Retry-After`.
+- Advancing the cursor before the data commits (or to the sync's end time), creating silent gaps.
+- Running backfill at the same priority as incremental sync.
+- No fairness story: one queue, biggest tenant wins.
+- Treating "add more workers" as the scaling answer for a rate-limited API.
+
+**What a senior candidate mentions unprompted**
+
+- The budget arithmetic, per store and global, before drawing boxes.
+- Fail-closed behaviour when the governor is unavailable.
+- Cursor = sync start time, advanced only after commit.
+- Adaptive cadence and budget-share caps for backfill.
+- Per-store staleness as the headline metric, worst-store rather than average.
+
+**Scoring rubric (out of 10)**
+
+| Score | What it looks like |
+|---|---|
+| 9–10 | Budget maths up front, central governor, fair lanes, cursor discipline, backfill isolated, 429s treated as information, honest 10x answer |
+| 7–8 | Governor and cursors right, but fairness or backfill isolation vague |
+| 5–6 | Mentions rate limiting and retries, but limiting is per-worker or backoff is hand-waved |
+| 3–4 | Scheduler plus workers with no global coordination; cursor advanced casually |
+| 0–2 | "Call the API in a loop and retry on failure" — a suspension waiting to happen |
+
+Sources: [IETF RFC 6585 — HTTP 429 Too Many Requests](https://www.rfc-editor.org/rfc/rfc6585) · [AWS Architecture Blog — timeouts, retries and backoff with jitter](https://aws.amazon.com/blogs/architecture/exponential-backoff-and-jitter/) · [Redis documentation — rate limiting / token bucket patterns](https://redis.io/docs/latest/develop/use-cases/rate-limiter/)

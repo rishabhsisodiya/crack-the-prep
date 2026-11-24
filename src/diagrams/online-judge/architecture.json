@@ -1,0 +1,164 @@
+{
+  "meta": {
+    "title": "Online Judge \u2014 Queued, Sandboxed Execution",
+    "output": ".archify/build/online-judge/architecture.html",
+    "quality_profile": "showcase"
+  },
+  "components": [
+    {
+      "id": "u",
+      "type": "frontend",
+      "label": "Browser Editor",
+      "sublabel": "writes + submits code"
+    },
+    {
+      "id": "api",
+      "type": "backend",
+      "label": "Submission API",
+      "sublabel": "accepts submissions"
+    },
+    {
+      "id": "db",
+      "type": "database",
+      "label": "Submissions DB",
+      "sublabel": "code + verdicts"
+    },
+    {
+      "id": "q",
+      "type": "messagebus",
+      "label": "Priority Queue",
+      "sublabel": "contest \u00b7 submit \u00b7 run"
+    },
+    {
+      "id": "rn",
+      "type": "backend",
+      "label": "Runner Fleet",
+      "sublabel": "autoscaled on queue depth"
+    },
+    {
+      "id": "sb",
+      "type": "security",
+      "label": "Sandbox",
+      "sublabel": "container / microVM per submission"
+    },
+    {
+      "id": "ts",
+      "type": "database",
+      "label": "Test Cases",
+      "sublabel": "object storage, cached on runners"
+    },
+    {
+      "id": "pub",
+      "type": "messagebus",
+      "label": "Result Pub/Sub",
+      "sublabel": "verdict events"
+    },
+    {
+      "id": "lb",
+      "type": "backend",
+      "label": "Contest Scoring Service",
+      "sublabel": "ranks contestants"
+    },
+    {
+      "id": "rz",
+      "type": "database",
+      "label": "Redis Sorted Set",
+      "sublabel": "leaderboard"
+    }
+  ],
+  "connections": [
+    {
+      "id": "u-a",
+      "from": "u",
+      "to": "api",
+      "label": "submit code"
+    },
+    {
+      "id": "a-d",
+      "from": "api",
+      "to": "db",
+      "label": "persist submission"
+    },
+    {
+      "id": "a-q",
+      "from": "api",
+      "to": "q",
+      "label": "enqueue job",
+      "variant": "emphasis"
+    },
+    {
+      "id": "q-r",
+      "from": "q",
+      "to": "rn",
+      "label": "dispatch job"
+    },
+    {
+      "id": "r-s",
+      "from": "rn",
+      "to": "sb",
+      "label": "execute in sandbox",
+      "variant": "emphasis"
+    },
+    {
+      "id": "t-r",
+      "from": "ts",
+      "to": "rn",
+      "label": "fetch test cases"
+    },
+    {
+      "id": "r-d",
+      "from": "rn",
+      "to": "db",
+      "label": "verdict + stats"
+    },
+    {
+      "id": "r-p",
+      "from": "rn",
+      "to": "pub",
+      "label": "publish result",
+      "variant": "dashed"
+    },
+    {
+      "id": "p-u",
+      "from": "pub",
+      "to": "u",
+      "label": "WebSocket / poll result",
+      "variant": "dashed"
+    },
+    {
+      "id": "r-l",
+      "from": "rn",
+      "to": "lb",
+      "label": "contest results"
+    },
+    {
+      "id": "l-z",
+      "from": "lb",
+      "to": "rz",
+      "label": "update leaderboard"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "rose",
+      "title": "Isolation",
+      "items": [
+        "Untrusted code only ever runs inside a per-submission sandbox (container/microVM) with strict limits",
+        "Submissions are persisted and queued by priority before any runner touches them"
+      ]
+    },
+    {
+      "dot": "cyan",
+      "title": "Feedback loop",
+      "items": [
+        "Runners autoscale on queue depth, write the verdict back, and push it over pub/sub to the browser",
+        "Contest results flow to the scoring service and the Redis leaderboard"
+      ]
+    }
+  ],
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "layout": {
+    "mode": "auto"
+  }
+}

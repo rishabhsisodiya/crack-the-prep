@@ -1,0 +1,236 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Food Delivery \u2014 Discovery, Orders, Dispatch and Tracking",
+    "output": ".archify/build/food-delivery/architecture-1.html",
+    "quality_profile": "showcase"
+  },
+  "layout": {
+    "mode": "auto"
+  },
+  "components": [
+    {
+      "id": "customer",
+      "type": "external",
+      "label": "Customer App",
+      "sublabel": "browse, order, track"
+    },
+    {
+      "id": "restaurant",
+      "type": "external",
+      "label": "Restaurant App",
+      "sublabel": "accept, prepare, ready"
+    },
+    {
+      "id": "rider",
+      "type": "external",
+      "label": "Rider App",
+      "sublabel": "offers, pickup, delivery"
+    },
+    {
+      "id": "gw",
+      "type": "backend",
+      "label": "API Gateway",
+      "sublabel": "single entry for three apps"
+    },
+    {
+      "id": "discovery",
+      "type": "backend",
+      "label": "Discovery Service",
+      "sublabel": "restaurants that deliver to me"
+    },
+    {
+      "id": "search",
+      "type": "database",
+      "label": "Search Index",
+      "sublabel": "geo + menu"
+    },
+    {
+      "id": "order",
+      "type": "backend",
+      "label": "Order Service",
+      "sublabel": "owns the order state machine"
+    },
+    {
+      "id": "odb",
+      "type": "database",
+      "label": "Orders DB",
+      "sublabel": "durable order truth"
+    },
+    {
+      "id": "payment",
+      "type": "backend",
+      "label": "Payment Service",
+      "sublabel": "pay on order creation"
+    },
+    {
+      "id": "bus",
+      "type": "messagebus",
+      "label": "Event Bus",
+      "sublabel": "Kafka \u00b7 order events"
+    },
+    {
+      "id": "dispatch",
+      "type": "backend",
+      "label": "Dispatch Service",
+      "sublabel": "timed to food-ready"
+    },
+    {
+      "id": "location",
+      "type": "backend",
+      "label": "Location Service",
+      "sublabel": "rider location pings"
+    },
+    {
+      "id": "riderloc",
+      "type": "database",
+      "label": "Rider Locations",
+      "sublabel": "Redis geo index"
+    },
+    {
+      "id": "eta",
+      "type": "backend",
+      "label": "ETA Service",
+      "sublabel": "prep + travel prediction"
+    },
+    {
+      "id": "notif",
+      "type": "backend",
+      "label": "Notification Service",
+      "sublabel": "order event consumer"
+    },
+    {
+      "id": "tracking",
+      "type": "backend",
+      "label": "Tracking Service",
+      "sublabel": "WebSocket to customer"
+    }
+  ],
+  "connections": [
+    {
+      "id": "cu-gw",
+      "from": "customer",
+      "to": "gw",
+      "label": "browse + order"
+    },
+    {
+      "id": "re-gw",
+      "from": "restaurant",
+      "to": "gw",
+      "label": "order updates"
+    },
+    {
+      "id": "ri-gw",
+      "from": "rider",
+      "to": "gw",
+      "label": "delivery updates"
+    },
+    {
+      "id": "gw-disc",
+      "from": "gw",
+      "to": "discovery",
+      "label": "discovery requests"
+    },
+    {
+      "id": "disc-si",
+      "from": "discovery",
+      "to": "search",
+      "label": "geo + menu lookup"
+    },
+    {
+      "id": "gw-ord",
+      "from": "gw",
+      "to": "order",
+      "label": "place order"
+    },
+    {
+      "id": "ord-odb",
+      "from": "order",
+      "to": "odb",
+      "label": "persist order"
+    },
+    {
+      "id": "ord-pay",
+      "from": "order",
+      "to": "payment",
+      "label": "charge customer"
+    },
+    {
+      "id": "ord-bus",
+      "from": "order",
+      "to": "bus",
+      "label": "publish order events"
+    },
+    {
+      "id": "bus-dsp",
+      "from": "bus",
+      "to": "dispatch",
+      "label": "new order event"
+    },
+    {
+      "id": "ri-loc",
+      "from": "rider",
+      "to": "location",
+      "label": "location pings"
+    },
+    {
+      "id": "loc-lr",
+      "from": "location",
+      "to": "riderloc",
+      "label": "update geo index"
+    },
+    {
+      "id": "dsp-lr",
+      "from": "dispatch",
+      "to": "riderloc",
+      "label": "find nearby riders"
+    },
+    {
+      "id": "dsp-eta",
+      "from": "dispatch",
+      "to": "eta",
+      "label": "ready-time + travel ETA"
+    },
+    {
+      "id": "bus-notif",
+      "from": "bus",
+      "to": "notif",
+      "label": "notify parties",
+      "variant": "dashed"
+    },
+    {
+      "id": "bus-trk",
+      "from": "bus",
+      "to": "tracking",
+      "label": "live tracking updates",
+      "variant": "dashed"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Three parties, one gateway",
+      "items": [
+        "Customer, restaurant and rider apps all enter through the API gateway",
+        "Discovery, orders, dispatch and tracking stay separate services"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Orders drive events",
+      "items": [
+        "Order service persists to the Orders DB and charges via Payment",
+        "Every state change is published to Kafka for dispatch, notifications and tracking"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Dispatch + location",
+      "items": [
+        "Rider pings feed a Redis geo index via the Location service",
+        "Dispatch reads rider locations and ETA predictions to time assignment to food-ready"
+      ]
+    }
+  ]
+}

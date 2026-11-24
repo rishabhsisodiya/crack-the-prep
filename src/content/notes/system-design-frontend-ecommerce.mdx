@@ -10,6 +10,7 @@ description: "Designing the storefront client (Amazon / Flipkart) — rendering 
 
 import Callout from '../../components/Callout.astro';
 import Mermaid from '../../components/Mermaid.astro';
+import ArchDiagram from '../../components/ArchDiagram.astro';
 
 Part of the [system design](/prep/system-design) series. Uses the [frontend framework](/prep/system-design/frontend-system-design). Backend relatives: [Payment System](/prep/system-design/payment-system), [Flash Sale](/prep/system-design/flash-sale), and the no-oversell checkout in the [framework page](/prep/system-design).
 
@@ -34,7 +35,8 @@ Part of the [system design](/prep/system-design) series. Uses the [frontend fram
 | Personalized blocks (recommendations, "recently viewed") | Client-side after main content, or streamed | Can't be cached per user; not critical for LCP |
 | Cart, checkout, account | SSR/CSR without shared caching | Per-user, no SEO value |
 
-<Mermaid caption="The cached product shell is served from the CDN; dynamic and personalized parts load separately" code={`flowchart LR
+<ArchDiagram src="frontend-ecommerce/architecture" caption="The cached product shell is served from the CDN; dynamic and personalized parts load separately">
+<Mermaid code={`flowchart LR
   U[Shopper] --> CDN[CDN edge]
   CDN -->|cached HTML: title, images, description| PDP[Product page shell]
   PDP -->|client or streamed| PR[Price and stock API]
@@ -42,6 +44,7 @@ Part of the [system design](/prep/system-design) series. Uses the [frontend fram
   PDP -->|lazy, below fold| REV[Reviews API]
   PDP --> CART[Cart service]
 `} />
+</ArchDiagram>
 
 The insight: **cache what's shared, fetch what's volatile, defer what's personal.** Keep the cached shell from showing stale price as truth — render a price placeholder of fixed size, or render the cached price and revalidate quickly.
 
