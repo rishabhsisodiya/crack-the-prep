@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "URL Shortener: asymmetric write and read paths",
+    "output": ".archify/build/url-shortener/read-write-paths.html",
+    "quality_profile": "showcase",
+    "locale": "en"
+  },
+  "layout": { "mode": "auto" },
+  "components": [
+    { "id": "creator", "type": "external", "label": "Client: create", "sublabel": "POST /urls", "explanation": "Submits a long URL, with an optional custom alias and expiry, and receives a short code. Roughly 40 writes/sec at 100M new links/month." },
+    { "id": "lb-write", "type": "cloud", "label": "Load Balancer", "sublabel": "write traffic" },
+    { "id": "write-svc", "type": "backend", "label": "Write service", "sublabel": "correctness, uniqueness", "explanation": "Owns correctness and uniqueness of codes. Scales independently of the redirect path." },
+    { "id": "id-gen", "type": "backend", "label": "ID generator", "sublabel": "range-allocated counters", "explanation": "A coordinator leases (start, end) ranges of 1,000-10,000 ids to each app server, which increments locally. One round trip per range instead of per URL; a crashed server only wastes its unused tail." },
+    { "id": "kv", "type": "database", "label": "Key-value store", "sublabel": "code -> long_url", "explanation": "urls(code PK, long_url, created_at, expires_at, owner_id, custom_alias). Every access is a single-key point lookup with no joins: DynamoDB, Cassandra or sharded MySQL keyed by code." },
+    { "id": "clicker", "type": "external", "label": "Client: click code", "sublabel": "GET /:code", "explanation": "The path users feel. Must stay under ~50ms; 4,000+ redirects/sec at a 100:1 read:write ratio." },
+    { "id": "lb-read", "type": "cloud", "label": "Load Balancer", "sublabel": "redirect traffic" },
+    { "id": "redirect-svc", "type": "backend", "label": "Redirect service", "sublabel": "301 or 302", "explanation": "Checks Redis first, falls back to the key-value store on a miss and backfills the cache. 301 is cheaper at scale; 302 is needed when every click must be counted server-side." },
+    { "id": "cache", "type": "database", "label": "Redis cache", "sublabel": "long TTL, >95% hit rate", "explanation": "Click distributions are power-law, so a small set of hot links absorbs most traffic. Long URLs never change, so TTLs can be hours to days." },
+    { "id": "stream", "type": "messagebus", "label": "Kafka / Kinesis", "sublabel": "click events", "explanation": "Carries code, timestamp, referrer and IP-derived geo. Keeps analytics writes off the redirect's critical path." },
+    { "id": "analytics", "type": "backend", "label": "Analytics aggregator", "sublabel": "async counts, geo, referrer" }
+  ],
+  "connections": [
+    { "id": "create-req", "from": "creator", "to": "lb-write", "label": "POST /urls", "variant": "emphasis" },
+    { "id": "lb-to-write", "from": "lb-write", "to": "write-svc" },
+    { "id": "lease-range", "from": "write-svc", "to": "id-gen", "label": "lease id range" },
+    { "id": "store-mapping", "from": "write-svc", "to": "kv", "label": "put code" },
+    { "id": "click-req", "from": "clicker", "to": "lb-read", "label": "GET /:code", "variant": "emphasis" },
+    { "id": "lb-to-redirect", "from": "lb-read", "to": "redirect-svc" },
+    { "id": "cache-lookup", "from": "redirect-svc", "to": "cache", "label": "lookup" },
+    { "id": "cache-miss", "from": "cache", "to": "kv", "label": "miss" },
+    { "id": "click-event", "from": "redirect-svc", "to": "stream", "label": "async click event", "variant": "dashed" },
+    { "id": "aggregate", "from": "stream", "to": "analytics", "label": "consume", "variant": "dashed" }
+  ],
+  "cards": [
+    { "dot": "cyan", "title": "Write path", "items": ["~40 writes/sec: optimise for unique, hard-to-guess codes", "Range-allocated counters avoid a per-request round trip"] },
+    { "dot": "emerald", "title": "Read path", "items": ["100:1 to 1000:1 read:write; spend the scaling budget here", "Redis first, key-value store on a miss, then backfill"] },
+    { "dot": "amber", "title": "Analytics", "items": ["Never write analytics synchronously on a redirect", "301 under-counts repeat visits; 302 counts every click"] }
+  ]
+}

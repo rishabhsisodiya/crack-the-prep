@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Chat System: WebSocket gateways with cross-node routing",
+    "output": ".archify/build/chat-system/gateway-routing.html",
+    "quality_profile": "showcase",
+    "locale": "en"
+  },
+  "layout": { "mode": "auto" },
+  "components": [
+    { "id": "sender", "type": "frontend", "label": "Sender client", "sublabel": "client message id", "explanation": "Generates a client-side message id before sending, so a retried send is deduplicated by the server instead of creating a duplicate message." },
+    { "id": "gw-a", "type": "backend", "label": "Gateway node A", "sublabel": "stateless, holds sockets", "explanation": "One of many stateless gateway nodes behind a load balancer. The socket layer is disposable; a dropped node is recovered by client replay from the last-seen message id." },
+    { "id": "msg-svc", "type": "backend", "label": "Message service", "sublabel": "persist, then deliver", "explanation": "Persists first, then attempts live delivery, then falls back to push. Persistence-before-delivery is the invariant that makes retries safe." },
+    { "id": "msg-store", "type": "database", "label": "Message store", "sublabel": "sharded by conversation_id", "explanation": "Wide-column store (Cassandra/ScyllaDB family), clustered by a time-sortable Snowflake/ULID id, which gives per-conversation ordering without a global sequence." },
+    { "id": "registry", "type": "database", "label": "Connection registry", "sublabel": "user_id -> gateway_node", "explanation": "Redis or similar. Every write path checks it to find which gateway node holds the recipient's socket." },
+    { "id": "gw-b", "type": "backend", "label": "Gateway node B", "sublabel": "recipient's socket" },
+    { "id": "recipient", "type": "frontend", "label": "Recipient client", "sublabel": "ACKs delivery", "explanation": "ACKs each message. Without an ACK before the timeout, the message is re-sent, or queued for reconnect or push." },
+    { "id": "push", "type": "external", "label": "Push provider", "sublabel": "APNs / FCM" },
+    { "id": "presence", "type": "database", "label": "Presence store", "sublabel": "Redis key with TTL", "explanation": "Refreshed by socket heartbeat. A missing heartbeat means offline; the key expires on its own, so no explicit offline event is needed." }
+  ],
+  "connections": [
+    { "id": "send", "from": "sender", "to": "gw-a", "label": "WSS", "variant": "emphasis" },
+    { "id": "forward", "from": "gw-a", "to": "msg-svc", "label": "message" },
+    { "id": "persist", "from": "msg-svc", "to": "msg-store", "label": "1. persist" },
+    { "id": "lookup", "from": "msg-svc", "to": "registry", "label": "2. find node" },
+    { "id": "route", "from": "msg-svc", "to": "gw-b", "label": "3. recipient on node B", "variant": "emphasis" },
+    { "id": "deliver", "from": "gw-b", "to": "recipient", "label": "WSS", "variant": "emphasis" },
+    { "id": "fallback", "from": "msg-svc", "to": "push", "label": "no live connection", "variant": "dashed" },
+    { "id": "heartbeat", "from": "gw-a", "to": "presence", "label": "heartbeat", "variant": "dashed" }
+  ],
+  "cards": [
+    { "dot": "emerald", "title": "Delivery invariant", "items": ["Persist, then deliver, then wait for ACK", "Reconnect replays everything after the last-seen id"] },
+    { "dot": "cyan", "title": "Scaling", "items": ["Per-conversation ordering only, never global", "Large groups fan out async via a queue partitioned by group_id"] }
+  ]
+}

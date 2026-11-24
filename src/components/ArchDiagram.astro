@@ -1,0 +1,136 @@
+---
+/**
+ * Interactive archify diagram, with the existing Mermaid diagram as its fallback.
+ *
+ * Usage in .mdx:
+ *   <ArchDiagram src="url-shortener/read-write-paths" caption="...">
+ *     <Mermaid code={`flowchart LR ...`} />
+ *   </ArchDiagram>
+ *
+ * `src` is the path under public/diagrams/ without ".html"; build it with
+ * `npm run build:diagrams`. The slot shows when the interactive file can't load,
+ * and in print. The iframe is same-origin (our own generated file), so it can be
+ * sized to its content.
+ */
+interface Props { src: string; caption?: string; title?: string }
+const { src, caption, title } = Astro.props;
+const base = import.meta.env.BASE_URL.replace(/\/$/, '');
+const page = `${base}/diagrams/${src}.html`;
+---
+
+<figure class="arch-fig" data-arch-src={`${page}?theme=dark`}>
+  <div class="arch-frame">
+    <iframe title={title ?? caption ?? 'Interactive architecture diagram'} loading="lazy"></iframe>
+  </div>
+  <div class="arch-fallback"><slot /></div>
+  <figcaption>
+    <span>{caption}</span>
+    <a class="arch-expand" href={`${page}?theme=dark`} target="_blank" rel="noopener">Open full screen ↗</a>
+  </figcaption>
+</figure>
+
+<style>
+  .arch-fig {
+    overflow-x: clip;           /* contains the off-screen fallback */
+    /* Full article column: the rail and TOC beside it are sticky, so no bleed. */
+    width: 100%;
+    margin: 1.8rem 0;
+    position: relative;
+  }
+  .arch-frame {
+    position: relative;
+    border: 1px solid rgba(0, 180, 216, 0.25);
+    border-radius: 10px;
+    overflow: hidden;
+    background: #0c1420;
+  }
+  .arch-frame iframe {
+    display: block;
+    width: 100%;
+    height: 520px;           /* placeholder until the diagram reports its height */
+    border: 0;
+  }
+  .arch-expand {
+    flex: none;
+    color: var(--accent);
+    text-decoration: none;
+    white-space: nowrap;
+  }
+  .arch-expand:hover { text-decoration: underline; }
+  .arch-fig.is-failed .arch-expand { display: none; }
+  /* Laid out but off-screen, not display:none: Mermaid measures text while rendering
+     and draws an empty diagram inside a display:none parent. */
+  .arch-fallback {
+    position: absolute;
+    left: -10000px;
+    top: 0;
+    width: 100%;
+    visibility: hidden;
+  }
+  .arch-fig.is-failed .arch-frame { display: none; }
+  .arch-fig.is-failed .arch-fallback { position: static; visibility: visible; }
+  .arch-fig figcaption {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 1rem;
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    color: var(--muted);
+    margin-top: 0.5rem;
+  }
+  @media print { .arch-expand { display: none; } }
+  /* Keep the Mermaid's own figcaption from doubling ours. */
+  .arch-fallback :global(.mermaid-fig) { margin: 0; }
+  @media print {
+    .arch-frame { display: none; }
+    .arch-fallback { position: static; visibility: visible; }
+  }
+</style>
+
+<script>
+  const LOAD_TIMEOUT_MS = 15000;
+  // Inline only: drop archify's credit footer to save space. The full-screen page keeps it.
+  const INLINE_CSS = '.page-feedback { display: none !important; }';
+
+  function fail(fig: HTMLElement) {
+    fig.classList.add('is-failed');
+  }
+
+  function fitHeight(iframe: HTMLIFrameElement) {
+    const doc = iframe.contentDocument;
+    if (!doc) return;
+    const h = Math.ceil(doc.documentElement.scrollHeight);
+    if (h > 0) iframe.style.height = `${h}px`;
+  }
+
+  function mount(fig: HTMLElement) {
+    const iframe = fig.querySelector('iframe');
+    const url = fig.dataset.archSrc;
+    if (!iframe || !url) return fail(fig);
+
+    const timer = window.setTimeout(() => fail(fig), LOAD_TIMEOUT_MS);
+    iframe.addEventListener('load', () => {
+      window.clearTimeout(timer);
+      const doc = iframe.contentDocument;
+      // A 404 page or anything that is not an archify diagram falls back to Mermaid.
+      if (!doc || !doc.querySelector('svg')) return fail(fig);
+      const style = doc.createElement('style');
+      style.textContent = INLINE_CSS;
+      doc.head.appendChild(style);
+      fitHeight(iframe);
+      new ResizeObserver(() => fitHeight(iframe)).observe(doc.body);
+    }, { once: true });
+    iframe.src = url;
+  }
+
+  const figs = document.querySelectorAll<HTMLElement>('.arch-fig[data-arch-src]');
+  const io = new IntersectionObserver((entries) => {
+    for (const e of entries) {
+      if (!e.isIntersecting) continue;
+      io.unobserve(e.target);
+      mount(e.target as HTMLElement);
+    }
+  }, { rootMargin: '400px 0px' });
+  figs.forEach((f) => io.observe(f));
+</script>

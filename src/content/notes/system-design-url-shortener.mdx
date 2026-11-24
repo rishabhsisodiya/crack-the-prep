@@ -10,6 +10,7 @@ description: "Designing a URL shortener from requirements through code-generatio
 
 import Callout from '../../components/Callout.astro';
 import Mermaid from '../../components/Mermaid.astro';
+import ArchDiagram from '../../components/ArchDiagram.astro';
 
 Part of the [system design](/prep/system-design) series. See the [framework](/prep/system-design) and [building blocks](/prep/system-design/building-blocks) first if you haven't.
 
@@ -28,7 +29,8 @@ Part of the [system design](/prep/system-design) series. See the [framework](/pr
 
 ## 2. High-level architecture
 
-<Mermaid caption="Write and read paths are asymmetric — this is the whole design" code={`flowchart LR
+<ArchDiagram src="url-shortener/read-write-paths" caption="Write and read paths are asymmetric — this is the whole design">
+<Mermaid code={`flowchart LR
   W[Client: create] --> LB1[Load Balancer]
   LB1 --> WS[Write service]
   WS --> IDG[ID generator<br/>range-allocated counters]
@@ -40,6 +42,7 @@ Part of the [system design](/prep/system-design) series. See the [framework](/pr
   RS -.async click event.-> STREAM[[Kafka / Kinesis]]
   STREAM --> AGG[Analytics aggregator]
 `} />
+</ArchDiagram>
 
 Write and read paths deserve to be *separate services* even before you separate them physically: the write path cares about correctness and uniqueness, the read path cares about latency and cache hit rate, and they should be able to scale independently. At the scale most interviewers expect (100M new links/month, ~40 writes/sec, but 4,000+ redirects/sec at a 100:1 ratio), the read service is the one you spend your scaling budget on.
 
